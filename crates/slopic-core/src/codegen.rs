@@ -170,7 +170,11 @@ impl<'a> Generator<'a> {
                     .map(|test| &test.function),
             )
         {
-            for instruction in function.blocks.iter().flat_map(|block| &block.instructions) {
+            for instruction in function
+                .blocks
+                .iter()
+                .flat_map(|block| block.instructions())
+            {
                 if let Instruction::StringNew { value, .. } = instruction {
                     self.intern(value);
                 }
@@ -281,7 +285,7 @@ impl<'a> Generator<'a> {
         symbol: &str,
         epilogue: &str,
     ) {
-        for instruction in &block.instructions {
+        for instruction in block.instructions() {
             self.instruction(function, instruction);
         }
         match &block.terminator {

@@ -128,6 +128,8 @@ mkdir -p "$emit_dir"
 "$compiler" "$basic_source" --source-root "$basic_project/src" \
   --emit mir --output "$emit_dir/basics.mir.json"
 "$compiler" "$basic_source" --source-root "$basic_project/src" \
+  --emit mir-text --output "$emit_dir/basics.mir.txt"
+"$compiler" "$basic_source" --source-root "$basic_project/src" \
   --emit asm --output "$emit_dir/basics-assembly.s"
 "$compiler" "$basic_source" --source-root "$basic_project/src" \
   --emit obj --output "$emit_dir/basics-object.o"
@@ -144,12 +146,16 @@ fi
 "$emit_dir/basics-tests" >"$emit_dir/basics-tests.stdout"
 assert_patterns <(printf '%s\n' ' ... ok') "$emit_dir/basics-tests.stdout"
 for output in "$emit_dir/basics.hir.json" "$emit_dir/basics.mir.json" \
-  "$emit_dir/basics-assembly.s" "$emit_dir/basics-object.o"; do
+  "$emit_dir/basics.mir.txt" "$emit_dir/basics-assembly.s" \
+  "$emit_dir/basics-object.o"; do
   if [[ ! -s "$output" ]]; then
     echo "project-tests: slopic produced an empty $(basename "$output")" >&2
     exit 1
   fi
 done
+# The readable dump must actually contain blocks and source locations, not
+# just be non-empty.
+assert_patterns <(printf '%s\n' 'bb0:' 'return' '// ') "$emit_dir/basics.mir.txt"
 
 set +e
 "$compiler" "$projects_dir/compile-fail/ownership-move/src/main.slp" \

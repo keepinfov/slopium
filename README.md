@@ -114,7 +114,13 @@ slopic examples/ownership.slp --emit check
 ```sh
 slopic examples/structs.slp --emit hir -o /tmp/structs.hir.json
 slopic examples/structs.slp --emit mir -o /tmp/structs.mir.json
+slopic examples/structs.slp --emit mir-text
 ```
+
+`--emit mir-text` печатает MIR в читаемом виде: локальные переменные с типами,
+базовые блоки, терминаторы и позиция в исходнике для каждой инструкции. HIR и
+MIR — отладочный вывод без гарантий совместимости; их формат может меняться
+между версиями.
 
 Получить assembly или object-файл:
 

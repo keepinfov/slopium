@@ -187,7 +187,7 @@ pub fn live_intervals(function: &MirFunction, cfg: &Cfg) -> Vec<Interval> {
     let mut position = 0usize;
     for &block in order {
         position_of_block[block] = Some(position);
-        position += function.blocks[block].instructions.len() + 1;
+        position += function.blocks[block].statements.len() + 1;
         block_end[block] = position;
     }
 
@@ -200,7 +200,7 @@ pub fn live_intervals(function: &MirFunction, cfg: &Cfg) -> Vec<Interval> {
     let mut buffer = Vec::new();
     for &block in order {
         let mut at = position_of_block[block].expect("block is in the order");
-        for instruction in &function.blocks[block].instructions {
+        for instruction in function.blocks[block].instructions() {
             buffer.clear();
             uses(instruction, &mut buffer);
             for local in buffer.iter().copied() {
@@ -281,10 +281,7 @@ mod tests {
     }
 
     fn block(instructions: Vec<Instruction>, terminator: Terminator) -> BasicBlock {
-        BasicBlock {
-            instructions,
-            terminator,
-        }
+        BasicBlock::synthetic(instructions, terminator)
     }
 
     #[test]

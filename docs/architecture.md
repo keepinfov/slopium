@@ -25,10 +25,24 @@ command-line protocol is internal and versioned.
 6. Reachability-driven monomorphization materializes concrete generic
    functions and aggregate layouts.
 7. Lowering produces whole-package target-independent MIR with locals, basic
-   blocks, explicit moves, borrows, loops, calls, and structural drops.
+   blocks, explicit moves, borrows, loops, calls, and structural drops. Every
+   statement carries the span of the expression it came from, and every block
+   is terminated by construction.
 8. An optional release pass folds constants.
-9. A `Backend` partitions MIR by owner module and consumes `MirModule` plus a
-   `TargetSpec`.
+9. A verifier checks the result of each pass: identifier ranges, parameter
+   layout, call arity, operand types, and that every read has a reaching
+   definition. It reports `SL0700` internal errors rather than panicking, and
+   runs in debug builds or under `SLOPIUM_VERIFY_MIR=1`.
+10. A `Backend` partitions MIR by owner module and consumes `MirModule` plus a
+    `TargetSpec`.
+
+MIR keeps numbered locals rather than SSA form. The `cfg` module derives what
+SSA would have carried implicitly — successors, predecessors, reverse
+postorder, reachability, def/use, and live intervals — which is what a
+linear-scan register allocator needs. Drop elaboration is fused into lowering:
+the builder compares per-branch liveness maps and inserts drops at merges, so
+ownership correctness lives in the lowering code rather than in a later pass.
+`--emit mir-text` renders the whole module for reading.
 
 The first `Backend` uses stack slots and emits Intel-syntax x86-64 assembly for
 the System V AMD64 ABI. Adding an architecture means implementing another

@@ -5,6 +5,7 @@ pub mod codegen;
 pub mod diagnostic;
 pub mod lexer;
 pub mod mir;
+pub mod mir_print;
 pub mod package;
 pub mod parser;
 pub mod sema;
@@ -60,6 +61,8 @@ pub enum EmitKind {
     Check,
     Hir,
     Mir,
+    /// Same MIR as [`EmitKind::Mir`], rendered for humans instead of machines.
+    MirText,
     Assembly,
     Object,
     Executable,
@@ -250,6 +253,10 @@ pub fn compile(request: &CompileRequest) -> CompileResult<Option<PathBuf>> {
         EmitKind::Mir => {
             let mir = compile_request_to_mir(request, &file, &source)?;
             write_json(request, &mir)
+        }
+        EmitKind::MirText => {
+            let mir = compile_request_to_mir(request, &file, &source)?;
+            write_text(request, &mir_print::render_module(&mir))
         }
         EmitKind::Assembly => {
             let assembly = compile_request_to_assembly(request, &file, &source)?;
@@ -547,6 +554,20 @@ fn write_json<T: Serialize>(request: &CompileRequest, value: &T) -> CompileResul
         Ok(Some(output.clone()))
     } else {
         println!("{}", String::from_utf8_lossy(&bytes));
+        Ok(None)
+    }
+}
+
+fn write_text(request: &CompileRequest, text: &str) -> CompileResult<Option<PathBuf>> {
+    if let Some(output) = &request.output {
+        write_output(
+            &request.input.display().to_string(),
+            output,
+            text.as_bytes(),
+        )?;
+        Ok(Some(output.clone()))
+    } else {
+        print!("{text}");
         Ok(None)
     }
 }

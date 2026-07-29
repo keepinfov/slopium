@@ -65,8 +65,47 @@ pub struct MirLocal {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct BasicBlock {
-    pub instructions: Vec<Instruction>,
+    pub statements: Vec<Statement>,
     pub terminator: Terminator,
+    /// Source location of the construct that produced the terminator.
+    pub terminator_span: Span,
+}
+
+impl BasicBlock {
+    /// A block whose instructions have no source location.
+    ///
+    /// For passes and tests that synthesise blocks; lowering goes through
+    /// `Builder::emit`, which attaches real spans.
+    pub fn synthetic(instructions: Vec<Instruction>, terminator: Terminator) -> Self {
+        Self {
+            statements: instructions
+                .into_iter()
+                .map(|instruction| Statement {
+                    instruction,
+                    span: Span::default(),
+                })
+                .collect(),
+            terminator,
+            terminator_span: Span::default(),
+        }
+    }
+
+    /// The instructions in this block, without their source locations.
+    pub fn instructions(&self) -> impl Iterator<Item = &Instruction> {
+        self.statements
+            .iter()
+            .map(|statement| &statement.instruction)
+    }
+}
+
+/// One instruction together with the source it came from.
+///
+/// Spans are carried per instruction so a later milestone can emit DWARF line
+/// tables; nothing in code generation reads them yet.
+#[derive(Clone, Debug, Serialize)]
+pub struct Statement {
+    pub instruction: Instruction,
+    pub span: Span,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -215,8 +254,10 @@ pub fn optimize(module: &mut MirModule) {
     {
         for block in &mut function.blocks {
             let mut constants = HashMap::<LocalId, Constant>::new();
-            let mut optimized = Vec::with_capacity(block.instructions.len());
-            for instruction in block.instructions.drain(..) {
+            let mut optimized = Vec::with_capacity(block.statements.len());
+            for statement in block.statements.drain(..) {
+                let instruction = statement.instruction;
+                let span = statement.span;
                 let replacement = match &instruction {
                     Instruction::ConstInt { dst, value } => {
                         constants.insert(*dst, Constant::Int(*value));
@@ -275,9 +316,15 @@ pub fn optimize(module: &mut MirModule) {
                     }
                     Instruction::Drop { .. } | Instruction::Free { .. } => None,
                 };
-                optimized.push(replacement.unwrap_or(instruction));
+                // Folding rewrites the instruction but keeps the source it came
+                // from, so a later line table still points at the original
+                // expression rather than losing it.
+                optimized.push(Statement {
+                    instruction: replacement.unwrap_or(instruction),
+                    span,
+                });
             }
-            block.instructions = optimized;
+            block.statements = optimized;
         }
     }
 }
@@ -413,8 +460,9 @@ struct Value {
 /// lowering uses "has no terminator yet" to mean "this block is still open";
 /// `Builder::finish` seals whatever is left into a real [`BasicBlock`].
 struct BuilderBlock {
-    instructions: Vec<Instruction>,
+    statements: Vec<Statement>,
     terminator: Option<Terminator>,
+    terminator_span: Span,
 }
 
 struct Builder {
@@ -435,6 +483,11 @@ struct Builder {
     live: BTreeMap<BindingId, bool>,
     scopes: Vec<Vec<BindingId>>,
     loop_targets: Vec<LoopTarget>,
+    /// Source location of the expression currently being lowered.
+    ///
+    /// `expr` maintains this around its recursion so that `emit` can attach a
+    /// span without every one of its call sites having to pass one.
+    current_span: Span,
 }
 
 #[derive(Clone, Copy)]
@@ -453,14 +506,16 @@ impl Builder {
             params: Vec::new(),
             locals: Vec::new(),
             blocks: vec![BuilderBlock {
-                instructions: Vec::new(),
+                statements: Vec::new(),
                 terminator: None,
+                terminator_span: span,
             }],
             current: 0,
             bindings: HashMap::new(),
             live: BTreeMap::new(),
             scopes: Vec::new(),
             loop_targets: Vec::new(),
+            current_span: span,
         }
     }
 
@@ -475,8 +530,9 @@ impl Builder {
                 .blocks
                 .into_iter()
                 .map(|block| BasicBlock {
-                    instructions: block.instructions,
+                    statements: block.statements,
                     terminator: block.terminator.unwrap_or(Terminator::Unreachable),
+                    terminator_span: block.terminator_span,
                 })
                 .collect(),
             entry: 0,
@@ -495,19 +551,43 @@ impl Builder {
     }
 
     fn emit(&mut self, instruction: Instruction) {
-        self.blocks[self.current].instructions.push(instruction);
+        let block = self.current;
+        self.emit_in(block, instruction);
+    }
+
+    /// Appends to a block that is not the current one. Used by the merge points
+    /// that retroactively drop a binding on the branch that still owns it.
+    fn emit_in(&mut self, block: BlockId, instruction: Instruction) {
+        let span = self.current_span;
+        self.blocks[block]
+            .statements
+            .push(Statement { instruction, span });
     }
 
     fn block(&mut self) -> BlockId {
         let id = self.blocks.len();
         self.blocks.push(BuilderBlock {
-            instructions: Vec::new(),
+            statements: Vec::new(),
             terminator: None,
+            terminator_span: self.current_span,
         });
         id
     }
 
+    /// Lowers an expression, scoping [`Builder::current_span`] to it.
+    ///
+    /// The span must be restored afterwards, not merely set on entry: once a
+    /// subexpression returns, later instructions belong to the enclosing
+    /// expression again, and leaving the child's span in place would attribute
+    /// them to the wrong line.
     fn expr(&mut self, expr: &TExpr) -> Option<Value> {
+        let enclosing = std::mem::replace(&mut self.current_span, expr.span);
+        let value = self.expr_kind(expr);
+        self.current_span = enclosing;
+        value
+    }
+
+    fn expr_kind(&mut self, expr: &TExpr) -> Option<Value> {
         match &expr.kind {
             TExprKind::Unit => None,
             TExprKind::Bool(value) => {
@@ -828,6 +908,9 @@ impl Builder {
         let Some(target) = self.loop_targets.last().copied() else {
             return;
         };
+        // Collect before emitting: `emit` needs `&mut self`, and the scope walk
+        // holds an immutable borrow. Order is unchanged.
+        let mut pending = Vec::new();
         for scope in self.scopes.iter().skip(target.scope_depth).rev() {
             for id in scope.iter().rev() {
                 if !self.live.get(id).copied().unwrap_or(false) {
@@ -836,11 +919,12 @@ impl Builder {
                 let local = self.bindings[id];
                 let ty = self.locals[local].ty.clone();
                 if !ty.is_copy() {
-                    self.blocks[self.current]
-                        .instructions
-                        .push(Instruction::Drop { local, ty });
+                    pending.push(Instruction::Drop { local, ty });
                 }
             }
+        }
+        for instruction in pending {
+            self.emit(instruction);
         }
         self.blocks[self.current].terminator = Some(Terminator::Goto(if continuing {
             target.continue_block
@@ -977,9 +1061,7 @@ impl Builder {
                 let ty = self.locals[local].ty.clone();
                 if !ty.is_copy() {
                     let block = if then_has { then_end } else { else_end };
-                    self.blocks[block]
-                        .instructions
-                        .push(Instruction::Drop { local, ty });
+                    self.emit_in(block, Instruction::Drop { local, ty });
                 }
             }
             self.live.insert(id, then_has && else_has);
@@ -1229,9 +1311,7 @@ impl Builder {
                         let local = self.bindings[&id];
                         let ty = self.locals[local].ty.clone();
                         if !ty.is_copy() {
-                            self.blocks[*block]
-                                .instructions
-                                .push(Instruction::Drop { local, ty });
+                            self.emit_in(*block, Instruction::Drop { local, ty });
                         }
                     }
                 }
@@ -1297,7 +1377,7 @@ mod tests {
         let has_drop = mir.functions[0]
             .blocks
             .iter()
-            .flat_map(|block| &block.instructions)
+            .flat_map(|block| block.instructions())
             .any(|inst| {
                 matches!(
                     inst,
@@ -1323,7 +1403,7 @@ mod tests {
         let pair_drops = mir.functions[0]
             .blocks
             .iter()
-            .flat_map(|block| &block.instructions)
+            .flat_map(|block| block.instructions())
             .filter(|instruction| {
                 matches!(
                     instruction,
@@ -1376,8 +1456,7 @@ mod tests {
             .iter()
             .map(|block| {
                 block
-                    .instructions
-                    .iter()
+                    .instructions()
                     .filter_map(|instruction| match instruction {
                         Instruction::Drop { local, .. } => Some(*local),
                         _ => None,
@@ -1400,12 +1479,88 @@ mod tests {
             },
         )
         .unwrap();
-        let instructions = &mir.functions[0].blocks[0].instructions;
-        assert!(instructions
-            .iter()
+        let block = &mir.functions[0].blocks[0];
+        assert!(block
+            .instructions()
             .any(|inst| matches!(inst, Instruction::ConstInt { value: 42, .. })));
-        assert!(!instructions
-            .iter()
+        assert!(!block
+            .instructions()
             .any(|inst| matches!(inst, Instruction::Binary { .. })));
+    }
+
+    #[test]
+    fn statements_carry_the_span_of_the_expression_that_produced_them() {
+        // `20` and `22` sit on different lines, so their statements must report
+        // different lines. This is the data a DWARF line table will consume.
+        let source = "(fn main () -> i32\n  (+ 20\n     22))";
+        let mir = compile_to_mir("test.slp", source, &CompileOptions::default()).unwrap();
+        let lines = mir.functions[0]
+            .blocks
+            .iter()
+            .flat_map(|block| &block.statements)
+            .filter(|statement| matches!(statement.instruction, Instruction::ConstInt { .. }))
+            .map(|statement| statement.span.line)
+            .collect::<Vec<_>>();
+        assert_eq!(lines, vec![2, 3], "each constant keeps its own line");
+    }
+
+    #[test]
+    fn merge_drops_inherit_the_enclosing_expression_span() {
+        // Drops inserted at a branch merge have no expression of their own.
+        // They must still land on the enclosing `if`, not at offset zero.
+        let source = r#"
+            (fn take ((s String)) -> i32 0)
+            (fn main () -> i32
+              (let a "aaa")
+              (if true (do (take a) 0) 0))
+        "#;
+        let mir = compile_to_mir("test.slp", source, &CompileOptions::default()).unwrap();
+        let main = mir
+            .functions
+            .iter()
+            .find(|function| function.name.contains("main"))
+            .expect("main was lowered");
+        let drops = main
+            .blocks
+            .iter()
+            .flat_map(|block| &block.statements)
+            .filter(|statement| matches!(statement.instruction, Instruction::Drop { .. }))
+            .collect::<Vec<_>>();
+        assert!(!drops.is_empty(), "the string must be dropped");
+        for statement in drops {
+            assert!(
+                statement.span.line > 1,
+                "a merge drop lost its span: {:?}",
+                statement.span
+            );
+        }
+    }
+
+    #[test]
+    fn folding_preserves_the_original_span() {
+        let source = "(fn main () -> i32\n  (+ 20 22))";
+        let mir = compile_to_mir(
+            "test.slp",
+            source,
+            &CompileOptions {
+                optimize: true,
+                ..CompileOptions::default()
+            },
+        )
+        .unwrap();
+        let folded = mir.functions[0].blocks[0]
+            .statements
+            .iter()
+            .find(|statement| {
+                matches!(
+                    statement.instruction,
+                    Instruction::ConstInt { value: 42, .. }
+                )
+            })
+            .expect("the sum was folded");
+        assert_eq!(
+            folded.span.line, 2,
+            "the folded constant keeps the span of the expression it replaced"
+        );
     }
 }

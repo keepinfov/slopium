@@ -124,7 +124,7 @@ fn verify_block_operands(
     report: &mut impl FnMut(String),
 ) {
     let mut read = Vec::new();
-    for (position, instruction) in block.instructions.iter().enumerate() {
+    for (position, instruction) in block.instructions().enumerate() {
         read.clear();
         uses(instruction, &mut read);
         for local in read.iter().copied().chain(defs(instruction)) {
@@ -258,7 +258,7 @@ fn check_initialization(
             let Some(mut defined) = entry_defined[block].clone() else {
                 continue;
             };
-            for instruction in &function.blocks[block].instructions {
+            for instruction in function.blocks[block].instructions() {
                 if let Some(local) = defs(instruction) {
                     if local < locals {
                         defined[local] = true;
@@ -300,7 +300,7 @@ fn check_initialization(
         let Some(mut defined) = entry_defined[block].clone() else {
             continue;
         };
-        for (position, instruction) in function.blocks[block].instructions.iter().enumerate() {
+        for (position, instruction) in function.blocks[block].instructions().enumerate() {
             read.clear();
             uses(instruction, &mut read);
             for local in read.iter().copied() {
@@ -472,10 +472,7 @@ mod tests {
     #[test]
     fn rejects_a_successor_out_of_range() {
         let mir = module_with(probe(
-            vec![BasicBlock {
-                instructions: Vec::new(),
-                terminator: Terminator::Goto(7),
-            }],
+            vec![BasicBlock::synthetic(Vec::new(), Terminator::Goto(7))],
             1,
         ));
         let errors = verify_module("test.slp", &mir);
@@ -491,10 +488,10 @@ mod tests {
     #[test]
     fn rejects_a_local_out_of_range() {
         let mir = module_with(probe(
-            vec![BasicBlock {
-                instructions: vec![Instruction::Assign { dst: 0, src: 9 }],
-                terminator: Terminator::Return(None),
-            }],
+            vec![BasicBlock::synthetic(
+                vec![Instruction::Assign { dst: 0, src: 9 }],
+                Terminator::Return(None),
+            )],
             1,
         ));
         let errors = verify_module("test.slp", &mir);
@@ -507,10 +504,10 @@ mod tests {
     #[test]
     fn rejects_a_read_before_definition() {
         let mir = module_with(probe(
-            vec![BasicBlock {
-                instructions: vec![Instruction::Assign { dst: 0, src: 1 }],
-                terminator: Terminator::Return(Some(0)),
-            }],
+            vec![BasicBlock::synthetic(
+                vec![Instruction::Assign { dst: 0, src: 1 }],
+                Terminator::Return(Some(0)),
+            )],
             2,
         ));
         let errors = verify_module("test.slp", &mir);
@@ -526,29 +523,23 @@ mod tests {
     fn defined_on_one_branch_only() -> MirFunction {
         probe(
             vec![
-                BasicBlock {
-                    instructions: vec![Instruction::ConstBool {
+                BasicBlock::synthetic(
+                    vec![Instruction::ConstBool {
                         dst: 0,
                         value: true,
                     }],
-                    terminator: Terminator::Branch {
+                    Terminator::Branch {
                         condition: 0,
                         then_block: 1,
                         else_block: 2,
                     },
-                },
-                BasicBlock {
-                    instructions: vec![Instruction::ConstInt { dst: 1, value: 1 }],
-                    terminator: Terminator::Goto(3),
-                },
-                BasicBlock {
-                    instructions: Vec::new(),
-                    terminator: Terminator::Goto(3),
-                },
-                BasicBlock {
-                    instructions: Vec::new(),
-                    terminator: Terminator::Return(Some(1)),
-                },
+                ),
+                BasicBlock::synthetic(
+                    vec![Instruction::ConstInt { dst: 1, value: 1 }],
+                    Terminator::Goto(3),
+                ),
+                BasicBlock::synthetic(Vec::new(), Terminator::Goto(3)),
+                BasicBlock::synthetic(Vec::new(), Terminator::Return(Some(1))),
             ],
             2,
         )
@@ -607,8 +598,8 @@ mod tests {
     #[test]
     fn rejects_a_call_arity_mismatch() {
         let mir = module_with(probe(
-            vec![BasicBlock {
-                instructions: vec![
+            vec![BasicBlock::synthetic(
+                vec![
                     Instruction::ConstInt { dst: 0, value: 1 },
                     Instruction::Call {
                         dst: 1,
@@ -618,8 +609,8 @@ mod tests {
                         result: Type::I64,
                     },
                 ],
-                terminator: Terminator::Return(Some(1)),
-            }],
+                Terminator::Return(Some(1)),
+            )],
             2,
         ));
         let errors = verify_module("test.slp", &mir);
@@ -634,10 +625,7 @@ mod tests {
     #[test]
     fn rejects_a_mismatched_parameter_list() {
         let mut function = probe(
-            vec![BasicBlock {
-                instructions: Vec::new(),
-                terminator: Terminator::Return(None),
-            }],
+            vec![BasicBlock::synthetic(Vec::new(), Terminator::Return(None))],
             2,
         );
         function.params = vec![1];
@@ -653,8 +641,8 @@ mod tests {
     #[test]
     fn accepts_arithmetic_and_rejects_it_on_a_non_numeric_type() {
         let good = module_with(probe(
-            vec![BasicBlock {
-                instructions: vec![
+            vec![BasicBlock::synthetic(
+                vec![
                     Instruction::ConstInt { dst: 0, value: 1 },
                     Instruction::Binary {
                         dst: 1,
@@ -664,15 +652,15 @@ mod tests {
                         ty: Type::I64,
                     },
                 ],
-                terminator: Terminator::Return(Some(1)),
-            }],
+                Terminator::Return(Some(1)),
+            )],
             2,
         ));
         assert_eq!(verify_module("test.slp", &good), Vec::new());
 
         let bad = module_with(probe(
-            vec![BasicBlock {
-                instructions: vec![
+            vec![BasicBlock::synthetic(
+                vec![
                     Instruction::StringNew {
                         dst: 0,
                         value: "x".into(),
@@ -685,8 +673,8 @@ mod tests {
                         ty: Type::String,
                     },
                 ],
-                terminator: Terminator::Return(Some(1)),
-            }],
+                Terminator::Return(Some(1)),
+            )],
             2,
         ));
         assert!(verify_module("test.slp", &bad)
