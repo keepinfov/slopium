@@ -28,7 +28,13 @@ command-line protocol is internal and versioned.
    blocks, explicit moves, borrows, loops, calls, and structural drops. Every
    statement carries the span of the expression it came from, and every block
    is terminated by construction.
-8. An optional release pass folds constants.
+8. The release profile runs an optimization pipeline to a fixpoint: bounded
+   inlining, cross-block constant propagation, control-flow simplification, and
+   dead code elimination. Two behaviours are preserved by construction —
+   arithmetic that would trap is never folded away or removed, and drops are
+   never deleted or moved across a branch. Inlining does not cross a module
+   boundary, because a module's object is cached on its own body and would go
+   stale if it contained a copy of another module's code.
 9. A verifier checks the result of each pass: identifier ranges, parameter
    layout, call arity, operand types, and that every read has a reaching
    definition. It reports `SL0700` internal errors rather than panicking, and

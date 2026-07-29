@@ -6,6 +6,7 @@ pub mod diagnostic;
 pub mod lexer;
 pub mod mir;
 pub mod mir_print;
+pub mod opt;
 pub mod package;
 pub mod parser;
 pub mod sema;
@@ -127,8 +128,7 @@ pub fn compile_to_mir(
     let mut module = mir::lower(&program);
     verify::check(file, &module, "lowering")?;
     if options.optimize {
-        mir::optimize(&mut module);
-        verify::check(file, &module, "constant folding")?;
+        opt::optimize(file, &mut module)?;
     }
     Ok(module)
 }
@@ -147,8 +147,7 @@ pub fn compile_package_to_mir(
         partition_codegen(&mut module, input, selected);
     }
     if options.optimize {
-        mir::optimize(&mut module);
-        verify::check(&input.name, &module, "constant folding")?;
+        opt::optimize(&input.name, &mut module)?;
     }
     Ok(module)
 }

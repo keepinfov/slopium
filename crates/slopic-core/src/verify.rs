@@ -81,6 +81,15 @@ fn verify_function(
         ));
         return;
     }
+    if function.entry != 0 {
+        // Code generation emits blocks in index order and falls through into
+        // the first one after storing parameters; it never jumps to the entry.
+        // A pass that renumbers blocks must keep the entry at index zero.
+        report(format!(
+            "entry is block {}; code generation requires block 0",
+            function.entry
+        ));
+    }
 
     // Parameters must be the leading locals, in order, and flagged as such.
     // Code generation relies on this when it stores incoming argument

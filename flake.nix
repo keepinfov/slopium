@@ -14,7 +14,7 @@
           pkgs = import nixpkgs { inherit system; };
           toolchain = pkgs.rustPlatform.buildRustPackage {
             pname = "slopium";
-            version = "0.3.0";
+            version = "0.3.1";
             src = pkgs.lib.cleanSourceWith {
               src = ./.;
               filter = path: type:
