@@ -17,7 +17,8 @@ Code families are stable:
 - `SL03xx`: ownership and borrowing;
 - `SL04xx`: pattern matching and entry/test rules;
 - `SL05xx`: target and ABI backend;
-- `SL06xx`: compiler I/O and external toolchain.
+- `SL06xx`: compiler I/O and external toolchain;
+- `SL07xx`: internal compiler errors.
 
 The v0.2 package and language-core diagnostics reserve:
 
@@ -25,6 +26,12 @@ The v0.2 package and language-core diagnostics reserve:
 - `SL0451`: dependency graph or manifest dependency;
 - `SL0452`: generic declaration or instantiation;
 - `SL0453`: standard-library language-item contract.
+
+`SL0700` reports a failed internal consistency check, such as MIR verification.
+It is never caused by the source being wrong, only by a compiler bug, and
+should be reported as one. MIR verification runs in debug builds and whenever
+`SLOPIUM_VERIFY_MIR=1` is set, so a release compiler can be checked without
+paying for the analysis by default.
 
 Compile-fail fixtures store expected codes and primary byte/line spans
 separately from rendered stderr. Intentional snapshot updates require:

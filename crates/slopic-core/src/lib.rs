@@ -1,5 +1,6 @@
 pub mod analysis;
 pub mod ast;
+pub mod cfg;
 pub mod codegen;
 pub mod diagnostic;
 pub mod lexer;
@@ -8,6 +9,7 @@ pub mod package;
 pub mod parser;
 pub mod sema;
 pub mod syntax;
+pub mod verify;
 
 use crate::codegen::{CodegenOptions, SUPPORTED_TARGET};
 use crate::diagnostic::{codes, CompileResult, Diagnostic};
@@ -118,29 +120,34 @@ pub fn compile_to_mir(
     source: &str,
     options: &CompileOptions,
 ) -> CompileResult<MirModule> {
-    compile_to_hir(file, source, options).map(|program| {
-        let mut module = mir::lower(&program);
-        if options.optimize {
-            mir::optimize(&mut module);
-        }
-        module
-    })
+    let program = compile_to_hir(file, source, options)?;
+    let mut module = mir::lower(&program);
+    verify::check(file, &module, "lowering")?;
+    if options.optimize {
+        mir::optimize(&mut module);
+        verify::check(file, &module, "constant folding")?;
+    }
+    Ok(module)
 }
 
 pub fn compile_package_to_mir(
     input: &package::PackageInput,
     options: &CompileOptions,
 ) -> CompileResult<MirModule> {
-    package::compile_package_to_hir(input, options).map(|program| {
-        let mut module = mir::lower(&program);
-        if let Some(selected) = &options.codegen_module {
-            partition_codegen(&mut module, input, selected);
-        }
-        if options.optimize {
-            mir::optimize(&mut module);
-        }
-        module
-    })
+    let program = package::compile_package_to_hir(input, options)?;
+    let mut module = mir::lower(&program);
+    verify::check(&input.name, &module, "lowering")?;
+    // `partition_codegen` only flips `emit` flags, so it cannot invalidate any
+    // verified invariant and is not worth a second pass — this runs once per
+    // owner module per build.
+    if let Some(selected) = &options.codegen_module {
+        partition_codegen(&mut module, input, selected);
+    }
+    if options.optimize {
+        mir::optimize(&mut module);
+        verify::check(&input.name, &module, "constant folding")?;
+    }
+    Ok(module)
 }
 
 pub fn compile_to_assembly(

@@ -22,6 +22,7 @@ pub mod codes {
     pub const INPUT_IO: &str = "SL0600";
     pub const OUTPUT_IO: &str = "SL0601";
     pub const TOOLCHAIN: &str = "SL0602";
+    pub const INTERNAL: &str = "SL0700";
 
     pub const ALL: &[(&str, &str)] = &[
         (UNKNOWN_ESCAPE, "unknown string escape"),
@@ -43,6 +44,7 @@ pub mod codes {
         (INPUT_IO, "compiler input error"),
         (OUTPUT_IO, "compiler output error"),
         (TOOLCHAIN, "external toolchain error"),
+        (INTERNAL, "internal compiler error"),
     ];
 }
 

@@ -285,7 +285,7 @@ impl<'a> Generator<'a> {
             self.instruction(function, instruction);
         }
         match &block.terminator {
-            Some(Terminator::Return(value)) => {
+            Terminator::Return(value) => {
                 if let Some(local) = value {
                     if function.locals[*local].ty == Type::F64 {
                         writeln!(self.output, "  movq xmm0, QWORD PTR {}", slot(*local)).unwrap();
@@ -297,19 +297,19 @@ impl<'a> Generator<'a> {
                 }
                 writeln!(self.output, "  jmp {epilogue}").unwrap();
             }
-            Some(Terminator::Goto(target)) => {
+            Terminator::Goto(target) => {
                 writeln!(self.output, "  jmp .L{}_bb{}", symbol, target).unwrap();
             }
-            Some(Terminator::Branch {
+            Terminator::Branch {
                 condition,
                 then_block,
                 else_block,
-            }) => {
+            } => {
                 writeln!(self.output, "  cmp QWORD PTR {}, 0", slot(*condition)).unwrap();
                 writeln!(self.output, "  jne .L{}_bb{}", symbol, then_block).unwrap();
                 writeln!(self.output, "  jmp .L{}_bb{}", symbol, else_block).unwrap();
             }
-            None => writeln!(self.output, "  ud2").unwrap(),
+            Terminator::Unreachable => writeln!(self.output, "  ud2").unwrap(),
         }
     }
 

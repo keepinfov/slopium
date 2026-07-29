@@ -4,7 +4,7 @@ use crate::sema::{
     BindingId, TExpr, TExprKind, TMatchArm, TPattern, TypedFunction, TypedProgram, TypedTest,
 };
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 pub type LocalId = usize;
 pub type BlockId = usize;
@@ -66,7 +66,7 @@ pub struct MirLocal {
 #[derive(Clone, Debug, Serialize)]
 pub struct BasicBlock {
     pub instructions: Vec<Instruction>,
-    pub terminator: Option<Terminator>,
+    pub terminator: Terminator,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -163,6 +163,10 @@ pub enum Terminator {
         then_block: BlockId,
         else_block: BlockId,
     },
+    /// Control flow cannot reach the end of this block. Lowering leaves a block
+    /// unterminated only when it is dead, so `finish` seals those blocks here
+    /// rather than letting an absent terminator stay representable.
+    Unreachable,
 }
 
 pub fn lower(program: &TypedProgram) -> MirModule {
@@ -405,16 +409,30 @@ struct Value {
     owned_temporary: bool,
 }
 
+/// A block under construction. `terminator` stays optional here because
+/// lowering uses "has no terminator yet" to mean "this block is still open";
+/// `Builder::finish` seals whatever is left into a real [`BasicBlock`].
+struct BuilderBlock {
+    instructions: Vec<Instruction>,
+    terminator: Option<Terminator>,
+}
+
 struct Builder {
     name: String,
     return_type: Type,
     span: Span,
     params: Vec<LocalId>,
     locals: Vec<MirLocal>,
-    blocks: Vec<BasicBlock>,
+    blocks: Vec<BuilderBlock>,
     current: BlockId,
     bindings: HashMap<BindingId, LocalId>,
-    live: HashMap<BindingId, bool>,
+    /// Which owned bindings still hold a value.
+    ///
+    /// Ordered, not hashed: the merge points below iterate this map to decide
+    /// where to insert `Drop`s, so hash order would leak into the emitted code
+    /// and make builds irreproducible. `bindings` stays a `HashMap` because it
+    /// is only ever point-queried.
+    live: BTreeMap<BindingId, bool>,
     scopes: Vec<Vec<BindingId>>,
     loop_targets: Vec<LoopTarget>,
 }
@@ -434,13 +452,13 @@ impl Builder {
             span,
             params: Vec::new(),
             locals: Vec::new(),
-            blocks: vec![BasicBlock {
+            blocks: vec![BuilderBlock {
                 instructions: Vec::new(),
                 terminator: None,
             }],
             current: 0,
             bindings: HashMap::new(),
-            live: HashMap::new(),
+            live: BTreeMap::new(),
             scopes: Vec::new(),
             loop_targets: Vec::new(),
         }
@@ -453,7 +471,14 @@ impl Builder {
             params: self.params,
             return_type: self.return_type,
             locals: self.locals,
-            blocks: self.blocks,
+            blocks: self
+                .blocks
+                .into_iter()
+                .map(|block| BasicBlock {
+                    instructions: block.instructions,
+                    terminator: block.terminator.unwrap_or(Terminator::Unreachable),
+                })
+                .collect(),
             entry: 0,
             span: self.span,
         }
@@ -475,7 +500,7 @@ impl Builder {
 
     fn block(&mut self) -> BlockId {
         let id = self.blocks.len();
-        self.blocks.push(BasicBlock {
+        self.blocks.push(BuilderBlock {
             instructions: Vec::new(),
             terminator: None,
         });
@@ -854,7 +879,9 @@ impl Builder {
         });
 
         self.current = error_block;
-        for (id, is_live) in self.live.clone() {
+        // Reverse binding order, matching `drop_scope_except`: bindings
+        // declared later are dropped first.
+        for (id, is_live) in self.live.clone().into_iter().rev() {
             if !is_live {
                 continue;
             }
@@ -942,7 +969,7 @@ impl Builder {
         let else_end = self.current;
 
         self.live = base_live;
-        for id in self.live.clone().keys().copied().collect::<Vec<_>>() {
+        for id in self.live.clone().keys().copied().rev().collect::<Vec<_>>() {
             let then_has = then_live.get(&id).copied().unwrap_or(false);
             let else_has = else_live.get(&id).copied().unwrap_or(false);
             if then_has != else_has {
@@ -1191,7 +1218,7 @@ impl Builder {
         }
 
         self.live = base_live;
-        let ids = self.live.keys().copied().collect::<Vec<_>>();
+        let ids = self.live.keys().copied().rev().collect::<Vec<_>>();
         for id in ids {
             let survives_every_arm = arm_states
                 .iter()
@@ -1252,7 +1279,7 @@ impl Builder {
 
 #[cfg(test)]
 mod tests {
-    use super::Instruction;
+    use super::{Instruction, LocalId};
     use crate::ast::Type;
     use crate::{compile_to_mir, CompileOptions};
 
@@ -1308,6 +1335,57 @@ mod tests {
             })
             .count();
         assert_eq!(pair_drops, 2);
+    }
+
+    #[test]
+    fn merge_drops_are_emitted_in_a_deterministic_order() {
+        // Two owned bindings diverge across an `if`, so both are dropped on the
+        // then-branch merge. The order used to follow `HashMap` iteration and
+        // differed between runs of the same compiler on the same input, which
+        // made builds irreproducible.
+        let source = r#"
+            (fn take ((s String)) -> i32 0)
+            (fn main () -> i32
+              (let a "aaa")
+              (let b "bbb")
+              (if true (do (take a) (take b) 0) 0))
+        "#;
+        let expected: Vec<LocalId> = {
+            let mir = compile_to_mir("test.slp", source, &CompileOptions::default()).unwrap();
+            drop_order(&mir)
+        };
+        assert_eq!(expected.len(), 2, "both bindings are dropped at the merge");
+        for _ in 0..16 {
+            let mir = compile_to_mir("test.slp", source, &CompileOptions::default()).unwrap();
+            assert_eq!(
+                drop_order(&mir),
+                expected,
+                "lowering must not depend on hash iteration order"
+            );
+        }
+    }
+
+    fn drop_order(mir: &crate::mir::MirModule) -> Vec<LocalId> {
+        let main = mir
+            .functions
+            .iter()
+            .find(|function| function.name.contains("main"))
+            .expect("main was lowered");
+        // The merge block is the one carrying more than one drop.
+        main.blocks
+            .iter()
+            .map(|block| {
+                block
+                    .instructions
+                    .iter()
+                    .filter_map(|instruction| match instruction {
+                        Instruction::Drop { local, .. } => Some(*local),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .find(|drops| drops.len() > 1)
+            .unwrap_or_default()
     }
 
     #[test]
