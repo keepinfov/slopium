@@ -1,0 +1,14 @@
+[package]
+name = "custom-std"
+version = "0.2.4"
+source = "src"
+entry = "src/result.slp"
+
+[language-items]
+option = "option:Option"
+result = "result:Result"
+result-ok = "result:Ok"
+result-err = "result:Err"
+
+[build]
+target = "x86_64-unknown-linux-gnu"

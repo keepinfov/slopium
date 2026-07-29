@@ -1,0 +1,9 @@
+(take std:result Result)
+
+(fn produce () -> (Result i64 String)
+  (Result:Ok 42))
+
+(fn invalid () -> i64
+  (try (produce)))
+
+(fn main () -> i32 0)

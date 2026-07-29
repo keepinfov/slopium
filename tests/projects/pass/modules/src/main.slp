@@ -1,0 +1,14 @@
+(take api (plus :as add))
+(take model Point total)
+
+(fn main () -> i32
+  (println (add 20 22))
+  (println (math:core:add 10 5))
+  (println (total (Point :x 19 :y 23)))
+  0)
+
+(test "re-export and aliases"
+  (= (add 20 22) 42))
+
+(test "nested qualified module"
+  (= (math:core:add 40 2) 42))

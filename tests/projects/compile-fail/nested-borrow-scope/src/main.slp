@@ -1,0 +1,10 @@
+(fn main () -> i32
+  (do
+    (let mut values (list "one" "two" "three" "four"))
+    (let view (slice (& values) 0 2))
+    (do
+      (let second (get-ref (& values) 1))
+      (println second))
+    (do (push (&mut values) "five"))
+    (println (get-ref (& view) 0))
+    0))

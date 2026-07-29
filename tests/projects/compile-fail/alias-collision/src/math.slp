@@ -1,0 +1,3 @@
+(export local)
+
+(fn local () -> i64 1)

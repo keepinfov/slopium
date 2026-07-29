@@ -1,0 +1,6 @@
+(fn main () -> i32
+  (let values (list 1))
+  (println (get (& values) 2))
+  0)
+
+(test "fixture compiles" true)

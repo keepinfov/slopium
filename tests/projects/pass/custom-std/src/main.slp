@@ -1,0 +1,33 @@
+(take std:option Option)
+(take std:result Result)
+
+(fn produce () -> (Result i64 String)
+  (Result:Ok 42))
+
+(fn forward () -> (Result i64 String)
+  (let value (try (produce)))
+  (Result:Ok value))
+
+(fn main () -> i32
+  (let mut values (list 7))
+  (println
+    (match (pop (&mut values))
+      ((Option:Some value) value)
+      ((Option:None) 0)))
+  (println
+    (match (forward)
+      ((Result:Ok value) value)
+      ((Result:Err error) 0)))
+  0)
+
+(test "path std option language item"
+  (do
+    (let mut values (list 1))
+    (match (pop (&mut values))
+      ((Option:Some value) (= value 1))
+      ((Option:None) false))))
+
+(test "path std result language items"
+  (match (forward)
+    ((Result:Ok value) (= value 42))
+    ((Result:Err error) false)))

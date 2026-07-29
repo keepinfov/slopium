@@ -1,0 +1,6 @@
+(export Point total)
+
+(struct Point ((x i64) (y i64)))
+
+(fn total ((point Point)) -> i64
+  (+ (. point x) (. point y)))

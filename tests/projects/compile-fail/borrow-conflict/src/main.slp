@@ -1,0 +1,6 @@
+(fn main () -> i32
+  (let mut values (list "one"))
+  (let borrowed (get-ref (& values) 0))
+  (do (push (&mut values) "two"))
+  (println borrowed)
+  0)

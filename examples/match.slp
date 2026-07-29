@@ -1,0 +1,17 @@
+(fn describe ((value i64)) -> i64
+  (match value
+    (0 10)
+    (1 20)
+    (_ 30)))
+
+(fn main () -> i32
+  (println (describe 1))
+  0)
+
+(test "integer match"
+  (= (describe 1) 20))
+
+(test "boolean match"
+  (match true
+    (true true)
+    (false false)))

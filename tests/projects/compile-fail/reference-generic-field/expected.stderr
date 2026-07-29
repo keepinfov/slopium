@@ -1,0 +1,2 @@
+error[SL0300]
+borrowed values cannot be stored in aggregate fields

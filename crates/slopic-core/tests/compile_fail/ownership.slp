@@ -1,0 +1,6 @@
+(fn consume ((value String)) -> unit ())
+(fn main () -> i32
+  (let value "hello")
+  (consume value)
+  (println value)
+  0)

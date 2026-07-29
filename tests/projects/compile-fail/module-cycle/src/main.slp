@@ -1,0 +1,5 @@
+(take a from-a)
+
+(fn main () -> i32
+  (println (from-a))
+  0)

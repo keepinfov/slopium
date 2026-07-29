@@ -1,0 +1,30 @@
+(enum Choice
+  None
+  (Some ((value i64)))
+  (Message ((text String))))
+
+(fn score ((choice Choice)) -> i64
+  (match choice
+    ((Choice::None) 0)
+    ((Choice::Some value) value)
+    ((Choice::Message text)
+      (do
+        (println (& text))
+        1))))
+
+(fn main () -> i32
+  (println (score (Choice::Some 42)))
+  (state)
+  0)
+
+(fn state () -> i64
+  (println(+ 1 2))
+  0)
+
+(test "enum payload"
+  (= (score (Choice::Some 42)) 42))
+
+(test "owned enum payload"
+  (= (score (Choice::Message "hello enum")) 1))
+
+

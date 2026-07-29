@@ -1,0 +1,1 @@
+(export (model:point:Point :as Point) (model:point:total :as total))

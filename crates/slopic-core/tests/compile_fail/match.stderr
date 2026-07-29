@@ -1,0 +1,5 @@
+match.slp:2:3: error[SL0400]: non-exhaustive match
+  |
+ 2 |   (match true
+  |   ^^^^^^^^^^^^^
+  = help: cover both `true` and `false`, or add `_`

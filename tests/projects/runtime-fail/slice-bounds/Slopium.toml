@@ -1,0 +1,5 @@
+[package]
+name = "slice-bounds"
+version = "0.2.4"
+source = "src"
+entry = "src/main.slp"

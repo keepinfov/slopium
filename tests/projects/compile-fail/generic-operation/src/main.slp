@@ -1,0 +1,6 @@
+(fn double (T) ((value T)) -> T
+  (+ value value))
+
+(fn main () -> i32
+  (println (double 21))
+  0)

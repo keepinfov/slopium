@@ -1,0 +1,4 @@
+type-mismatch.slp:2:3: error[SL0200]: expected `i32`, found `bool`
+  |
+ 2 |   true)
+  |   ^^^^

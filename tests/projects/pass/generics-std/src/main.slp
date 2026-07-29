@@ -1,0 +1,72 @@
+(take std:option Option)
+(take std:result Result)
+
+(fn identity (T) ((value T)) -> T value)
+
+(fn wrap (T) ((value T)) -> (Box T)
+  (Box :value value))
+
+(struct Box (T) ((value T)))
+
+(enum Maybe (T)
+  None
+  (Some ((value T))))
+
+(fn produce ((ok bool)) -> (Result i64 String)
+  (if ok
+    (Result:Ok 41)
+    (Result:Err "failure")))
+
+(fn forward ((ok bool)) -> (Result i64 String)
+  (let value (try (produce ok)))
+  (Result:Ok (+ value 1)))
+
+(fn show-result ((result (Result i64 String))) -> i64
+  (match result
+    ((Result:Ok value) value)
+    ((Result:Err error)
+      (do
+        (println (& error))
+        0))))
+
+(fn main () -> i32
+  (println (identity 42))
+  (let text (identity "generic"))
+  (println (& text))
+  (let wrapped (wrap "wrapped"))
+  (let boxed (Box :value 7))
+  (println (. boxed value))
+  (let maybe (Maybe:Some 40))
+  (println
+    (match maybe
+      ((Maybe:None) 0)
+      ((Maybe:Some value) value)))
+  (println (show-result (forward true)))
+  (println (show-result (forward false)))
+  (let mut values (list 9))
+  (println
+    (match (pop (&mut values))
+      ((Option:Some value) value)
+      ((Option:None) 0)))
+  0)
+
+(test "generic function has multiple instances"
+  (if (= (identity 42) 42)
+    (= (identity true) true)
+    false))
+
+(test "generic struct materializes"
+  (do
+    (let wrapped (wrap 7))
+    (let boxed (Box :value 7))
+    (= (. boxed value) 7)))
+
+(test "try success and error paths"
+  (if
+    (match (forward true)
+      ((Result:Ok value) (= value 42))
+      ((Result:Err error) false))
+    (match (forward false)
+      ((Result:Ok value) false)
+      ((Result:Err error) true))
+    false))

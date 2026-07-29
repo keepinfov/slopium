@@ -1,0 +1,14 @@
+[package]
+name = "slopium-lsp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+lsp-server.workspace = true
+lsp-types.workspace = true
+crossbeam-channel.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+slopic-core = { path = "../slopic-core" }
+toml.workspace = true

@@ -1,0 +1,5 @@
+(export Result (Result:Ok :as Ok) (Result:Err :as Err))
+
+(enum Result (T E)
+  (Ok ((value T)))
+  (Err ((error E))))

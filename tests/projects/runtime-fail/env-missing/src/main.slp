@@ -1,0 +1,7 @@
+(fn main () -> i32
+  (let name "SLOPIUM_PROJECT_TEST_INTENTIONALLY_MISSING")
+  (let value (env (& name)))
+  (println (& value))
+  0)
+
+(test "fixture compiles" true)

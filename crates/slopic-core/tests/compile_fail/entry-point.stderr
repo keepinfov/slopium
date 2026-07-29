@@ -1,0 +1,4 @@
+entry-point.slp:0:0: error[SL0401]: `main` must have signature `(fn main () -> i32 ...)`, `i64`, or `unit`
+  |
+ 0 | (fn main ((argument i64)) -> i64
+  | ^

@@ -1,0 +1,6 @@
+parser.slp:1:1: error[SL0004]: unclosed `(`
+  |
+ 1 | (fn main () -> i32
+  | ^
+  = help: add a matching `)`
+  = suggestion 1:2: close this list: replace with `)`

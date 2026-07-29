@@ -1,0 +1,7 @@
+(enum Choice
+  None
+  Some)
+
+(fn main () -> i32
+  (match (Choice:None)
+    ((Choice:None) 0)))

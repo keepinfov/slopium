@@ -1,0 +1,5 @@
+(take base:lib forty)
+(export answer)
+
+(fn answer () -> i64
+  (+ (forty) 2))

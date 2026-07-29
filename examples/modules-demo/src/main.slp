@@ -1,0 +1,18 @@
+(take geometry Point (distance :as length))
+(take std:option Option)
+
+(fn identity (T) ((value T)) -> T value)
+
+(fn main () -> i32
+  (let point (Point :x 20 :y 22))
+  (println (identity (length point)))
+  (let mut messages (list "modules" "ownership"))
+  (match (pop (&mut messages))
+    ((Option:Some message)
+      (do
+        (println (& message))
+        0))
+    ((Option:None) 1)))
+
+(test "cross-module call"
+  (= (length (Point :x 20 :y 22)) 42))

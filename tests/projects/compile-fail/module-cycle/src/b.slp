@@ -1,0 +1,5 @@
+(take a from-a)
+(export from-b)
+
+(fn from-b () -> i64
+  (from-a))

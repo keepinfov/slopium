@@ -1,0 +1,5 @@
+[package]
+name = "missing-option"
+version = "0.2.4"
+source = "src"
+entry = "src/main.slp"

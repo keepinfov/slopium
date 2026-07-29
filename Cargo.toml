@@ -1,0 +1,23 @@
+[workspace]
+members = [
+    "crates/slopic-core",
+    "crates/slopic",
+    "crates/slopium",
+    "crates/slopium-lsp",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.2.4"
+edition = "2021"
+license = "MIT"
+authors = ["TBWanderer"]
+
+[workspace.dependencies]
+clap = { version = "4.6.4", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+toml = "0.8.23"
+lsp-server = "0.7.9"
+lsp-types = "0.97.0"
+crossbeam-channel = "0.5.16"

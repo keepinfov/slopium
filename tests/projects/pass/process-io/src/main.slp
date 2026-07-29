@@ -1,0 +1,17 @@
+(fn main () -> i32
+  (let line (read-line))
+  (let parsed (parse-i64 (& line)))
+  (let number (read-i64))
+  (println (+ parsed number))
+  (let environment-name "SLOPIUM_PROJECT_TEST_VALUE")
+  (let environment-value (env (& environment-name)))
+  (println (& environment-value))
+  (println (args-len))
+  (let first (arg 0))
+  (let second (arg 1))
+  (println (& first))
+  (println (& second))
+  0)
+
+(test "process fixture arithmetic"
+  (= (+ 41 1) 42))

@@ -1,0 +1,8 @@
+/target/
+**/target/
+**/.slopium/
+/.notes/
+*.o
+*.s
+*.out
+nvim.log

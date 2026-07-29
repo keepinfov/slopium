@@ -1,0 +1,27 @@
+(fn while-total () -> i64
+  (let mut value 0)
+  (let mut total 0)
+  (while (< value 10)
+    (set value (+ value 1))
+    (if (= value 2) (continue) ())
+    (if (= value 6) (break) ())
+    (set total (+ total value)))
+  total)
+
+(fn loop-until () -> i64
+  (let mut value 0)
+  (loop
+    (set value (+ value 1))
+    (if (= value 8) (break) ()))
+  value)
+
+(fn main () -> i32
+  (println (while-total))
+  (println (loop-until))
+  0)
+
+(test "while break and continue"
+  (= (while-total) 13))
+
+(test "unconditional loop"
+  (= (loop-until) 8))

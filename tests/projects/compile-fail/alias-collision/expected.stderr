@@ -1,0 +1,1 @@
+dependency alias `math` collides with the local module namespace

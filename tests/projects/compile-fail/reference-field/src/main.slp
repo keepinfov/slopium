@@ -1,0 +1,3 @@
+(struct View ((value (& String))))
+
+(fn main () -> i32 0)

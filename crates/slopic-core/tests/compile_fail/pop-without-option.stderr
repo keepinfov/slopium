@@ -1,0 +1,4 @@
+pop-without-option.slp:3:7: error[SL0453]: `pop` requires the `option` language item
+  |
+ 3 |   (do (pop (&mut values)))
+  |       ^^^^^^^^^^^^^^^^^^^

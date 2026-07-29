@@ -1,0 +1,4 @@
+(fn show ((value &String)) -> unit
+  (println value))
+
+(fn main () -> i32 0)

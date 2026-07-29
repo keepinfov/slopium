@@ -1,0 +1,11 @@
+[package]
+name = "path-dependencies"
+version = "0.2.4"
+source = "src"
+entry = "src/main.slp"
+
+[dependencies]
+math = { path = "../../dependencies/mathlib" }
+
+[build]
+target = "x86_64-unknown-linux-gnu"

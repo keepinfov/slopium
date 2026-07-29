@@ -1,0 +1,6 @@
+(export Point distance)
+
+(struct Point ((x i64) (y i64)))
+
+(fn distance ((point Point)) -> i64
+  (+ (. point x) (. point y)))

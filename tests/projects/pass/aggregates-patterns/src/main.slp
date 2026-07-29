@@ -1,0 +1,50 @@
+(struct Point ((x i64) (label String)))
+
+(enum Inner
+  None
+  (Value ((number i64))))
+
+(enum Outer
+  Empty
+  (Wrap ((inner Inner)))
+  (Pointed ((point Point))))
+
+(fn score ((value Outer)) -> i64
+  (match value
+    ((Outer:Wrap (Inner:Value number)) number)
+    ((Outer:Wrap (Inner:None)) 0)
+    ((Outer:Pointed (Point :x x :label label))
+      (do
+        (println (& label))
+        x))
+    ((Outer:Empty) -1)
+    (_ -2)))
+
+(fn boolean-score ((value bool)) -> i64
+  (match value
+    (true 1)
+    (false 0)))
+
+(fn integer-score ((value i64)) -> i64
+  (match value
+    (0 0)
+    (1 1)
+    (_ 2)))
+
+(fn main () -> i32
+  (let point (Point :x 42 :label "field"))
+  (println (. point x))
+  (println (score (Outer:Wrap (Inner:Value 42))))
+  (println (score (Outer:Pointed (Point :x 7 :label "nested"))))
+  (println (boolean-score true))
+  (println (integer-score 9))
+  0)
+
+(test "nested enum pattern"
+  (= (score (Outer:Wrap (Inner:Value 42))) 42))
+
+(test "wildcard integer pattern"
+  (= (integer-score 99) 2))
+
+(test "empty aggregate variant"
+  (= (score (Outer:Empty)) -1))

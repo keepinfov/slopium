@@ -1,0 +1,6 @@
+(fn main () -> i32
+  (let line (read-line))
+  (println (parse-i64 (& line)))
+  0)
+
+(test "fixture compiles" true)

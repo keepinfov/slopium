@@ -1,0 +1,2 @@
+(fn main ((argument i64)) -> i64
+  argument)

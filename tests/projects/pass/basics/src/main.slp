@@ -1,0 +1,39 @@
+; Scalar types, inference, mutation, control flow, recursion, and ABI stack
+; arguments all live in one deliberately small project.
+
+(fn factorial ((value i64)) -> i64
+  (if (< value 2)
+    1
+    (* value (factorial (- value 1)))))
+
+(fn sum-eight ((a i64) (b i64) (c i64) (d i64) (e i64) (f i64) (g i64) (h i64)) -> i64
+  (+ (+ (+ a b) (+ c d)) (+ (+ e f) (+ g h))))
+
+(fn answer-i32 () -> i32 42)
+
+(fn main () -> i32
+  (let mut answer 40)
+  (set answer (+ answer 2))
+  (let label "basics:")
+  (print (& label))
+  (println answer)
+  (println true)
+  (println (factorial 6))
+  (println (sum-eight 1 2 3 4 5 6 7 8))
+  (do ())
+  0)
+
+(test "integer and floating arithmetic"
+  (if (= (+ 20 22) 42)
+    (= (+ 1.5 2.5) 4.0)
+    false))
+
+(test "recursion and i32 context"
+  (if (= (factorial 6) 720)
+    (= (answer-i32) 42)
+    false))
+
+(test "comparison operators"
+  (if (> 3 2)
+    (< 1 2)
+    false))

@@ -1,0 +1,42 @@
+; Slopium License Center
+; Category: easy reverse engineering
+;
+; The service compiles this source to a native ELF. The real flag is supplied
+; only to the deployed process through the FLAG environment variable.
+
+(fn mix-ticket ((value i64)) -> i64
+  (+ (* value 31337) 7331))
+
+(fn mix-pin ((value i64)) -> i64
+  (- (* value 97) 11))
+
+(fn reveal-flag () -> i32
+  (let flag-name "FLAG")
+  (let flag (env (& flag-name)))
+  (let accepted "license accepted")
+  (println (& accepted))
+  (println (& flag))
+  0)
+
+(fn reject-license () -> i32
+  (let rejected "invalid license")
+  (println (& rejected))
+  1)
+
+(fn main () -> i32
+  (let banner "=== Slopium License Center ===")
+  (let ticket-prompt "ticket id:")
+  (let pin-prompt "activation pin:")
+  (println (& banner))
+  (println (& ticket-prompt))
+  (let ticket (read-i64))
+  (println (& pin-prompt))
+  (let pin (read-i64))
+  (if (= (mix-ticket ticket) 41904900)
+    (if (= (mix-pin pin) 411463)
+      (reveal-flag)
+      (reject-license))
+    (reject-license)))
+
+(test "known development license"
+  (= (+ (mix-ticket 1337) (mix-pin 4242)) 42316363))

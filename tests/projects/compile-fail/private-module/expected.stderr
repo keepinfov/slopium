@@ -1,0 +1,2 @@
+error[SL0450]
+qualified name `secret:hidden` is private or does not exist

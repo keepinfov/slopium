@@ -1,0 +1,2 @@
+error[SL0300]
+is moved inside a loop body

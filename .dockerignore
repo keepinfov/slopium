@@ -1,0 +1,7 @@
+.git
+.notes
+target
+**/target
+**/.slopium
+*.out
+nvim.log

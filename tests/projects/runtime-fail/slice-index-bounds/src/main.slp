@@ -1,0 +1,8 @@
+(fn main () -> i32
+  (let values (array "one" "two"))
+  (let view (slice (& values) 0 1))
+  (let missing (get-ref (& view) 1))
+  (println missing)
+  0)
+
+(test "fixture compiles" true)

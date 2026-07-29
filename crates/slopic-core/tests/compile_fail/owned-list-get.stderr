@@ -1,0 +1,5 @@
+owned-list-get.slp:3:14: error[SL0300]: `get` cannot copy a List element of type `String`
+  |
+ 3 |   (let value (get (& values) 0))
+  |              ^^^^^^^^^^^^^^^^^^
+  = help: use `(get-ref (& list) index)` to borrow it, or `remove` to move it

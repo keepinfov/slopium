@@ -1,0 +1,4 @@
+lexer.slp:1:1: error[SL0002]: unterminated string literal
+  |
+ 1 | "unterminated
+  | ^^^^^^^^^^^^^

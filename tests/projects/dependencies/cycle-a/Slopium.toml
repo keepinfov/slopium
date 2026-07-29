@@ -1,0 +1,8 @@
+[package]
+name = "cycle-a"
+version = "0.2.4"
+source = "src"
+entry = "src/lib.slp"
+
+[dependencies]
+b = { path = "../cycle-b" }

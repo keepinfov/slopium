@@ -1,0 +1,2 @@
+error[SL0300]
+`get` cannot copy a List element of type `String`

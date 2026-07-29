@@ -1,0 +1,17 @@
+services:
+  challenge:
+    build:
+      context: ../..
+      dockerfile: examples/ctf-license-check/Dockerfile
+    environment:
+      FLAG: "${FLAG:-slopium_local_development_flag}"
+    ports:
+      - "31337:31337"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped

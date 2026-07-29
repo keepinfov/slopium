@@ -1,0 +1,2 @@
+error[SL0300]
+use of moved value `value`

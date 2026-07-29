@@ -1,0 +1,2 @@
+error[SL0450]
+module dependency cycle

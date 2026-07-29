@@ -1,0 +1,9 @@
+unknown-name.slp:2:3: error[SL0200]: undefined variable `missing`
+  |
+ 2 |   missing)
+  |   ^^^^^^^
+
+unknown-name.slp:2:3: error[SL0200]: expected `i32`, found `unit`
+  |
+ 2 |   missing)
+  |   ^^^^^^^
