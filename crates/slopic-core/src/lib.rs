@@ -1,9 +1,11 @@
+pub mod aarch64;
 pub mod analysis;
 pub mod ast;
 pub mod cfg;
 pub mod codegen;
 pub mod diagnostic;
 pub mod lexer;
+pub mod lowering;
 pub mod mir;
 pub mod mir_print;
 pub mod opt;
@@ -14,7 +16,7 @@ pub mod sema;
 pub mod syntax;
 pub mod verify;
 
-use crate::codegen::{CodegenOptions, SUPPORTED_TARGET};
+use crate::codegen::{CodegenOptions, DEFAULT_TARGET, TARGET_TRIPLES};
 use crate::diagnostic::{codes, CompileResult, Diagnostic, SourceMap};
 use crate::mir::MirModule;
 use crate::sema::TypedProgram;
@@ -43,7 +45,7 @@ pub struct CompileOptions {
 impl Default for CompileOptions {
     fn default() -> Self {
         Self {
-            target: SUPPORTED_TARGET.into(),
+            target: DEFAULT_TARGET.into(),
             test_harness: false,
             optimize: false,
             codegen_module: None,
@@ -107,7 +109,7 @@ pub fn compiler_info() -> CompilerInfo {
         name: "slopic",
         version: env!("CARGO_PKG_VERSION"),
         protocol: COMPILER_PROTOCOL,
-        targets: &[SUPPORTED_TARGET],
+        targets: TARGET_TRIPLES,
         standard_library: STANDARD_LIBRARY_VERSION,
     }
 }

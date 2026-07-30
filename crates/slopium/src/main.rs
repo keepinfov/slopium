@@ -1,6 +1,6 @@
 use clap::{Args, Parser, Subcommand};
 use serde::Deserialize;
-use slopic_core::codegen::SUPPORTED_TARGET;
+use slopic_core::codegen::{DEFAULT_TARGET, TARGETS};
 use slopic_core::syntax::{format_source, FormatOptions};
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
@@ -182,7 +182,14 @@ fn main() {
         }
         Commands::Clean => load_project(cli.manifest_path).and_then(clean),
         Commands::Targets => {
-            println!("{SUPPORTED_TARGET} (installed)");
+            for spec in TARGETS {
+                let note = if spec.triple == DEFAULT_TARGET {
+                    "installed, default"
+                } else {
+                    "installed"
+                };
+                println!("{} ({note})", spec.triple);
+            }
             Ok(())
         }
         Commands::Compiler => compiler_info(),
@@ -285,7 +292,7 @@ fn create_project(name: &str, path: Option<PathBuf>) -> Result<(), String> {
         .map_err(|error| format!("cannot create project: {error}"))?;
     let manifest = format!(
         "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nsource = \"src\"\nentry = \"src/main.slp\"\n\n\
-         [build]\ntarget = \"{SUPPORTED_TARGET}\"\n\n\
+         [build]\ntarget = \"{DEFAULT_TARGET}\"\n\n\
          [profile.dev]\nopt-level = 0\ndebug = true\n\n\
          [profile.release]\nopt-level = 1\ndebug = false\n"
     );
@@ -377,9 +384,11 @@ fn check(
 
 fn build(project: &Project, args: &BuildArgs, test: bool) -> Result<PathBuf, String> {
     let target = target(project, args.target.clone());
-    if target != SUPPORTED_TARGET {
+    if !TARGETS.iter().any(|spec| spec.triple == target) {
+        let available: Vec<&str> = TARGETS.iter().map(|spec| spec.triple).collect();
         return Err(format!(
-            "target `{target}` is not installed; available target: `{SUPPORTED_TARGET}`"
+            "target `{target}` is not installed; available targets: {}",
+            available.join(", ")
         ));
     }
     let source = source_path(project)?;
@@ -953,7 +962,7 @@ fn target(project: &Project, override_target: Option<String>) -> String {
     override_target
         .or_else(|| std::env::var("SLOPIUM_TARGET").ok())
         .or_else(|| project.manifest.build.target.clone())
-        .unwrap_or_else(|| SUPPORTED_TARGET.into())
+        .unwrap_or_else(|| DEFAULT_TARGET.into())
 }
 
 /// Whether a profile emits DWARF line tables.
@@ -980,7 +989,17 @@ fn cc_for(project: &Project, target: &str, override_cc: Option<String>) -> Strin
                 .and_then(|config| config.cc.clone())
         })
         .or_else(|| project.config.toolchain.cc.clone())
-        .unwrap_or_else(|| "cc".into())
+        // A target's own default rather than a bare `cc`: the host driver
+        // would accept the assembly and quietly produce host objects that
+        // fail only at link time, with a message about the wrong
+        // architecture rather than about the missing cross toolchain.
+        .unwrap_or_else(|| {
+            TARGETS
+                .iter()
+                .find(|spec| spec.triple == target)
+                .map(|spec| spec.default_cc.to_owned())
+                .unwrap_or_else(|| "cc".into())
+        })
 }
 
 #[derive(Clone, Copy)]
@@ -1253,7 +1272,7 @@ mod tests {
             project: &project,
             source_root: &source_root,
             dependencies: &[],
-            target: SUPPORTED_TARGET,
+            target: DEFAULT_TARGET,
             profile_name: "dev",
             profile: project.manifest.profile.get("dev"),
             test: false,

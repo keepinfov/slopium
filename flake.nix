@@ -14,7 +14,7 @@
           pkgs = import nixpkgs { inherit system; };
           toolchain = pkgs.rustPlatform.buildRustPackage {
             pname = "slopium";
-            version = "0.3.3";
+            version = "0.3.4";
             src = pkgs.lib.cleanSourceWith {
               src = ./.;
               filter = path: type:
@@ -89,6 +89,12 @@
       devShells = forAllSystems (system:
         let
           pkgs = import nixpkgs { inherit system; };
+          # The cross toolchain and the emulator are what make the second
+          # backend testable: `slopic` needs an aarch64 `cc` to assemble and
+          # link what it emits, and `qemu-aarch64` is how the result is run on
+          # an x86-64 host. Neither is needed to build the compiler itself, so
+          # they are in the dev shell only.
+          crossCc = pkgs.pkgsCross.aarch64-multiplatform.stdenv.cc;
         in
         {
           default = pkgs.mkShell {
@@ -101,12 +107,16 @@
               binutils
               gdb
               valgrind
+              crossCc
+              qemu
             ];
 
             shellHook = ''
               echo "Slopium development shell"
               echo "  cargo build --workspace"
               echo "  cargo test --workspace"
+              export SLOPIUM_CC_AARCH64_UNKNOWN_LINUX_GNU=${crossCc.targetPrefix}cc
+              export SLOPIUM_QEMU_AARCH64=qemu-aarch64
             '';
           };
         });

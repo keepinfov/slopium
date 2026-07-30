@@ -1,4 +1,4 @@
-use slopic_core::codegen::{emit_assembly, CodegenOptions, SUPPORTED_TARGET};
+use slopic_core::codegen::{emit_assembly, CodegenOptions, DEFAULT_TARGET};
 use slopic_core::{
     compile, compile_to_mir, CompileOptions, CompileRequest, DependencySource, EmitKind,
     LanguageItems, RUNTIME_SOURCE,
@@ -602,7 +602,7 @@ fn c_caller_agrees_with_slopium_stack_parameter_layout() {
         "abi.slp",
         &module,
         &CodegenOptions {
-            target: SUPPORTED_TARGET.into(),
+            target: DEFAULT_TARGET.into(),
             test_harness: false,
             emit_entrypoint: false,
             debug: None,

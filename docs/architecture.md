@@ -83,10 +83,42 @@ the panic trampolines — carries no location of its own and inherits the row
 before it, because the assembler discards the `.loc` that would say "not in the
 source".
 
-The first `Backend` emits Intel-syntax x86-64 assembly for the System V AMD64
-ABI. Adding an architecture means implementing another backend and target
-specification, and supplying its own register file; parsing, typing,
-ownership, MIR, and the allocator itself remain unchanged.
+## Backends
+
+There are two: Intel-syntax x86-64 for System V AMD64, and AArch64 for AAPCS64.
+Both are chosen by triple from a target table, and everything before them —
+parsing, typing, ownership, MIR, the optimizer, liveness, and the register
+allocator — is the same code producing the same result for either.
+
+What a backend supplies is a register file, an instruction selection, a calling
+convention, and an assembly syntax. What it does not supply is anything the two
+have to agree about. Symbol names, which runtime helper releases or copies a
+given type, aggregate sizes, and what each builtin call actually does all live
+in one module both backends read. That is the point of the split: two backends
+deriving those separately would be free to derive them differently, and the
+result would be a linker error at best and a value released by the wrong helper
+at worst.
+
+The differences that remain are the machine ones. x86-64 lets most instructions
+name a frame slot, so its backend decides per instruction whether an operand is
+a register or memory. AArch64 is load/store, so its backend reads an operand
+into a scratch register whenever the allocator left it in memory. x86-64 gets
+overflow from a hardware flag and division faults from the hardware; AArch64
+sets the flag with `adds`, checks multiplication against the high half of the
+product, and has to reject a zero divisor itself because `sdiv` does not fault.
+The frame is upside down between them: x86-64 addresses locals below `rbp` and
+pushes stack arguments, AArch64 addresses them upward from `sp` and reserves an
+outgoing-argument area at the bottom of its own frame, because `sp` anchors the
+locals and cannot move between two statements.
+
+Agreement is checked rather than assumed. `scripts/cross-check.sh` compiles the
+whole corpus for both targets, runs the second under `qemu-aarch64`, and
+requires identical stdout and exit status, including for the programs that
+panic. A separate ABI conformance program links Slopium functions against a C
+caller built by the platform toolchain, with more arguments than either
+register class holds, so the two only agree if both placed them where the ABI
+says.
+
 
 `Analysis` combines syntax, diagnostics, optional typed HIR, and a semantic
 symbol/occurrence index. `slopium-lsp` discovers `Slopium.toml`, overlays all

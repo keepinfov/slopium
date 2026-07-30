@@ -29,7 +29,7 @@ struct Cli {
     #[arg(short, long)]
     output: Option<PathBuf>,
 
-    #[arg(long, default_value = "x86_64-unknown-linux-gnu")]
+    #[arg(long, default_value = slopic_core::codegen::DEFAULT_TARGET)]
     target: String,
 
     #[arg(long)]

@@ -1,0 +1,625 @@
+//! What every backend decides the same way.
+//!
+//! Two backends emit different instructions for the same MIR, but they must
+//! agree on everything that is not an instruction: what a function is called in
+//! the object file, which runtime helper releases a given type, how wide an
+//! aggregate is, and what a builtin call actually does. None of that is a
+//! property of the machine, and a second backend that re-derived it would be
+//! free to derive it differently — a linker error at best, and a type dropped
+//! by the wrong helper at worst.
+//!
+//! So it lives here, and the backends read it.
+
+use crate::ast::Type;
+use crate::mir::{Instruction, LocalId, MirFunction, MirModule};
+
+/// The object-file name of a Slopium function.
+///
+/// Module paths contain colons, which an assembler reads as a label
+/// terminator, so the name is hex-encoded rather than escaped. The encoding is
+/// total: every byte becomes two hex digits, so distinct names cannot collide.
+pub fn function_symbol(name: &str, is_test: bool) -> String {
+    let prefix = if is_test { "sl_test" } else { "sl_fn" };
+    let encoded = name
+        .bytes()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("{prefix}_{encoded}")
+}
+
+pub fn struct_drop_symbol(name: &str) -> String {
+    format!("sl_drop_struct_{}", encoded(name))
+}
+
+pub fn struct_clone_symbol(name: &str) -> String {
+    format!("sl_clone_struct_{}", encoded(name))
+}
+
+pub fn enum_drop_symbol(name: &str) -> String {
+    format!("sl_drop_enum_{}", encoded(name))
+}
+
+pub fn enum_clone_symbol(name: &str) -> String {
+    format!("sl_clone_enum_{}", encoded(name))
+}
+
+fn encoded(name: &str) -> String {
+    name.bytes().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// The helper that releases a value of this type, or `None` when the type owns
+/// nothing and dropping it is a no-op.
+pub fn drop_function(module: &MirModule, ty: &Type) -> Option<String> {
+    match ty {
+        Type::String => Some("sl_rt_string_drop".to_owned()),
+        Type::List(_) | Type::Array { .. } => Some("sl_rt_list_drop".to_owned()),
+        Type::Slice(_) => Some("sl_rt_slice_drop".to_owned()),
+        Type::Named(inner) if module.structs.iter().any(|item| &item.name == inner) => {
+            Some(struct_drop_symbol(inner))
+        }
+        Type::Named(inner) if module.enums.iter().any(|item| &item.name == inner) => {
+            Some(enum_drop_symbol(inner))
+        }
+        _ => None,
+    }
+}
+
+/// The helper that copies a value of this type, or `None` when the value is its
+/// own copy.
+pub fn clone_function(module: &MirModule, ty: &Type) -> Option<String> {
+    match ty {
+        Type::String => Some("sl_rt_string_clone".to_owned()),
+        Type::List(_) | Type::Array { .. } => Some("sl_rt_list_clone".to_owned()),
+        Type::Slice(_) => Some("sl_rt_slice_clone".to_owned()),
+        Type::Named(inner) if module.structs.iter().any(|item| &item.name == inner) => {
+            Some(struct_clone_symbol(inner))
+        }
+        Type::Named(inner) if module.enums.iter().any(|item| &item.name == inner) => {
+            Some(enum_clone_symbol(inner))
+        }
+        _ => None,
+    }
+}
+
+/// Bytes to allocate for a struct: one word per field, never zero.
+pub fn struct_size(module: &MirModule, name: &str) -> usize {
+    module
+        .structs
+        .iter()
+        .find(|item| item.name == name)
+        .map(|item| item.fields.len() * 8)
+        .unwrap_or(0)
+        .max(8)
+}
+
+/// Bytes to allocate for an enum value with `field_count` payload words: the
+/// tag plus the payload, never zero.
+pub fn enum_size(field_count: usize) -> usize {
+    ((field_count + 1) * 8).max(8)
+}
+
+/// Bytes an enum's clone helper allocates: enough for its widest variant, since
+/// the helper sees the tag only at run time.
+pub fn enum_clone_size(module: &MirModule, name: &str) -> usize {
+    module
+        .enums
+        .iter()
+        .find(|item| item.name == name)
+        .map(|item| {
+            item.variants
+                .iter()
+                .map(|variant| enum_size(variant.fields.len()))
+                .max()
+                .unwrap_or(8)
+        })
+        .unwrap_or(8)
+        .max(8)
+}
+
+/// Whether a borrow of this type is a borrow of a slice, which the collection
+/// builtins reach through a different runtime entry point than a list.
+pub fn reference_is_slice(ty: &Type) -> bool {
+    matches!(
+        ty,
+        Type::Ref { inner, .. } if matches!(inner.as_ref(), Type::Slice(_))
+    )
+}
+
+/// A value that is represented by a pointer, so borrowing it copies the pointer
+/// rather than taking the address of the slot holding it.
+pub fn is_pointer_like(ty: &Type) -> bool {
+    matches!(
+        ty,
+        Type::String | Type::List(_) | Type::Array { .. } | Type::Slice(_) | Type::Named(_)
+    )
+}
+
+/// Locals whose frame address is handed to something else, and which therefore
+/// cannot live in a register (`D-022`).
+///
+/// The builtins are read out of their own lowering plans rather than listed
+/// again here. That list and the plans have to agree exactly — a local passed
+/// by address but not pinned has no address to pass — and nothing in the type
+/// system makes two copies of it agree, so there is only one.
+pub fn address_taken(module: &MirModule, function: &MirFunction) -> Vec<bool> {
+    let mut pinned = vec![false; function.locals.len()];
+    let mut pin = |local: LocalId| {
+        if let Some(entry) = pinned.get_mut(local) {
+            *entry = true;
+        }
+    };
+    for instruction in function
+        .blocks
+        .iter()
+        .flat_map(|block| block.instructions())
+    {
+        match instruction {
+            Instruction::AddressOf { src, .. } => {
+                let scalar = function
+                    .locals
+                    .get(*src)
+                    .is_some_and(|local| !is_pointer_like(&local.ty));
+                if scalar {
+                    pin(*src);
+                }
+            }
+            Instruction::Call {
+                dst,
+                callee,
+                args,
+                arg_types,
+                result,
+            } => {
+                let Some(steps) = builtin(module, *dst, callee, args, arg_types, result) else {
+                    continue;
+                };
+                for step in &steps {
+                    let Step::Invoke { arguments, .. } = step else {
+                        continue;
+                    };
+                    for argument in arguments {
+                        if let Argument::Address(local) = argument {
+                            pin(*local);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    pinned
+}
+
+/// A value a builtin hands to the runtime, in the order the target's argument
+/// registers take them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Argument {
+    /// The local's value.
+    Value(LocalId),
+    /// The address of the local's frame slot. Every local that appears here is
+    /// reported by the backend's address-taken scan, so it has a slot (`D-022`).
+    Address(LocalId),
+    /// A constant, small enough for every target's immediate form.
+    Immediate(i64),
+    /// The address of a function, or a null pointer when the type needs no such
+    /// helper. The runtime tests for null rather than calling through it.
+    Function(Option<String>),
+}
+
+/// What happens once a builtin's arguments are in place.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Tail {
+    /// Call this runtime symbol.
+    Call(String),
+    /// Nothing. Cloning a type with no clone helper is a copy, and placing the
+    /// argument already made it; the first argument is the result.
+    FirstArgument,
+}
+
+/// One step of a builtin's lowering, in terms every backend can carry out.
+///
+/// "The result" is wherever the target returns an integer — `rax`, `x0` — which
+/// is also where the caller of a builtin expects to find its value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Step {
+    /// Place `arguments` in argument position, then `tail`.
+    Invoke {
+        arguments: Vec<Argument>,
+        tail: Tail,
+    },
+    /// Copy the result into the builtin's destination.
+    Save,
+    /// Make the destination's value the result again, after the destination has
+    /// been used as an argument.
+    Restore,
+    /// Replace the result with the word it points at.
+    Load,
+    /// Wrap the destination in the standard `Option`: a zero result becomes a
+    /// freshly allocated `None`, anything else a `Some` holding the
+    /// destination.
+    WrapOption { some_tag: usize, none_tag: usize },
+}
+
+/// How to lower a call to `callee`, or `None` when it is an ordinary function
+/// call and the target's calling convention applies.
+///
+/// The plan says what to do, not how: the backend decides which registers
+/// arguments land in, how an address is formed, and how a branch is spelled.
+/// What it does not decide is which runtime symbol runs, which is the part that
+/// two backends must not disagree about.
+pub fn builtin(
+    module: &MirModule,
+    dst: LocalId,
+    callee: &str,
+    args: &[LocalId],
+    arg_types: &[Type],
+    result: &Type,
+) -> Option<Vec<Step>> {
+    let call = |symbol: &str, arguments: Vec<Argument>| Step::Invoke {
+        arguments,
+        tail: Tail::Call(symbol.to_owned()),
+    };
+    let one = |symbol: &str| vec![call(symbol, vec![Argument::Value(args[0])])];
+
+    let steps = match callee {
+        "clone" => vec![Step::Invoke {
+            arguments: vec![Argument::Value(args[0])],
+            tail: match clone_function(module, &arg_types[0]) {
+                Some(symbol) => Tail::Call(symbol),
+                None => Tail::FirstArgument,
+            },
+        }],
+        "list" | "array" => {
+            let element = match result {
+                Type::List(element) => element.as_ref(),
+                Type::Array { element, .. } => element.as_ref(),
+                _ => unreachable!("collection constructor must return List or Array"),
+            };
+            let mut steps = vec![
+                call(
+                    "sl_rt_list_new",
+                    vec![
+                        Argument::Immediate(8),
+                        Argument::Function(drop_function(module, element)),
+                        Argument::Function(clone_function(module, element)),
+                    ],
+                ),
+                Step::Save,
+            ];
+            for arg in args {
+                steps.push(call(
+                    "sl_rt_list_push",
+                    vec![Argument::Value(dst), Argument::Address(*arg)],
+                ));
+            }
+            steps.push(Step::Restore);
+            steps
+        }
+        "slice" => vec![call(
+            "sl_rt_slice_new",
+            args.iter().copied().map(Argument::Value).collect(),
+        )],
+        "len" => one(if reference_is_slice(&arg_types[0]) {
+            "sl_rt_slice_len"
+        } else {
+            "sl_rt_list_len"
+        }),
+        "push" => vec![call(
+            "sl_rt_list_push",
+            vec![Argument::Value(args[0]), Argument::Address(args[1])],
+        )],
+        "get" | "get-ref" => {
+            let entry = if reference_is_slice(&arg_types[0]) {
+                "sl_rt_slice_get"
+            } else {
+                "sl_rt_list_get"
+            };
+            let mut steps = vec![call(
+                entry,
+                vec![Argument::Value(args[0]), Argument::Value(args[1])],
+            )];
+            // `get` copies the element out; `get-ref` yields the slot's address
+            // and only dereferences it when the element is itself a pointer,
+            // because then the reference is the pointer rather than the slot.
+            let dereference = match callee {
+                "get" => true,
+                _ => matches!(
+                    result,
+                    Type::Ref { inner, .. } if matches!(
+                        inner.as_ref(),
+                        Type::String
+                            | Type::List(_)
+                            | Type::Array { .. }
+                            | Type::Slice(_)
+                            | Type::Named(_)
+                    )
+                ),
+            };
+            if dereference {
+                steps.push(Step::Load);
+            }
+            steps
+        }
+        "pop" => {
+            let Type::Named(option_name) = result else {
+                unreachable!("pop must return Option<T>");
+            };
+            let option = module
+                .enums
+                .iter()
+                .find(|item| &item.name == option_name)
+                .expect("Option layout must be present");
+            let tag = |name: &str| {
+                option
+                    .variants
+                    .iter()
+                    .find(|variant| variant.name == name)
+                    .map(|variant| variant.tag)
+                    .unwrap_or_else(|| panic!("Option must define {name}"))
+            };
+            vec![
+                call(
+                    "sl_rt_list_try_pop",
+                    vec![Argument::Value(args[0]), Argument::Address(dst)],
+                ),
+                Step::WrapOption {
+                    some_tag: tag("Some"),
+                    none_tag: tag("None"),
+                },
+            ]
+        }
+        "remove" => vec![call(
+            "sl_rt_list_remove",
+            vec![Argument::Value(args[0]), Argument::Value(args[1])],
+        )],
+        "read-i64" => vec![call("sl_rt_read_i64", Vec::new())],
+        "read-line" => vec![call("sl_rt_read_line", Vec::new())],
+        "parse-i64" => one("sl_rt_parse_i64"),
+        "env" => one("sl_rt_env"),
+        "args-len" => vec![call("sl_rt_args_len", Vec::new())],
+        "arg" => one("sl_rt_arg"),
+        "print" | "println" => {
+            let string = match &arg_types[0] {
+                Type::String => true,
+                Type::Ref { inner, .. } => inner.as_ref() == &Type::String,
+                _ => false,
+            };
+            let width = if string { "string" } else { "i64" };
+            one(&format!("sl_rt_{callee}_{width}"))
+        }
+        _ => return None,
+    };
+    Some(steps)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mir::{MirEnum, MirVariant};
+
+    fn module() -> MirModule {
+        MirModule {
+            functions: Vec::new(),
+            tests: Vec::new(),
+            structs: Vec::new(),
+            enums: vec![MirEnum {
+                name: "Option".into(),
+                variants: vec![
+                    MirVariant {
+                        name: "None".into(),
+                        tag: 0,
+                        fields: Vec::new(),
+                    },
+                    MirVariant {
+                        name: "Some".into(),
+                        tag: 1,
+                        fields: vec![("0".into(), Type::I64)],
+                    },
+                ],
+                emit: true,
+            }],
+        }
+    }
+
+    #[test]
+    fn an_ordinary_call_has_no_plan() {
+        assert_eq!(
+            builtin(&module(), 0, "user:helper", &[1], &[Type::I64], &Type::I64),
+            None
+        );
+    }
+
+    #[test]
+    fn cloning_a_copy_type_calls_nothing() {
+        let steps = builtin(&module(), 0, "clone", &[1], &[Type::I64], &Type::I64).unwrap();
+        assert_eq!(
+            steps,
+            vec![Step::Invoke {
+                arguments: vec![Argument::Value(1)],
+                tail: Tail::FirstArgument,
+            }]
+        );
+    }
+
+    #[test]
+    fn cloning_an_owning_type_calls_its_helper() {
+        let steps = builtin(&module(), 0, "clone", &[1], &[Type::String], &Type::String).unwrap();
+        assert_eq!(
+            steps,
+            vec![Step::Invoke {
+                arguments: vec![Argument::Value(1)],
+                tail: Tail::Call("sl_rt_string_clone".into()),
+            }]
+        );
+    }
+
+    /// The element's helpers are baked into the list at construction, so a list
+    /// of owning values releases them and a list of scalars carries two nulls.
+    #[test]
+    fn a_collection_teaches_the_runtime_about_its_element() {
+        let scalars = builtin(
+            &module(),
+            0,
+            "list",
+            &[1],
+            &[Type::I64],
+            &Type::List(Box::new(Type::I64)),
+        )
+        .unwrap();
+        let Step::Invoke { arguments, .. } = &scalars[0] else {
+            panic!("a collection starts by constructing the list");
+        };
+        assert_eq!(arguments[1], Argument::Function(None));
+        assert_eq!(arguments[2], Argument::Function(None));
+
+        let strings = builtin(
+            &module(),
+            0,
+            "list",
+            &[1],
+            &[Type::String],
+            &Type::List(Box::new(Type::String)),
+        )
+        .unwrap();
+        let Step::Invoke { arguments, .. } = &strings[0] else {
+            panic!("a collection starts by constructing the list");
+        };
+        assert_eq!(
+            arguments[1],
+            Argument::Function(Some("sl_rt_string_drop".into()))
+        );
+        assert_eq!(
+            arguments[2],
+            Argument::Function(Some("sl_rt_string_clone".into()))
+        );
+    }
+
+    /// Every element is pushed by address, because the runtime copies a word
+    /// out of the caller's frame rather than taking it in a register.
+    #[test]
+    fn every_element_of_a_collection_is_pushed_by_address() {
+        let steps = builtin(
+            &module(),
+            7,
+            "array",
+            &[1, 2],
+            &[Type::I64, Type::I64],
+            &Type::Array {
+                element: Box::new(Type::I64),
+                length: 2,
+            },
+        )
+        .unwrap();
+        let pushes: Vec<&Vec<Argument>> = steps
+            .iter()
+            .filter_map(|step| match step {
+                Step::Invoke {
+                    arguments,
+                    tail: Tail::Call(symbol),
+                } if symbol == "sl_rt_list_push" => Some(arguments),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            pushes,
+            vec![
+                &vec![Argument::Value(7), Argument::Address(1)],
+                &vec![Argument::Value(7), Argument::Address(2)],
+            ]
+        );
+        assert_eq!(steps.last(), Some(&Step::Restore));
+    }
+
+    /// A borrowed slice and an owned list share every builtin's spelling and
+    /// none of its runtime entry point.
+    #[test]
+    fn a_slice_reaches_different_runtime_entries_than_a_list() {
+        let slice = Type::Ref {
+            inner: Box::new(Type::Slice(Box::new(Type::I64))),
+            mutable: false,
+        };
+        let list = Type::Ref {
+            inner: Box::new(Type::List(Box::new(Type::I64))),
+            mutable: false,
+        };
+        for (callee, on_slice, on_list) in [
+            ("len", "sl_rt_slice_len", "sl_rt_list_len"),
+            ("get", "sl_rt_slice_get", "sl_rt_list_get"),
+        ] {
+            for (ty, expected) in [(&slice, on_slice), (&list, on_list)] {
+                let steps = builtin(
+                    &module(),
+                    0,
+                    callee,
+                    &[1, 2],
+                    std::slice::from_ref(ty),
+                    &Type::I64,
+                )
+                .unwrap();
+                let Step::Invoke {
+                    tail: Tail::Call(symbol),
+                    ..
+                } = &steps[0]
+                else {
+                    panic!("{callee} calls the runtime");
+                };
+                assert_eq!(symbol, expected, "{callee} on {ty:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn pop_reads_the_option_tags_out_of_the_module() {
+        let steps = builtin(
+            &module(),
+            3,
+            "pop",
+            &[1],
+            &[Type::List(Box::new(Type::I64))],
+            &Type::Named("Option".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            steps.last(),
+            Some(&Step::WrapOption {
+                some_tag: 1,
+                none_tag: 0
+            })
+        );
+    }
+
+    /// `print` and `println` pick their entry point from the argument's type,
+    /// through a borrow as well as directly.
+    #[test]
+    fn printing_dispatches_on_what_is_printed() {
+        let borrowed = Type::Ref {
+            inner: Box::new(Type::String),
+            mutable: false,
+        };
+        for (ty, expected) in [
+            (Type::I64, "sl_rt_println_i64"),
+            (Type::String, "sl_rt_println_string"),
+            (borrowed, "sl_rt_println_string"),
+        ] {
+            let steps = builtin(&module(), 0, "println", &[1], &[ty], &Type::Unit).unwrap();
+            let Step::Invoke {
+                tail: Tail::Call(symbol),
+                ..
+            } = &steps[0]
+            else {
+                panic!("println calls the runtime");
+            };
+            assert_eq!(symbol, expected);
+        }
+    }
+
+    /// The hex encoding is what keeps a module path out of the assembler's way,
+    /// and it has to be the same encoding everywhere a name is written.
+    #[test]
+    fn a_module_path_survives_symbol_encoding() {
+        assert_eq!(function_symbol("a:b", false), "sl_fn_613a62");
+        assert_eq!(function_symbol("a:b", true), "sl_test_613a62");
+        assert_eq!(struct_drop_symbol("a:b"), "sl_drop_struct_613a62");
+        assert_eq!(enum_clone_symbol("a:b"), "sl_clone_enum_613a62");
+    }
+}

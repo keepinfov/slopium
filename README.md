@@ -10,9 +10,9 @@ LLVM, виртуальная машина и интерпретатор не н�
 - `slopium` — менеджер проектов, профилей, кэша и тестов, аналог Cargo.
 - `slopium-lsp` — лёгкий language server поверх API компилятора.
 
-Поддерживаемая платформа v0.2: `x86_64-unknown-linux-gnu`. Компилятор сам
-генерирует x86-64 assembly, после чего вызывает `cc` только как assembler и
-linker.
+Поддерживаемые платформы: `x86_64-unknown-linux-gnu` и
+`aarch64-unknown-linux-gnu`. Компилятор сам генерирует assembly для выбранной
+архитектуры, после чего вызывает `cc` только как assembler и linker.
 
 ## Самый быстрый запуск на NixOS/Nix
 
@@ -47,7 +47,9 @@ nix flake check
 ```
 
 `nix develop` предназначен для разработки самого компилятора и включает
-Rust/Cargo, rustfmt, Clippy, GCC, binutils и GDB.
+Rust/Cargo, rustfmt, Clippy, GCC, binutils, GDB, aarch64 cross-toolchain и
+`qemu-aarch64`. Два последних нужны, чтобы собирать и запускать код второго
+backend на x86-64-хосте.
 
 ## Сборка без Nix
 
@@ -75,6 +77,7 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 scripts/project-tests.sh
 scripts/debug-check.sh
+scripts/cross-check.sh
 ```
 
 `project-tests.sh` прогоняет самостоятельные mini-project fixtures через
@@ -85,6 +88,13 @@ scripts/debug-check.sh
 `debug-check.sh` проверяет DWARF line tables: сборку с `--debug`, отсутствие
 debug-секций без него и реальную сессию GDB с breakpoint, шагом и backtrace.
 Сессия пропускается, если GDB недоступен; в `nix develop` он есть.
+
+`cross-check.sh` проверяет согласованность двух backend: собирает весь корпус
+под обе архитектуры, запускает aarch64-сборки под `qemu-aarch64` и требует
+совпадения stdout и кода выхода, включая программы, которые паникуют. Отдельно
+проверяется ABI: функции Slopium линкуются с C-вызывающим кодом, собранным
+настоящим toolchain, с числом аргументов больше, чем помещается в регистры.
+Пропускается без cross-toolchain или qemu; в `nix develop` они есть.
 
 Для локальной установки оба бинарника должны попасть в один `bin`-каталог:
 
@@ -161,7 +171,7 @@ slopic examples/match.slp --emit exe --test -o /tmp/match-tests
 ```text
 --profile dev|release       release включает constant folding
 --debug                     DWARF line tables для отладки
---target <triple>           сейчас: x86_64-unknown-linux-gnu
+--target <triple>           x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu
 --cc <command>              assembler/linker driver
 --diagnostic-format json    JSON diagnostics для IDE/CI
 --source-root <directory>   собрать все .slp модули дерева
@@ -290,6 +300,32 @@ Breakpoint по `файл:строка`, пошаговое выполнение
 slopic examples/fibonacci.slp --emit exe --debug -o /tmp/fibonacci
 ```
 
+### Кросс-компиляция под AArch64
+
+```sh
+nix develop
+slopium build --target aarch64-unknown-linux-gnu
+qemu-aarch64 target/aarch64-unknown-linux-gnu/dev/hello
+```
+
+`nix develop` уже экспортирует `SLOPIUM_CC_AARCH64_UNKNOWN_LINUX_GNU`, поэтому
+менеджер находит cross-`cc` сам. Вне dev shell его нужно задать явно:
+
+```sh
+export SLOPIUM_CC_AARCH64_UNKNOWN_LINUX_GNU=aarch64-linux-gnu-gcc
+```
+
+То же самое для отдельного файла:
+
+```sh
+slopic examples/fibonacci.slp --emit exe \
+  --target aarch64-unknown-linux-gnu \
+  --cc aarch64-linux-gnu-gcc -o /tmp/fibonacci
+```
+
+Оба backend порождают одинаковое поведение: это проверяется
+`scripts/cross-check.sh` на всём корпусе, а не декларируется.
+
 ### Выбор compiler и `cc`
 
 `slopium` ищет `slopic` рядом со своим executable и проверяет protocol version.
@@ -309,10 +345,14 @@ Target выбирается в порядке:
 `cc` выбирается в порядке:
 
 1. `--cc`;
-2. `SLOPIUM_CC_X86_64_UNKNOWN_LINUX_GNU`;
+2. `SLOPIUM_CC_<TARGET>`, например `SLOPIUM_CC_AARCH64_UNKNOWN_LINUX_GNU`;
 3. target config;
 4. общий toolchain config;
-5. `cc` из `PATH`.
+5. `cc` по умолчанию для target.
+
+Для не-host target значение по умолчанию — cross-driver с именем target
+(`aarch64-unknown-linux-gnu-cc`), а не голый `cc`: host-компилятор молча собрал
+бы объекты не той архитектуры.
 
 `.slopium/config.toml`:
 
@@ -387,7 +427,7 @@ nvim examples/fibonacci.slp
 
 ## Ограничения
 
-- только Linux x86-64 glibc;
+- только Linux glibc: x86-64 и AArch64;
 - debug info ограничен line tables: breakpoint по `файл:строка`, пошаговое
   выполнение и backtrace работают, но описания расположения переменных нет,
   поэтому `print x` в GDB недоступен;
@@ -400,7 +440,11 @@ nvim examples/fibonacci.slp
 - нет traits, bounds, registry/Git dependencies, stable FFI и lockfile;
 - dependency graph поддерживает path и bundled-toolchain источники, но пока не
   registry resolution;
-- единственный backend — прямой System V x86-64 codegen.
+- два backend — прямой codegen для System V AMD64 и для AAPCS64; сборка под
+  aarch64 требует cross-`cc`, а запуск на x86-64-хосте — `qemu-aarch64`;
+- на AArch64 проверка переполнения ветвится на trampoline в конце `.text`, и
+  условная ветка достаёт ±1 МиБ: `.text` больше этого не соберётся. Это ошибка
+  ассемблера во время сборки, а не неверный код.
 
 Это намеренно небольшой, но сквозной AOT compiler. Новые возможности
 добавляются после стабилизации соответствующих compiler/runtime interfaces.

@@ -1,12 +1,15 @@
 use crate::ast::Type;
 use crate::cfg::Cfg;
 use crate::diagnostic::{codes, CompileResult, Diagnostic, SourceMap, Span};
+use crate::lowering::{
+    address_taken, clone_function, drop_function, enum_clone_size, enum_clone_symbol,
+    enum_drop_symbol, enum_size, function_symbol, is_pointer_like, struct_clone_symbol,
+    struct_drop_symbol, struct_size, Argument, Step, Tail,
+};
 use crate::mir::{BasicBlock, BinaryOp, Instruction, LocalId, MirFunction, MirModule, Terminator};
 use crate::regalloc::{allocate, Allocation, Location};
 use std::collections::HashMap;
 use std::fmt::Write;
-
-pub const SUPPORTED_TARGET: &str = "x86_64-unknown-linux-gnu";
 
 /// The registers one function may allocate locals to, in the order the
 /// allocator should hand them out.
@@ -59,12 +62,45 @@ pub struct TargetSpec {
 }
 
 pub const X86_64_LINUX_GNU: TargetSpec = TargetSpec {
-    triple: SUPPORTED_TARGET,
+    triple: "x86_64-unknown-linux-gnu",
     architecture: "x86_64",
     abi: "System V AMD64",
     object_format: "ELF",
     default_cc: "cc",
 };
+
+pub const AARCH64_LINUX_GNU: TargetSpec = TargetSpec {
+    triple: "aarch64-unknown-linux-gnu",
+    architecture: "aarch64",
+    abi: "AAPCS64",
+    object_format: "ELF",
+    // A cross toolchain names its driver after the target it builds for, and
+    // the host `cc` would silently produce host objects, so there is no
+    // sensible bare fallback here the way there is for the host target.
+    default_cc: "aarch64-unknown-linux-gnu-cc",
+};
+
+/// Every target this compiler emits for.
+pub const TARGETS: &[TargetSpec] = &[X86_64_LINUX_GNU, AARCH64_LINUX_GNU];
+
+/// The target chosen when nothing asks for one. It is the host, so building
+/// without a `--target` needs no cross toolchain.
+pub const DEFAULT_TARGET: &str = X86_64_LINUX_GNU.triple;
+
+/// The triples of [`TARGETS`], in the same order.
+///
+/// A separate list because `CompilerInfo` is serialized and a `const fn` cannot
+/// build one from the table; `every_target_is_listed_once` keeps the two in
+/// step.
+pub const TARGET_TRIPLES: &[&str] = &["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"];
+
+/// Argument registers of the System V AMD64 calling convention, and their
+/// 32-bit views for the one place a zero is cheaper to write narrow.
+const INTEGER_ARGUMENTS: [&str; 6] = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"];
+const NARROW_ARGUMENTS: [&str; 6] = ["edi", "esi", "edx", "ecx", "r8d", "r9d"];
+const FLOAT_ARGUMENTS: [&str; 8] = [
+    "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7",
+];
 
 pub trait Backend {
     fn target(&self) -> &'static TargetSpec;
@@ -93,6 +129,17 @@ impl Backend for X86_64Backend {
     }
 }
 
+/// The backend that emits for `triple`, or `None` when no backend claims it.
+pub fn backend_for(triple: &str) -> Option<Box<dyn Backend>> {
+    if triple == X86_64_LINUX_GNU.triple {
+        Some(Box::new(X86_64Backend))
+    } else if triple == AARCH64_LINUX_GNU.triple {
+        Some(Box::new(crate::aarch64::Aarch64Backend))
+    } else {
+        None
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct CodegenOptions {
     pub target: String,
@@ -107,7 +154,7 @@ pub struct CodegenOptions {
 impl Default for CodegenOptions {
     fn default() -> Self {
         Self {
-            target: SUPPORTED_TARGET.into(),
+            target: DEFAULT_TARGET.into(),
             test_harness: false,
             emit_entrypoint: true,
             debug: None,
@@ -120,7 +167,7 @@ pub fn emit_assembly(
     module: &MirModule,
     options: &CodegenOptions,
 ) -> CompileResult<String> {
-    if options.target != SUPPORTED_TARGET {
+    let Some(backend) = backend_for(&options.target) else {
         return Err(vec![Diagnostic::error(
             codes::UNSUPPORTED_TARGET,
             file,
@@ -128,10 +175,11 @@ pub fn emit_assembly(
             format!("unsupported target `{}`", options.target),
         )
         .with_help(format!(
-            "the current backend supports `{SUPPORTED_TARGET}`"
+            "available targets: {}",
+            TARGET_TRIPLES.join(", ")
         ))]);
-    }
-    X86_64Backend.emit(file, module, options)
+    };
+    backend.emit(file, module, options)
 }
 
 struct Generator<'a> {
@@ -344,7 +392,7 @@ impl<'a> Generator<'a> {
             function,
             &cfg,
             self.registers.wide.len(),
-            &address_taken(function),
+            &address_taken(self.module, function),
         );
 
         // The saved registers sit above the locals, so a local's slot index is
@@ -434,10 +482,8 @@ impl<'a> Generator<'a> {
     }
 
     fn store_parameters(&mut self, function: &MirFunction) {
-        let integer_regs = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"];
-        let float_regs = [
-            "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7",
-        ];
+        let integer_regs = INTEGER_ARGUMENTS;
+        let float_regs = FLOAT_ARGUMENTS;
         let mut integers = 0;
         let mut floats = 0;
         let mut stack = 0;
@@ -695,14 +741,7 @@ impl<'a> Generator<'a> {
                 .unwrap();
             }
             Instruction::StructNew { dst, name, fields } => {
-                let size = self
-                    .module
-                    .structs
-                    .iter()
-                    .find(|item| &item.name == name)
-                    .map(|item| item.fields.len() * 8)
-                    .unwrap_or(0)
-                    .max(8);
+                let size = struct_size(self.module, name);
                 writeln!(self.output, "  mov rdi, {size}").unwrap();
                 writeln!(self.output, "  call sl_rt_alloc").unwrap();
                 for (index, field) in fields.iter().enumerate() {
@@ -739,7 +778,7 @@ impl<'a> Generator<'a> {
             Instruction::EnumNew {
                 dst, tag, fields, ..
             } => {
-                let size = ((fields.len() + 1) * 8).max(8);
+                let size = enum_size(fields.len());
                 writeln!(self.output, "  mov rdi, {size}").unwrap();
                 writeln!(self.output, "  call sl_rt_alloc").unwrap();
                 writeln!(self.output, "  mov QWORD PTR [rax], {tag}").unwrap();
@@ -1017,17 +1056,32 @@ impl<'a> Generator<'a> {
             BinaryOp::Sub => writeln!(self.output, "  subsd xmm0, xmm1").unwrap(),
             BinaryOp::Mul => writeln!(self.output, "  mulsd xmm0, xmm1").unwrap(),
             BinaryOp::Div => writeln!(self.output, "  divsd xmm0, xmm1").unwrap(),
-            BinaryOp::Less | BinaryOp::Greater | BinaryOp::Equal => {
+            // `ucomisd` reports "unordered" — either operand a NaN — with the
+            // same flags it uses for "below" and for "equal", so `setb` and a
+            // bare `sete` both answer true for a NaN. IEEE 754 says a NaN is
+            // neither less than, greater than, nor equal to anything, which is
+            // also what the constant folder computes and what the other backend
+            // emits; these three sequences are what make the machine agree.
+            BinaryOp::Less => {
+                // Asking "is the right side above the left" rather than "is the
+                // left below the right": `seta` is false when unordered.
+                writeln!(self.output, "  ucomisd xmm1, xmm0").unwrap();
+                writeln!(self.output, "  seta al").unwrap();
+                self.widen_flag_into_xmm0();
+            }
+            BinaryOp::Greater => {
                 writeln!(self.output, "  ucomisd xmm0, xmm1").unwrap();
-                let condition = match op {
-                    BinaryOp::Less => "setb",
-                    BinaryOp::Greater => "seta",
-                    BinaryOp::Equal => "sete",
-                    _ => unreachable!(),
-                };
-                writeln!(self.output, "  {condition} al").unwrap();
-                writeln!(self.output, "  movzx rax, al").unwrap();
-                writeln!(self.output, "  movq xmm0, rax").unwrap();
+                writeln!(self.output, "  seta al").unwrap();
+                self.widen_flag_into_xmm0();
+            }
+            BinaryOp::Equal => {
+                // Equality has no single condition that excludes unordered, so
+                // the parity flag — set only when unordered — is anded in.
+                writeln!(self.output, "  ucomisd xmm0, xmm1").unwrap();
+                writeln!(self.output, "  sete al").unwrap();
+                writeln!(self.output, "  setnp cl").unwrap();
+                writeln!(self.output, "  and al, cl").unwrap();
+                self.widen_flag_into_xmm0();
             }
         }
         writeln!(
@@ -1038,6 +1092,13 @@ impl<'a> Generator<'a> {
         .unwrap();
     }
 
+    /// Moves the flag byte a float comparison just produced into `xmm0`,
+    /// where the rest of `float_binary` expects its result.
+    fn widen_flag_into_xmm0(&mut self) {
+        writeln!(self.output, "  movzx rax, al").unwrap();
+        writeln!(self.output, "  movq xmm0, rax").unwrap();
+    }
+
     fn call(
         &mut self,
         dst: LocalId,
@@ -1046,319 +1107,9 @@ impl<'a> Generator<'a> {
         arg_types: &[Type],
         result: &Type,
     ) {
-        if callee == "clone" {
-            writeln!(
-                self.output,
-                "  mov rdi, {}",
-                operand(&self.alloc, self.registers, args[0])
-            )
-            .unwrap();
-            if let Some(clone_function) = self.clone_function(&arg_types[0]) {
-                writeln!(self.output, "  call {clone_function}").unwrap();
-            } else {
-                writeln!(self.output, "  mov rax, rdi").unwrap();
-            }
-        } else if matches!(callee, "list" | "array") {
-            writeln!(self.output, "  mov rdi, 8").unwrap();
-            let element = match result {
-                Type::List(element) => element.as_ref(),
-                Type::Array { element, .. } => element.as_ref(),
-                _ => unreachable!("collection constructor must return List or Array"),
-            };
-            if let Some(drop_function) = self.drop_function(element) {
-                writeln!(self.output, "  lea rsi, {drop_function}[rip]").unwrap();
-            } else {
-                writeln!(self.output, "  xor esi, esi").unwrap();
-            }
-            if let Some(clone_function) = self.clone_function(element) {
-                writeln!(self.output, "  lea rdx, {clone_function}[rip]").unwrap();
-            } else {
-                writeln!(self.output, "  xor edx, edx").unwrap();
-            }
-            writeln!(self.output, "  call sl_rt_list_new").unwrap();
-            writeln!(
-                self.output,
-                "  mov {}, rax",
-                operand(&self.alloc, self.registers, dst)
-            )
-            .unwrap();
-            for arg in args {
-                writeln!(
-                    self.output,
-                    "  mov rdi, {}",
-                    operand(&self.alloc, self.registers, dst)
-                )
-                .unwrap();
-                writeln!(self.output, "  lea rsi, {}", address(&self.alloc, *arg)).unwrap();
-                writeln!(self.output, "  call sl_rt_list_push").unwrap();
-            }
-            writeln!(
-                self.output,
-                "  mov rax, {}",
-                operand(&self.alloc, self.registers, dst)
-            )
-            .unwrap();
-        } else if callee == "slice" {
-            writeln!(
-                self.output,
-                "  mov rdi, {}",
-                operand(&self.alloc, self.registers, args[0])
-            )
-            .unwrap();
-            writeln!(
-                self.output,
-                "  mov rsi, {}",
-                operand(&self.alloc, self.registers, args[1])
-            )
-            .unwrap();
-            writeln!(
-                self.output,
-                "  mov rdx, {}",
-                operand(&self.alloc, self.registers, args[2])
-            )
-            .unwrap();
-            writeln!(self.output, "  call sl_rt_slice_new").unwrap();
-        } else if callee == "len" {
-            writeln!(
-                self.output,
-                "  mov rdi, {}",
-                operand(&self.alloc, self.registers, args[0])
-            )
-            .unwrap();
-            if reference_is_slice(&arg_types[0]) {
-                writeln!(self.output, "  call sl_rt_slice_len").unwrap();
-            } else {
-                writeln!(self.output, "  call sl_rt_list_len").unwrap();
-            }
-        } else if callee == "push" {
-            writeln!(
-                self.output,
-                "  mov rdi, {}",
-                operand(&self.alloc, self.registers, args[0])
-            )
-            .unwrap();
-            writeln!(self.output, "  lea rsi, {}", address(&self.alloc, args[1])).unwrap();
-            writeln!(self.output, "  call sl_rt_list_push").unwrap();
-        } else if callee == "get" {
-            writeln!(
-                self.output,
-                "  mov rdi, {}",
-                operand(&self.alloc, self.registers, args[0])
-            )
-            .unwrap();
-            writeln!(
-                self.output,
-                "  mov rsi, {}",
-                operand(&self.alloc, self.registers, args[1])
-            )
-            .unwrap();
-            if reference_is_slice(&arg_types[0]) {
-                writeln!(self.output, "  call sl_rt_slice_get").unwrap();
-            } else {
-                writeln!(self.output, "  call sl_rt_list_get").unwrap();
-            }
-            writeln!(self.output, "  mov rax, QWORD PTR [rax]").unwrap();
-        } else if callee == "get-ref" {
-            writeln!(
-                self.output,
-                "  mov rdi, {}",
-                operand(&self.alloc, self.registers, args[0])
-            )
-            .unwrap();
-            writeln!(
-                self.output,
-                "  mov rsi, {}",
-                operand(&self.alloc, self.registers, args[1])
-            )
-            .unwrap();
-            if reference_is_slice(&arg_types[0]) {
-                writeln!(self.output, "  call sl_rt_slice_get").unwrap();
-            } else {
-                writeln!(self.output, "  call sl_rt_list_get").unwrap();
-            }
-            if matches!(
-                result,
-                Type::Ref { inner, .. }
-                    if matches!(
-                        inner.as_ref(),
-                        Type::String
-                            | Type::List(_)
-                            | Type::Array { .. }
-                            | Type::Slice(_)
-                            | Type::Named(_)
-                    )
-            ) {
-                writeln!(self.output, "  mov rax, QWORD PTR [rax]").unwrap();
-            }
-        } else if callee == "pop" {
-            writeln!(
-                self.output,
-                "  mov rdi, {}",
-                operand(&self.alloc, self.registers, args[0])
-            )
-            .unwrap();
-            writeln!(self.output, "  lea rsi, {}", address(&self.alloc, dst)).unwrap();
-            writeln!(self.output, "  call sl_rt_list_try_pop").unwrap();
-            let Type::Named(option_name) = result else {
-                unreachable!("pop must return Option<T>");
-            };
-            let option = self
-                .module
-                .enums
-                .iter()
-                .find(|item| &item.name == option_name)
-                .expect("Option layout must be present");
-            let none_tag = option
-                .variants
-                .iter()
-                .find(|variant| variant.name == "None")
-                .map(|variant| variant.tag)
-                .expect("Option must define None");
-            let some_tag = option
-                .variants
-                .iter()
-                .find(|variant| variant.name == "Some")
-                .map(|variant| variant.tag)
-                .expect("Option must define Some");
-            writeln!(self.output, "  test rax, rax").unwrap();
-            writeln!(self.output, "  jz 1f").unwrap();
-            writeln!(self.output, "  mov rdi, 16").unwrap();
-            writeln!(self.output, "  call sl_rt_alloc").unwrap();
-            writeln!(self.output, "  mov QWORD PTR [rax], {some_tag}").unwrap();
-            writeln!(
-                self.output,
-                "  mov rcx, {}",
-                operand(&self.alloc, self.registers, dst)
-            )
-            .unwrap();
-            writeln!(self.output, "  mov QWORD PTR [rax+8], rcx").unwrap();
-            writeln!(self.output, "  jmp 2f").unwrap();
-            writeln!(self.output, "1:").unwrap();
-            writeln!(self.output, "  mov rdi, 8").unwrap();
-            writeln!(self.output, "  call sl_rt_alloc").unwrap();
-            writeln!(self.output, "  mov QWORD PTR [rax], {none_tag}").unwrap();
-            writeln!(self.output, "2:").unwrap();
-        } else if callee == "remove" {
-            writeln!(
-                self.output,
-                "  mov rdi, {}",
-                operand(&self.alloc, self.registers, args[0])
-            )
-            .unwrap();
-            writeln!(
-                self.output,
-                "  mov rsi, {}",
-                operand(&self.alloc, self.registers, args[1])
-            )
-            .unwrap();
-            writeln!(self.output, "  call sl_rt_list_remove").unwrap();
-        } else if callee == "read-i64" {
-            writeln!(self.output, "  call sl_rt_read_i64").unwrap();
-        } else if callee == "read-line" {
-            writeln!(self.output, "  call sl_rt_read_line").unwrap();
-        } else if callee == "parse-i64" {
-            writeln!(
-                self.output,
-                "  mov rdi, {}",
-                operand(&self.alloc, self.registers, args[0])
-            )
-            .unwrap();
-            writeln!(self.output, "  call sl_rt_parse_i64").unwrap();
-        } else if callee == "env" {
-            writeln!(
-                self.output,
-                "  mov rdi, {}",
-                operand(&self.alloc, self.registers, args[0])
-            )
-            .unwrap();
-            writeln!(self.output, "  call sl_rt_env").unwrap();
-        } else if callee == "args-len" {
-            writeln!(self.output, "  call sl_rt_args_len").unwrap();
-        } else if callee == "arg" {
-            writeln!(
-                self.output,
-                "  mov rdi, {}",
-                operand(&self.alloc, self.registers, args[0])
-            )
-            .unwrap();
-            writeln!(self.output, "  call sl_rt_arg").unwrap();
-        } else if matches!(callee, "print" | "println") {
-            writeln!(
-                self.output,
-                "  mov rdi, {}",
-                operand(&self.alloc, self.registers, args[0])
-            )
-            .unwrap();
-            let string = match &arg_types[0] {
-                Type::String => true,
-                Type::Ref { inner, .. } => inner.as_ref() == &Type::String,
-                _ => false,
-            };
-            let suffix = if callee == "println" {
-                "println"
-            } else {
-                "print"
-            };
-            let runtime = if string {
-                format!("sl_rt_{suffix}_string")
-            } else {
-                format!("sl_rt_{suffix}_i64")
-            };
-            writeln!(self.output, "  call {runtime}").unwrap();
-        } else {
-            let integer_regs = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"];
-            let float_regs = [
-                "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7",
-            ];
-            let mut integers = 0;
-            let mut floats = 0;
-            let mut stack_args = Vec::new();
-            for (arg, ty) in args.iter().zip(arg_types) {
-                if *ty == Type::F64 {
-                    if floats >= float_regs.len() {
-                        stack_args.push((*arg, ty));
-                    } else {
-                        writeln!(
-                            self.output,
-                            "  movq {}, {}",
-                            float_regs[floats],
-                            operand(&self.alloc, self.registers, *arg)
-                        )
-                        .unwrap();
-                        floats += 1;
-                    }
-                } else {
-                    if integers >= integer_regs.len() {
-                        stack_args.push((*arg, ty));
-                    } else {
-                        writeln!(
-                            self.output,
-                            "  mov {}, {}",
-                            integer_regs[integers],
-                            operand(&self.alloc, self.registers, *arg)
-                        )
-                        .unwrap();
-                        integers += 1;
-                    }
-                }
-            }
-            let padding = usize::from(stack_args.len() % 2 != 0);
-            if padding != 0 {
-                writeln!(self.output, "  sub rsp, 8").unwrap();
-            }
-            for (arg, _) in stack_args.iter().rev() {
-                writeln!(
-                    self.output,
-                    "  push {}",
-                    operand(&self.alloc, self.registers, *arg)
-                )
-                .unwrap();
-            }
-            writeln!(self.output, "  call {}", self.symbol(callee, false)).unwrap();
-            let cleanup = (stack_args.len() + padding) * 8;
-            if cleanup != 0 {
-                writeln!(self.output, "  add rsp, {cleanup}").unwrap();
-            }
+        match crate::lowering::builtin(self.module, dst, callee, args, arg_types, result) {
+            Some(steps) => self.builtin(dst, &steps),
+            None => self.ordinary_call(callee, args, arg_types),
         }
         match result {
             Type::Unit => {}
@@ -1374,6 +1125,140 @@ impl<'a> Generator<'a> {
                 operand(&self.alloc, self.registers, dst)
             )
             .unwrap(),
+        }
+    }
+
+    /// Carries out a builtin's lowering plan.
+    ///
+    /// Every step is a statement about values, not about x86: what this adds is
+    /// the argument registers, the addressing mode, and the branch spelling.
+    fn builtin(&mut self, dst: LocalId, steps: &[Step]) {
+        for step in steps {
+            match step {
+                Step::Invoke { arguments, tail } => {
+                    for (index, argument) in arguments.iter().enumerate() {
+                        let register = INTEGER_ARGUMENTS[index];
+                        match argument {
+                            Argument::Value(local) => writeln!(
+                                self.output,
+                                "  mov {register}, {}",
+                                operand(&self.alloc, self.registers, *local)
+                            )
+                            .unwrap(),
+                            Argument::Address(local) => writeln!(
+                                self.output,
+                                "  lea {register}, {}",
+                                address(&self.alloc, *local)
+                            )
+                            .unwrap(),
+                            Argument::Immediate(value) => {
+                                writeln!(self.output, "  mov {register}, {value}").unwrap()
+                            }
+                            Argument::Function(Some(symbol)) => {
+                                writeln!(self.output, "  lea {register}, {symbol}[rip]").unwrap()
+                            }
+                            // Writing the 32-bit view clears the whole
+                            // register and encodes one byte shorter.
+                            Argument::Function(None) => {
+                                let narrow = NARROW_ARGUMENTS[index];
+                                writeln!(self.output, "  xor {narrow}, {narrow}").unwrap()
+                            }
+                        }
+                    }
+                    match tail {
+                        Tail::Call(symbol) => writeln!(self.output, "  call {symbol}").unwrap(),
+                        Tail::FirstArgument => {
+                            writeln!(self.output, "  mov rax, {}", INTEGER_ARGUMENTS[0]).unwrap()
+                        }
+                    }
+                }
+                Step::Save => writeln!(
+                    self.output,
+                    "  mov {}, rax",
+                    operand(&self.alloc, self.registers, dst)
+                )
+                .unwrap(),
+                Step::Restore => writeln!(
+                    self.output,
+                    "  mov rax, {}",
+                    operand(&self.alloc, self.registers, dst)
+                )
+                .unwrap(),
+                Step::Load => writeln!(self.output, "  mov rax, QWORD PTR [rax]").unwrap(),
+                Step::WrapOption { some_tag, none_tag } => {
+                    writeln!(self.output, "  test rax, rax").unwrap();
+                    writeln!(self.output, "  jz 1f").unwrap();
+                    writeln!(self.output, "  mov rdi, {}", enum_size(1)).unwrap();
+                    writeln!(self.output, "  call sl_rt_alloc").unwrap();
+                    writeln!(self.output, "  mov QWORD PTR [rax], {some_tag}").unwrap();
+                    writeln!(
+                        self.output,
+                        "  mov rcx, {}",
+                        operand(&self.alloc, self.registers, dst)
+                    )
+                    .unwrap();
+                    writeln!(self.output, "  mov QWORD PTR [rax+8], rcx").unwrap();
+                    writeln!(self.output, "  jmp 2f").unwrap();
+                    writeln!(self.output, "1:").unwrap();
+                    writeln!(self.output, "  mov rdi, {}", enum_size(0)).unwrap();
+                    writeln!(self.output, "  call sl_rt_alloc").unwrap();
+                    writeln!(self.output, "  mov QWORD PTR [rax], {none_tag}").unwrap();
+                    writeln!(self.output, "2:").unwrap();
+                }
+            }
+        }
+    }
+
+    /// A call to a Slopium function, by the platform calling convention.
+    fn ordinary_call(&mut self, callee: &str, args: &[LocalId], arg_types: &[Type]) {
+        let mut integers = 0;
+        let mut floats = 0;
+        let mut stack_args = Vec::new();
+        for (arg, ty) in args.iter().zip(arg_types) {
+            if *ty == Type::F64 {
+                if floats >= FLOAT_ARGUMENTS.len() {
+                    stack_args.push((*arg, ty));
+                } else {
+                    writeln!(
+                        self.output,
+                        "  movq {}, {}",
+                        FLOAT_ARGUMENTS[floats],
+                        operand(&self.alloc, self.registers, *arg)
+                    )
+                    .unwrap();
+                    floats += 1;
+                }
+            } else {
+                if integers >= INTEGER_ARGUMENTS.len() {
+                    stack_args.push((*arg, ty));
+                } else {
+                    writeln!(
+                        self.output,
+                        "  mov {}, {}",
+                        INTEGER_ARGUMENTS[integers],
+                        operand(&self.alloc, self.registers, *arg)
+                    )
+                    .unwrap();
+                    integers += 1;
+                }
+            }
+        }
+        let padding = usize::from(stack_args.len() % 2 != 0);
+        if padding != 0 {
+            writeln!(self.output, "  sub rsp, 8").unwrap();
+        }
+        for (arg, _) in stack_args.iter().rev() {
+            writeln!(
+                self.output,
+                "  push {}",
+                operand(&self.alloc, self.registers, *arg)
+            )
+            .unwrap();
+        }
+        writeln!(self.output, "  call {}", self.symbol(callee, false)).unwrap();
+        let cleanup = (stack_args.len() + padding) * 8;
+        if cleanup != 0 {
+            writeln!(self.output, "  add rsp, {cleanup}").unwrap();
         }
     }
 
@@ -1459,7 +1344,7 @@ impl<'a> Generator<'a> {
 
     fn struct_clone_helper(&mut self, name: &str, fields: &[(String, Type)]) {
         let symbol = struct_clone_symbol(name);
-        let size = (fields.len() * 8).max(8);
+        let size = struct_size(self.module, name);
         writeln!(self.output, ".globl {symbol}").unwrap();
         writeln!(self.output, ".type {symbol}, @function").unwrap();
         writeln!(self.output, "{symbol}:").unwrap();
@@ -1490,12 +1375,7 @@ impl<'a> Generator<'a> {
 
     fn enum_clone_helper(&mut self, name: &str, variants: &[crate::mir::MirVariant]) {
         let symbol = enum_clone_symbol(name);
-        let size = variants
-            .iter()
-            .map(|variant| (variant.fields.len() + 1) * 8)
-            .max()
-            .unwrap_or(8)
-            .max(8);
+        let size = enum_clone_size(self.module, name);
         writeln!(self.output, ".globl {symbol}").unwrap();
         writeln!(self.output, ".type {symbol}, @function").unwrap();
         writeln!(self.output, "{symbol}:").unwrap();
@@ -1628,105 +1508,16 @@ impl<'a> Generator<'a> {
     }
 
     fn drop_function(&self, ty: &Type) -> Option<String> {
-        match ty {
-            Type::String => Some("sl_rt_string_drop".to_owned()),
-            Type::List(_) | Type::Array { .. } => Some("sl_rt_list_drop".to_owned()),
-            Type::Slice(_) => Some("sl_rt_slice_drop".to_owned()),
-            Type::Named(inner) if self.module.structs.iter().any(|item| &item.name == inner) => {
-                Some(struct_drop_symbol(inner))
-            }
-            Type::Named(inner) if self.module.enums.iter().any(|item| &item.name == inner) => {
-                Some(enum_drop_symbol(inner))
-            }
-            _ => None,
-        }
+        drop_function(self.module, ty)
     }
 
     fn clone_function(&self, ty: &Type) -> Option<String> {
-        match ty {
-            Type::String => Some("sl_rt_string_clone".to_owned()),
-            Type::List(_) | Type::Array { .. } => Some("sl_rt_list_clone".to_owned()),
-            Type::Slice(_) => Some("sl_rt_slice_clone".to_owned()),
-            Type::Named(inner) if self.module.structs.iter().any(|item| &item.name == inner) => {
-                Some(struct_clone_symbol(inner))
-            }
-            Type::Named(inner) if self.module.enums.iter().any(|item| &item.name == inner) => {
-                Some(enum_clone_symbol(inner))
-            }
-            _ => None,
-        }
+        clone_function(self.module, ty)
     }
 
     fn symbol(&self, name: &str, is_test: bool) -> String {
-        let prefix = if is_test { "sl_test" } else { "sl_fn" };
-        let encoded = name
-            .bytes()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
-        format!("{prefix}_{encoded}")
+        function_symbol(name, is_test)
     }
-}
-
-fn reference_is_slice(ty: &Type) -> bool {
-    matches!(
-        ty,
-        Type::Ref { inner, .. } if matches!(inner.as_ref(), Type::Slice(_))
-    )
-}
-
-/// A value that is represented by a pointer, so borrowing it copies the pointer
-/// rather than taking the address of the slot holding it.
-fn is_pointer_like(ty: &Type) -> bool {
-    matches!(
-        ty,
-        Type::String | Type::List(_) | Type::Array { .. } | Type::Slice(_) | Type::Named(_)
-    )
-}
-
-/// Locals whose frame address this backend hands to something else, and which
-/// therefore cannot live in a register.
-///
-/// This must list exactly the operands passed to [`address`]: borrowing a
-/// scalar, the elements a collection constructor copies in, the value pushed
-/// onto a list, and the destination the runtime pops into.
-fn address_taken(function: &MirFunction) -> Vec<bool> {
-    let mut pinned = vec![false; function.locals.len()];
-    let mut pin = |local: LocalId| {
-        if let Some(entry) = pinned.get_mut(local) {
-            *entry = true;
-        }
-    };
-    for instruction in function
-        .blocks
-        .iter()
-        .flat_map(|block| block.instructions())
-    {
-        match instruction {
-            Instruction::AddressOf { src, .. } => {
-                let scalar = function
-                    .locals
-                    .get(*src)
-                    .is_some_and(|local| !is_pointer_like(&local.ty));
-                if scalar {
-                    pin(*src);
-                }
-            }
-            Instruction::Call {
-                dst, callee, args, ..
-            } => match callee.as_str() {
-                "list" | "array" => args.iter().copied().for_each(&mut pin),
-                "push" => {
-                    if let Some(value) = args.get(1) {
-                        pin(*value);
-                    }
-                }
-                "pop" => pin(*dst),
-                _ => {}
-            },
-            _ => {}
-        }
-    }
-    pinned
 }
 
 /// The assembly operand naming a local, ready to substitute into any
@@ -1784,7 +1575,7 @@ fn set_condition(op: BinaryOp) -> &'static str {
 /// Only adjacent lines are considered, so a label or any other instruction in
 /// between blocks the rewrite, and `mov` sets no flags, so removing one cannot
 /// change what a following branch sees.
-fn remove_redundant_copies(assembly: &str) -> String {
+pub(crate) fn remove_redundant_copies(assembly: &str) -> String {
     let mut kept: Vec<&str> = Vec::new();
     for line in assembly.lines() {
         // A `.loc` between the two halves of a mirrored pair must not hide it:
@@ -1808,7 +1599,7 @@ fn remove_redundant_copies(assembly: &str) -> String {
     output
 }
 
-fn is_location(line: &str) -> bool {
+pub(crate) fn is_location(line: &str) -> bool {
     line.trim_start().starts_with(".loc ")
 }
 
@@ -1827,57 +1618,45 @@ fn move_operands(line: &str) -> Option<(&str, &str)> {
 ///
 /// Only the two characters that would end or continue the literal need
 /// escaping; a path is bytes and the assembler passes the rest through.
-fn quoted(path: &str) -> String {
+pub(crate) fn quoted(path: &str) -> String {
     path.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-fn align_to(value: usize, alignment: usize) -> usize {
+pub(crate) fn align_to(value: usize, alignment: usize) -> usize {
     value.div_ceil(alignment) * alignment
-}
-
-fn struct_drop_symbol(name: &str) -> String {
-    let encoded = name
-        .bytes()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    format!("sl_drop_struct_{encoded}")
-}
-
-fn struct_clone_symbol(name: &str) -> String {
-    let encoded = name
-        .bytes()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    format!("sl_clone_struct_{encoded}")
-}
-
-fn enum_drop_symbol(name: &str) -> String {
-    let encoded = name
-        .bytes()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    format!("sl_drop_enum_{encoded}")
-}
-
-fn enum_clone_symbol(name: &str) -> String {
-    let encoded = name
-        .bytes()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    format!("sl_clone_enum_{encoded}")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{address_taken, is_location, remove_redundant_copies, CALLEE_SAVED, LEAF};
+    use super::{
+        address_taken, backend_for, is_location, remove_redundant_copies, CALLEE_SAVED,
+        DEFAULT_TARGET, LEAF, TARGETS, TARGET_TRIPLES,
+    };
     use crate::ast::Type;
     use crate::cfg::Cfg;
-    use crate::mir::{BasicBlock, Instruction, MirFunction, MirLocal, Terminator};
+    use crate::mir::{BasicBlock, Instruction, MirFunction, MirLocal, MirModule, Terminator};
     use crate::regalloc::{allocate, Location};
     use crate::{compile_to_assembly, CompileOptions};
 
     fn assemble(source: &str) -> String {
         compile_to_assembly("test.slp", source, &CompileOptions::default()).unwrap()
+    }
+
+    /// The serialized triple list and the target table are two spellings of
+    /// one thing, and a backend added to only one of them would either be
+    /// unreachable or advertised without existing.
+    #[test]
+    fn every_target_is_listed_once() {
+        let from_table: Vec<&str> = TARGETS.iter().map(|spec| spec.triple).collect();
+        assert_eq!(from_table, TARGET_TRIPLES);
+        for spec in TARGETS {
+            assert!(
+                backend_for(spec.triple).is_some(),
+                "{} is listed but has no backend",
+                spec.triple
+            );
+        }
+        assert!(backend_for(DEFAULT_TARGET).is_some());
     }
 
     #[test]
@@ -2010,7 +1789,13 @@ mod tests {
             Terminator::Return(Some(1)),
         )];
 
-        let pinned = address_taken(&function);
+        let module = MirModule {
+            functions: Vec::new(),
+            tests: Vec::new(),
+            structs: Vec::new(),
+            enums: Vec::new(),
+        };
+        let pinned = address_taken(&module, &function);
         assert!(pinned[0], "the borrowed scalar must be pinned");
         assert!(!pinned[1], "the reference itself is an ordinary value");
 
@@ -2119,6 +1904,28 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    /// A NaN compares false three ways, on the machine as well as in the
+    /// folder. `ucomisd` alone answers otherwise, so each of the three has a
+    /// sequence that excludes the unordered case.
+    #[test]
+    fn a_float_comparison_excludes_the_unordered_case() {
+        let less = assemble("(fn a () -> f64 1.0)\n(fn main () -> i32 (if (< (a) (a)) 1 0))");
+        assert!(
+            less.contains("ucomisd xmm1, xmm0") && less.contains("seta al"),
+            "less-than reverses the operands so `seta` answers it:\n{less}"
+        );
+        assert!(!less.contains("setb"), "`setb` is true for a NaN:\n{less}");
+
+        let greater = assemble("(fn a () -> f64 1.0)\n(fn main () -> i32 (if (> (a) (a)) 1 0))");
+        assert!(greater.contains("ucomisd xmm0, xmm1") && greater.contains("seta al"));
+
+        let equal = assemble("(fn a () -> f64 1.0)\n(fn main () -> i32 (if (= (a) (a)) 1 0))");
+        assert!(
+            equal.contains("sete al") && equal.contains("setnp cl") && equal.contains("and al, cl"),
+            "equality has to and in the parity flag:\n{equal}"
+        );
     }
 
     #[test]

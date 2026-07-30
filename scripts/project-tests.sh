@@ -10,7 +10,20 @@ cargo build --quiet --workspace --manifest-path "$workspace_dir/Cargo.toml"
 
 compiler="$workspace_dir/target/debug/slopic"
 manager="$workspace_dir/target/debug/slopium"
-target_triple="x86_64-unknown-linux-gnu"
+host_target="x86_64-unknown-linux-gnu"
+cross_target="aarch64-unknown-linux-gnu"
+cross_cc="${SLOPIUM_CC_AARCH64_UNKNOWN_LINUX_GNU:-aarch64-unknown-linux-gnu-cc}"
+qemu="${SLOPIUM_QEMU_AARCH64:-qemu-aarch64}"
+
+# Every target the manager can build for here. The cross target joins the list
+# only when its toolchain and emulator are present, which is what keeps this
+# suite runnable outside `nix develop`.
+targets=("$host_target")
+if command -v "$cross_cc" >/dev/null 2>&1 && command -v "$qemu" >/dev/null 2>&1; then
+  targets+=("$cross_target")
+else
+  echo "project-tests: no aarch64 toolchain; cross-target checks skipped" >&2
+fi
 
 run_manager() {
   local manifest="$1"
@@ -90,7 +103,9 @@ project_arguments() {
 }
 
 env SLOPIC="$compiler" "$manager" targets >"$result_dir/targets.stdout"
-assert_patterns <(printf '%s\n' "$target_triple (installed)") "$result_dir/targets.stdout"
+assert_patterns \
+  <(printf '%s\n' "$host_target (installed, default)" "$cross_target (installed)") \
+  "$result_dir/targets.stdout"
 env SLOPIC="$compiler" "$manager" compiler >"$result_dir/compiler.stdout"
 assert_patterns <(printf '%s\n' '"protocol": 3') "$result_dir/compiler.stdout"
 
@@ -166,12 +181,12 @@ if command -v readelf >/dev/null 2>&1; then
     "$emit_dir/debug-dev.stderr" "$basic_project/Slopium.toml" build
   run_manager_logged "release debug build" "$emit_dir/debug-release.stdout" \
     "$emit_dir/debug-release.stderr" "$basic_project/Slopium.toml" build --release
-  if ! readelf -S "$basic_project/target/$target_triple/dev/basics" |
+  if ! readelf -S "$basic_project/target/$host_target/dev/basics" |
     grep -q '\.debug_line'; then
     echo "project-tests: a dev build carries no line table" >&2
     exit 1
   fi
-  if readelf -S "$basic_project/target/$target_triple/release/basics" |
+  if readelf -S "$basic_project/target/$host_target/release/basics" |
     grep -q '\.debug_line'; then
     echo "project-tests: a release build carries a line table" >&2
     exit 1
@@ -179,6 +194,51 @@ if command -v readelf >/dev/null 2>&1; then
   echo "project-tests: dev builds are debuggable and release builds are not ... ok"
 else
   echo "project-tests: readelf not found; debug-section check skipped" >&2
+fi
+
+# The manager has to place, name, and drive a build for every target it lists,
+# not only the host: the artifact directory carries the triple, and the `cc` for
+# a cross target comes from a different environment variable than the host's.
+# `readelf` is what proves the object really is for the architecture asked for —
+# a host `cc` handed aarch64 assembly fails loudly, but a misrouted target would
+# otherwise produce a working host binary and look like a pass.
+if command -v readelf >/dev/null 2>&1; then
+  for target in "${targets[@]}"; do
+    target_project="$result_dir/target-$target"
+    cp -R "$projects_dir/pass/basics" "$target_project"
+    run_manager_logged "build for $target" "$result_dir/target-$target.stdout" \
+      "$result_dir/target-$target.stderr" "$target_project/Slopium.toml" \
+      build --target "$target"
+    artifact="$target_project/target/$target/dev/basics"
+    if [[ ! -x "$artifact" ]]; then
+      echo "project-tests: $target build produced no artifact at $artifact" >&2
+      exit 1
+    fi
+    case "$target" in
+      "$host_target") machine="X86-64" ;;
+      "$cross_target") machine="AArch64" ;;
+    esac
+    if ! readelf -h "$artifact" | grep -q "Machine:.*$machine"; then
+      echo "project-tests: $target build is not a $machine binary" >&2
+      readelf -h "$artifact" >&2
+      exit 1
+    fi
+    if [[ "$target" == "$host_target" ]]; then
+      "$artifact" >"$result_dir/target-$target.run"
+    else
+      "$qemu" "$artifact" >"$result_dir/target-$target.run"
+    fi
+    if ! cmp --silent "$projects_dir/pass/basics/expected.stdout" \
+      "$result_dir/target-$target.run"; then
+      echo "project-tests: $target build produced the wrong output" >&2
+      diff -u "$projects_dir/pass/basics/expected.stdout" \
+        "$result_dir/target-$target.run" >&2 || true
+      exit 1
+    fi
+    echo "project-tests: manager builds and runs for $target ... ok"
+  done
+else
+  echo "project-tests: readelf not found; per-target build checks skipped" >&2
 fi
 
 set +e
@@ -230,7 +290,7 @@ while IFS= read -r -d '' project; do
   if [[ -f "$project/release" ]]; then
     run_manager_logged "pass/$name release build" "$prefix.release-build.stdout" \
       "$prefix.release-build.stderr" "$manifest" build --release
-    artifact="$project/target/$target_triple/release/$name"
+    artifact="$project/target/$host_target/release/$name"
     environment_command "$project" "$artifact" "${args[@]}" \
       >"$prefix.release.stdout" 2>"$prefix.release.stderr"
     if ! cmp --silent "$project/expected.stdout" "$prefix.release.stdout"; then
@@ -249,7 +309,7 @@ cp -R "$projects_dir/pass/modules" "$cache_project"
 cache_manifest="$cache_project/Slopium.toml"
 run_manager "$cache_manifest" clean >/dev/null
 run_manager "$cache_manifest" build >/dev/null
-cache_objects="$cache_project/target/$target_triple/dev/objects"
+cache_objects="$cache_project/target/$host_target/dev/objects"
 main_stamp="$cache_objects/6d61696e.slop-cache"
 core_stamp="$cache_objects/6d6174683a636f7265.slop-cache"
 main_before="$(sha256sum "$main_stamp" | cut -d ' ' -f 1)"
@@ -318,7 +378,7 @@ while IFS= read -r -d '' project; do
   run_manager_logged "runtime-fail/$name test" "$prefix.test.stdout" \
     "$prefix.test.stderr" "$manifest" test
 
-  artifact="$project/target/$target_triple/dev/$name"
+  artifact="$project/target/$host_target/dev/$name"
   set +e
   environment_command "$project" "$artifact" "${args[@]}" \
     >"$prefix.run.stdout" 2>"$prefix.run.stderr"
