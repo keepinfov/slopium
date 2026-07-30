@@ -1,6 +1,6 @@
 use crate::ast::Type;
 use crate::cfg::Cfg;
-use crate::diagnostic::{codes, CompileResult, Diagnostic};
+use crate::diagnostic::{codes, CompileResult, Diagnostic, SourceMap, Span};
 use crate::mir::{BasicBlock, BinaryOp, Instruction, LocalId, MirFunction, MirModule, Terminator};
 use crate::regalloc::{allocate, Allocation, Location};
 use std::collections::HashMap;
@@ -98,6 +98,10 @@ pub struct CodegenOptions {
     pub target: String,
     pub test_harness: bool,
     pub emit_entrypoint: bool,
+    /// The files spans refer to, when debug line tables are wanted. `None`
+    /// emits no `.file` or `.loc` at all, so assembly is exactly what it was
+    /// before debug information existed.
+    pub debug: Option<SourceMap>,
 }
 
 impl Default for CodegenOptions {
@@ -106,6 +110,7 @@ impl Default for CodegenOptions {
             target: SUPPORTED_TARGET.into(),
             test_harness: false,
             emit_entrypoint: true,
+            debug: None,
         }
     }
 }
@@ -142,6 +147,11 @@ struct Generator<'a> {
     /// are replaced per function.
     alloc: Allocation,
     registers: &'static RegisterFile,
+    /// The last `.loc` written, so a run of statements lowered from the same
+    /// expression produces one line-table row instead of one per instruction.
+    /// Reset at every label, because a jump can arrive there from a row that
+    /// says something else.
+    last_location: Option<(usize, usize, usize)>,
 }
 
 impl<'a> Generator<'a> {
@@ -156,12 +166,14 @@ impl<'a> Generator<'a> {
             diagnostics: Vec::new(),
             alloc: Allocation::stack_only(0),
             registers: &CALLEE_SAVED,
+            last_location: None,
         }
     }
 
     fn generate(mut self) -> CompileResult<String> {
         self.collect_strings();
         writeln!(self.output, ".intel_syntax noprefix").unwrap();
+        self.file_table();
         writeln!(self.output, ".section .rodata").unwrap();
         self.byte_string(".Lsl_panic_div_zero", b"division by zero");
         self.byte_string(".Lsl_panic_overflow", b"integer overflow");
@@ -181,6 +193,12 @@ impl<'a> Generator<'a> {
         for test in self.module.tests.iter().filter(|test| test.emit) {
             self.function(&test.function, true);
         }
+        // Everything past this point is generated glue — clone/drop helpers,
+        // the entry wrapper, the panic trampolines — and emits no location of
+        // its own, so it inherits the last row written. DWARF spells "not in
+        // the source" as line 0, but GAS discards a `.loc` naming it, and
+        // ending the line sequence early would mean giving the glue its own
+        // section. Neither is worth it for code nobody wrote.
         let structs = self.module.structs.clone();
         for structure in structs.iter().filter(|structure| structure.emit) {
             self.struct_clone_helper(&structure.name, &structure.fields);
@@ -257,6 +275,61 @@ impl<'a> Generator<'a> {
         writeln!(self.output).unwrap();
     }
 
+    /// Declares every file the line table may name, numbered from 1 in the
+    /// order [`SourceMap::index_of`] uses.
+    ///
+    /// Every object of a package declares the whole list, including files it
+    /// emits no code from, so a file number means the same thing in all of
+    /// them. Emitting only the referenced files would need a pre-scan and a
+    /// remap of the map's indices, to save a few dozen bytes of unreferenced
+    /// path per object.
+    fn file_table(&mut self) {
+        let Some(sources) = self.options.debug.as_ref() else {
+            return;
+        };
+        for (index, path) in sources.paths().enumerate() {
+            writeln!(self.output, ".file {} \"{}\"", index + 1, quoted(path)).unwrap();
+        }
+    }
+
+    /// Attributes the instructions that follow to `span`.
+    fn location(&mut self, span: Span) {
+        let Some(sources) = self.options.debug.as_ref() else {
+            return;
+        };
+        // A statement the builder synthesized — a drop spliced in at a CFG
+        // merge, say — carries no span, and there is nothing to say instead:
+        // DWARF spells "not in the source" as line 0 and GAS discards a `.loc`
+        // naming it. Such a statement stays under the row before it.
+        if span.line == 0 {
+            return;
+        }
+        let Some(index) = sources.index_of(span) else {
+            return;
+        };
+        let location = (index + 1, span.line, span.column);
+        if self.last_location == Some(location) {
+            return;
+        }
+        self.last_location = Some(location);
+        writeln!(
+            self.output,
+            "  .loc {} {} {}",
+            location.0, location.1, location.2
+        )
+        .unwrap();
+    }
+
+    /// Writes a label and forgets the last `.loc`.
+    ///
+    /// Forgetting it makes each block open a row of its own rather than
+    /// continue the previous block's, so the address a breakpoint resolves to
+    /// is the start of the block that begins the line.
+    fn label(&mut self, label: &str) {
+        writeln!(self.output, "{label}:").unwrap();
+        self.last_location = None;
+    }
+
     fn function(&mut self, function: &MirFunction, is_test: bool) {
         let symbol = self.symbol(&function.name, is_test);
         let epilogue = format!(".L{}_epilogue", symbol);
@@ -288,7 +361,10 @@ impl<'a> Generator<'a> {
 
         writeln!(self.output, ".globl {symbol}").unwrap();
         writeln!(self.output, ".type {symbol}, @function").unwrap();
-        writeln!(self.output, "{symbol}:").unwrap();
+        self.label(&symbol);
+        // The prologue is attributed to the declaration, so a breakpoint on the
+        // function stops before its body rather than inside its first statement.
+        self.location(function.span);
         writeln!(self.output, "  push rbp").unwrap();
         writeln!(self.output, "  mov rbp, rsp").unwrap();
         if frame_size != 0 {
@@ -306,11 +382,11 @@ impl<'a> Generator<'a> {
 
         self.store_parameters(function);
         for (block_id, block) in function.blocks.iter().enumerate() {
-            writeln!(self.output, ".L{}_bb{}:", symbol, block_id).unwrap();
+            self.label(&format!(".L{}_bb{}", symbol, block_id));
             self.basic_block(function, block, &symbol, &epilogue);
         }
 
-        writeln!(self.output, "{epilogue}:").unwrap();
+        self.label(epilogue.as_str());
         for (index, register) in saved.iter().enumerate() {
             writeln!(
                 self.output,
@@ -418,9 +494,11 @@ impl<'a> Generator<'a> {
         symbol: &str,
         epilogue: &str,
     ) {
-        for instruction in block.instructions() {
-            self.instruction(function, instruction);
+        for statement in &block.statements {
+            self.location(statement.span);
+            self.instruction(function, &statement.instruction);
         }
+        self.location(block.terminator_span);
         match &block.terminator {
             Terminator::Return(value) => {
                 if let Some(local) = value {
@@ -1709,8 +1787,14 @@ fn set_condition(op: BinaryOp) -> &'static str {
 fn remove_redundant_copies(assembly: &str) -> String {
     let mut kept: Vec<&str> = Vec::new();
     for line in assembly.lines() {
+        // A `.loc` between the two halves of a mirrored pair must not hide it:
+        // debug information is not allowed to change which instructions are
+        // emitted. The directive stays where it is and covers whatever the
+        // deletion leaves after it.
         let undoes_previous = kept
-            .last()
+            .iter()
+            .rev()
+            .find(|kept| !is_location(kept))
             .and_then(|previous| move_operands(previous))
             .zip(move_operands(line))
             .is_some_and(|((dst, src), (next_dst, next_src))| dst == next_src && src == next_dst);
@@ -1724,6 +1808,10 @@ fn remove_redundant_copies(assembly: &str) -> String {
     output
 }
 
+fn is_location(line: &str) -> bool {
+    line.trim_start().starts_with(".loc ")
+}
+
 /// The destination and source of a plain `mov`, or `None` for anything else.
 fn move_operands(line: &str) -> Option<(&str, &str)> {
     let operands = line.strip_prefix("  mov ")?;
@@ -1733,6 +1821,14 @@ fn move_operands(line: &str) -> Option<(&str, &str)> {
     // rejecting nothing here is still correct: equality of the two operand
     // strings is what makes the pair redundant.
     Some((dst.trim(), src.trim()))
+}
+
+/// A path as the body of an assembler string literal.
+///
+/// Only the two characters that would end or continue the literal need
+/// escaping; a path is bytes and the assembler passes the rest through.
+fn quoted(path: &str) -> String {
+    path.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 fn align_to(value: usize, alignment: usize) -> usize {
@@ -1773,7 +1869,7 @@ fn enum_clone_symbol(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{address_taken, remove_redundant_copies, CALLEE_SAVED, LEAF};
+    use super::{address_taken, is_location, remove_redundant_copies, CALLEE_SAVED, LEAF};
     use crate::ast::Type;
     use crate::cfg::Cfg;
     use crate::mir::{BasicBlock, Instruction, MirFunction, MirLocal, Terminator};
@@ -1989,5 +2085,142 @@ mod tests {
     fn an_unrelated_copy_survives() {
         let source = "  mov r13, rax\n  mov rcx, r12\n";
         assert_eq!(remove_redundant_copies(source), source);
+    }
+
+    /// Debug information must not cost an optimization: a `.loc` landing
+    /// between the two halves of a mirrored pair still lets the pair collapse.
+    #[test]
+    fn a_location_between_two_copies_does_not_save_the_second() {
+        let source = "  mov r13, rax\n  .loc 1 7 3\n  mov rax, r13\n  ret\n";
+        assert_eq!(
+            remove_redundant_copies(source),
+            "  mov r13, rax\n  .loc 1 7 3\n  ret\n"
+        );
+    }
+
+    const DEBUGGED: &str = "\
+(fn square ((n i64)) -> i64
+  (* n n))
+
+(fn main () -> i32
+  (let a 6)
+  (let b (square a))
+  (println b)
+  0)
+";
+
+    fn assemble_with_debug(file: &str, source: &str) -> String {
+        compile_to_assembly(
+            file,
+            source,
+            &CompileOptions {
+                debug: true,
+                ..CompileOptions::default()
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn no_line_directives_without_debug() {
+        let assembly = assemble(DEBUGGED);
+        assert!(!assembly.contains(".loc "), "{assembly}");
+        assert!(!assembly.contains(".file "), "{assembly}");
+    }
+
+    /// The property that makes `--debug` safe to turn on: it adds directives
+    /// and changes nothing else. Anything that made a `.loc` alter register
+    /// allocation, instruction selection or the peephole would show up here.
+    #[test]
+    fn debug_information_adds_directives_and_changes_no_instruction() {
+        let plain = assemble(DEBUGGED);
+        let debugged = assemble_with_debug("test.slp", DEBUGGED);
+        let stripped: String = debugged
+            .lines()
+            .filter(|line| !is_location(line) && !line.starts_with(".file "))
+            .map(|line| format!("{line}\n"))
+            .collect();
+
+        assert_eq!(stripped, plain);
+    }
+
+    #[test]
+    fn every_line_directive_names_a_line_of_its_file() {
+        let assembly = assemble_with_debug("test.slp", DEBUGGED);
+        assert_eq!(assembly.matches(".file ").count(), 1);
+        assert!(assembly.contains(".file 1 \"test.slp\""));
+
+        let lines = DEBUGGED.lines().count();
+        let mut seen = Vec::new();
+        for directive in assembly.lines().filter(|line| is_location(line)) {
+            let fields: Vec<&str> = directive.split_whitespace().collect();
+            let [_, file, line, column] = fields[..] else {
+                panic!("`{directive}` is not `.loc FILE LINE COLUMN`");
+            };
+            assert_eq!(file, "1", "only one file is in play");
+            let line: usize = line.parse().expect("a line number");
+            let column: usize = column.parse().expect("a column number");
+            assert!(
+                (1..=lines).contains(&line),
+                "`{directive}` names a line outside a {lines}-line file"
+            );
+            assert!(column >= 1, "DWARF column 0 means `unknown`");
+            seen.push(line);
+        }
+
+        // Both function bodies and the statements between them are covered.
+        for line in [1, 2, 4, 5, 6, 7, 8] {
+            assert!(seen.contains(&line), "line {line} has no row: {seen:?}");
+        }
+    }
+
+    /// A statement is attributed to the module it was written in, not to
+    /// whichever module the object happens to be emitted for.
+    #[test]
+    fn a_multi_module_package_numbers_every_file_it_names() {
+        use crate::package::{PackageInput, PackageSource};
+
+        let source = |module: &str, text: &str| PackageSource {
+            path: format!("src/{module}.slp"),
+            namespace: None,
+            module: module.to_owned(),
+            source: text.to_owned(),
+        };
+        let input = PackageInput {
+            name: "demo".into(),
+            entry_module: "main".into(),
+            files: vec![
+                source(
+                    "helper",
+                    "(export twice)\n(fn twice ((n i64)) -> i64\n  (* n 2))\n",
+                ),
+                source(
+                    "main",
+                    "(take helper twice)\n(fn main () -> i32\n  (println (twice 21))\n  0)\n",
+                ),
+            ],
+        };
+        let assembly = crate::compile_package_to_assembly(
+            &input,
+            &CompileOptions {
+                debug: true,
+                ..CompileOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert!(
+            assembly.contains(".file 1 \"src/helper.slp\""),
+            "{assembly}"
+        );
+        assert!(assembly.contains(".file 2 \"src/main.slp\""), "{assembly}");
+        assert!(
+            body_of(&assembly, "helper:twice").contains(".loc 1 3 "),
+            "`twice` is attributed to helper.slp line 3:\n{assembly}"
+        );
+        assert!(
+            assembly.contains(".loc 2 3 "),
+            "`main` is attributed to main.slp line 3:\n{assembly}"
+        );
     }
 }

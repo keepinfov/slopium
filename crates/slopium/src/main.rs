@@ -456,6 +456,9 @@ fn build(project: &Project, args: &BuildArgs, test: bool) -> Result<PathBuf, Str
             if test {
                 command.arg("--test");
             }
+            if debug_info(profile, profile_name) {
+                command.arg("--debug");
+            }
             let status = command
                 .status()
                 .map_err(|error| format!("cannot start slopic: {error}"))?;
@@ -953,6 +956,18 @@ fn target(project: &Project, override_target: Option<String>) -> String {
         .unwrap_or_else(|| SUPPORTED_TARGET.into())
 }
 
+/// Whether a profile emits DWARF line tables.
+///
+/// An absent `debug` means the conventional default: on for `dev`, off for
+/// `release`. The build caches hash this resolved answer rather than the raw
+/// field, because an absent field and an explicit `debug = false` hash alike
+/// while resolving differently under `dev`.
+fn debug_info(profile: Option<&Profile>, profile_name: &str) -> bool {
+    profile
+        .and_then(|profile| profile.debug)
+        .unwrap_or(profile_name == "dev")
+}
+
 fn cc_for(project: &Project, target: &str, override_cc: Option<String>) -> String {
     let normalized = target.replace('-', "_").to_ascii_uppercase();
     override_cc
@@ -1022,8 +1037,8 @@ fn cache_key(input: CacheInputs<'_>) -> Result<String, String> {
     hasher.write(&[u8::from(input.test)]);
     if let Some(profile) = input.profile {
         hasher.write(&[profile.opt_level.unwrap_or_default()]);
-        hasher.write(&[u8::from(profile.debug.unwrap_or_default())]);
     }
+    hasher.write(&[u8::from(debug_info(input.profile, input.profile_name))]);
     let metadata = fs::metadata(input.compiler)
         .map_err(|error| format!("cannot inspect `{}`: {error}", input.compiler.display()))?;
     hasher.write(&metadata.len().to_le_bytes());
@@ -1053,8 +1068,8 @@ fn module_cache_key(
     hasher.write(&[u8::from(input.test)]);
     if let Some(profile) = input.profile {
         hasher.write(&[profile.opt_level.unwrap_or_default()]);
-        hasher.write(&[u8::from(profile.debug.unwrap_or_default())]);
     }
+    hasher.write(&[u8::from(debug_info(input.profile, input.profile_name))]);
     let metadata = fs::metadata(input.compiler)
         .map_err(|error| format!("cannot inspect `{}`: {error}", input.compiler.display()))?;
     hasher.write(&metadata.len().to_le_bytes());

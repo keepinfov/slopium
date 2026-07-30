@@ -15,7 +15,7 @@ pub mod syntax;
 pub mod verify;
 
 use crate::codegen::{CodegenOptions, SUPPORTED_TARGET};
-use crate::diagnostic::{codes, CompileResult, Diagnostic};
+use crate::diagnostic::{codes, CompileResult, Diagnostic, SourceMap};
 use crate::mir::MirModule;
 use crate::sema::TypedProgram;
 use serde::Serialize;
@@ -23,7 +23,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub const COMPILER_PROTOCOL: u32 = 2;
+pub const COMPILER_PROTOCOL: u32 = 3;
 pub const RUNTIME_SOURCE: &[u8] = include_bytes!("../../../runtime/slop_rt.c");
 pub const STANDARD_LIBRARY_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -35,6 +35,9 @@ pub struct CompileOptions {
     pub codegen_module: Option<String>,
     pub language_items: LanguageItems,
     pub validate_entry_point: bool,
+    /// Emit DWARF line tables, so a debugger can map an address back to the
+    /// expression it came from.
+    pub debug: bool,
 }
 
 impl Default for CompileOptions {
@@ -46,6 +49,7 @@ impl Default for CompileOptions {
             codegen_module: None,
             language_items: LanguageItems::default(),
             validate_entry_point: true,
+            debug: false,
         }
     }
 }
@@ -166,6 +170,7 @@ pub fn compile_to_assembly(
             target: options.target.clone(),
             test_harness: options.test_harness,
             emit_entrypoint: true,
+            debug: options.debug.then(|| SourceMap::single(file)),
         },
     )
 }
@@ -186,6 +191,7 @@ pub fn compile_package_to_assembly(
             target: options.target.clone(),
             test_harness: options.test_harness && emits_entrypoint,
             emit_entrypoint: emits_entrypoint,
+            debug: options.debug.then(|| package::source_map(input)),
         },
     )
 }

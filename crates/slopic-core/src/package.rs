@@ -1,5 +1,5 @@
 use crate::ast::{self, Expr, ExprKind, ImportItem, MatchArm, Pattern, Program, TakeDecl, Type};
-use crate::diagnostic::{codes, CompileResult, Diagnostic, Span};
+use crate::diagnostic::{codes, CompileResult, Diagnostic, SourceMap, Span};
 use crate::sema::{self, TypedProgram};
 use crate::{lexer, parser, CompileOptions};
 use serde::Serialize;
@@ -75,6 +75,35 @@ struct ModuleUnit {
     program: Program,
     declarations: HashMap<String, Decl>,
     imports: HashMap<String, String>,
+}
+
+/// Where each source starts in the virtual concatenation that package analysis
+/// merges the modules into.
+///
+/// Spans in the merged program are offsets into that concatenation. Both the
+/// diagnostic remapper and the debug-line emitter turn one back into a file, so
+/// the rule they share lives here rather than in either of them. The extra byte
+/// per file keeps the ranges from touching, so a span at the very start of a
+/// module cannot be read as the end of the one before it.
+pub fn source_bases(files: &[PackageSource]) -> Vec<usize> {
+    let mut base = 0;
+    files
+        .iter()
+        .map(|source| {
+            let start = base;
+            base += source.source.len() + 1;
+            start
+        })
+        .collect()
+}
+
+/// The file each span of a merged package belongs to.
+pub fn source_map(input: &PackageInput) -> SourceMap {
+    SourceMap::new(
+        source_bases(&input.files)
+            .into_iter()
+            .zip(input.files.iter().map(|source| source.path.clone())),
+    )
 }
 
 pub fn analyze_package(input: &PackageInput, options: &CompileOptions) -> PackageAnalysis {
@@ -193,11 +222,11 @@ pub fn analyze_package(input: &PackageInput, options: &CompileOptions) -> Packag
         };
     }
 
-    let mut next_base = 0usize;
-    for unit in &mut units {
-        unit.base = next_base;
+    // Every unit that reached here corresponds to an entry of `input.files`, in
+    // order: the loop above returns early if it had to skip any.
+    for (unit, base) in units.iter_mut().zip(source_bases(&input.files)) {
+        unit.base = base;
         shift_program(&mut unit.program, unit.base);
-        next_base += unit.source_len + 1;
     }
     let mut merged = Program {
         exports: Vec::new(),
@@ -1200,5 +1229,76 @@ mod tests {
             .diagnostics
             .iter()
             .any(|diagnostic| diagnostic.message.contains("cycle")));
+    }
+
+    /// Every statement of a lowered function must resolve to the file whose
+    /// module its symbol names. That is what a debug line table rests on: a
+    /// base rule off by a single byte would attribute the opening declaration
+    /// of one module to the end of the one before it.
+    ///
+    /// Each module therefore opens with its function at byte 0, which is the
+    /// only offset sensitive to a one-byte drift — spans further in have slack
+    /// and would keep resolving correctly.
+    #[test]
+    fn every_lowered_span_resolves_to_the_module_it_was_written_in() {
+        let input = PackageInput {
+            name: "demo".into(),
+            entry_module: "main".into(),
+            files: vec![
+                source("alpha", "(fn one () -> i64 1)\n(export one)\n"),
+                source(
+                    "beta",
+                    "(fn two () -> i64\n  (+ (one) (one)))\n(take alpha one)\n(export two)\n",
+                ),
+                source(
+                    "main",
+                    "(fn main () -> i32\n  (println (two))\n  0)\n(take beta two)\n",
+                ),
+            ],
+        };
+        let map = source_map(&input);
+        let paths: Vec<&str> = map.paths().collect();
+        assert_eq!(paths, ["src/alpha.slp", "src/beta.slp", "src/main.slp"]);
+
+        let module = crate::compile_package_to_mir(&input, &CompileOptions::default()).unwrap();
+        let mut checked = 0;
+        let mut at_a_boundary = HashSet::new();
+        let bases = source_bases(&input.files);
+        for function in &module.functions {
+            // `main` carries no module prefix; every other symbol does.
+            let expected = match function.name.rsplit_once(':') {
+                Some((module, _)) => format!("src/{module}.slp"),
+                None => "src/main.slp".to_owned(),
+            };
+            for block in &function.blocks {
+                for span in block
+                    .statements
+                    .iter()
+                    .map(|statement| statement.span)
+                    .chain([block.terminator_span, function.span])
+                {
+                    if span.line == 0 {
+                        continue;
+                    }
+                    let index = map.index_of(span).expect("the map has three files");
+                    assert_eq!(
+                        paths[index], expected,
+                        "`{}` has a span at offset {} attributed to the wrong module",
+                        function.name, span.start
+                    );
+                    checked += 1;
+                    if bases.contains(&span.start) {
+                        at_a_boundary.insert(span.start);
+                    }
+                }
+            }
+        }
+        assert!(checked > 0, "no spans were checked");
+        assert_eq!(
+            at_a_boundary.len(),
+            3,
+            "each module should contribute one span at its own first byte, \
+             which is what makes this test sensitive to the base rule"
+        );
     }
 }

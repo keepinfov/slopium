@@ -74,12 +74,17 @@ target/debug/slopium
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 scripts/project-tests.sh
+scripts/debug-check.sh
 ```
 
 `project-tests.sh` прогоняет самостоятельные mini-project fixtures через
 настоящий `slopium`: форматирование, проверку, dev/release-сборку, запуск,
 языковые тесты, ожидаемые compile errors и runtime failures. Матрица покрытия:
 [`tests/projects/README.md`](tests/projects/README.md).
+
+`debug-check.sh` проверяет DWARF line tables: сборку с `--debug`, отсутствие
+debug-секций без него и реальную сессию GDB с breakpoint, шагом и backtrace.
+Сессия пропускается, если GDB недоступен; в `nix develop` он есть.
 
 Для локальной установки оба бинарника должны попасть в один `bin`-каталог:
 
@@ -155,6 +160,7 @@ slopic examples/match.slp --emit exe --test -o /tmp/match-tests
 
 ```text
 --profile dev|release       release включает constant folding
+--debug                     DWARF line tables для отладки
 --target <triple>           сейчас: x86_64-unknown-linux-gnu
 --cc <command>              assembler/linker driver
 --diagnostic-format json    JSON diagnostics для IDE/CI
@@ -254,7 +260,35 @@ debug = false
 `source` задаёт корень path-derived модулей. Path dependencies получают
 namespace из ключа таблицы; `std` можно заменить path-пакетом с секцией
 `[language-items]`. Поля profiles участвуют в cache key; release также включает
-оптимизирующий MIR pass.
+оптимизирующий MIR pass. `debug` управляет DWARF line tables; если поле не
+указано, оно включено для `dev` и выключено для `release`.
+
+### Отладка в GDB
+
+`slopium build` уже собирает отлаживаемый бинарник:
+
+```sh
+slopium build
+gdb target/x86_64-unknown-linux-gnu/dev/hello
+```
+
+```text
+(gdb) break src/main.slp:3
+(gdb) run
+(gdb) next
+(gdb) backtrace
+```
+
+Breakpoint по `файл:строка`, пошаговое выполнение и backtrace с указанием файла
+и строки для каждого кадра работают, в том числе через границы модулей.
+Расположения переменных не эмитируются, поэтому `print` по имени недоступен, а
+имена функций в кадрах отображаются как ELF-символы.
+
+Для отдельного файла тот же результат даёт `slopic`:
+
+```sh
+slopic examples/fibonacci.slp --emit exe --debug -o /tmp/fibonacci
+```
 
 ### Выбор compiler и `cc`
 
@@ -354,7 +388,11 @@ nvim examples/fibonacci.slp
 ## Ограничения
 
 - только Linux x86-64 glibc;
-- нет debug info: `.loc` и DWARF line tables ещё не эмитируются;
+- debug info ограничен line tables: breakpoint по `файл:строка`, пошаговое
+  выполнение и backtrace работают, но описания расположения переменных нет,
+  поэтому `print x` в GDB недоступен;
+- имена функций в backtrace показываются в mangled-виде (`sl_fn_<hex>`),
+  так как DWARF генерирует ассемблер по ELF-символам;
 - register allocator не разрезает live interval, поэтому значение держит
   регистр и на тех участках, где ни разу не упоминается;
 - ссылки и borrowed slices нельзя возвращать или хранить в aggregates и

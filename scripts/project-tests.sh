@@ -92,7 +92,7 @@ project_arguments() {
 env SLOPIC="$compiler" "$manager" targets >"$result_dir/targets.stdout"
 assert_patterns <(printf '%s\n' "$target_triple (installed)") "$result_dir/targets.stdout"
 env SLOPIC="$compiler" "$manager" compiler >"$result_dir/compiler.stdout"
-assert_patterns <(printf '%s\n' '"protocol": 2') "$result_dir/compiler.stdout"
+assert_patterns <(printf '%s\n' '"protocol": 3') "$result_dir/compiler.stdout"
 
 generated_project="$result_dir/generated-project"
 env SLOPIC="$compiler" "$manager" new generated-project --path "$generated_project" \
@@ -156,6 +156,30 @@ done
 # The readable dump must actually contain blocks and source locations, not
 # just be non-empty.
 assert_patterns <(printf '%s\n' 'bb0:' 'return' '// ') "$emit_dir/basics.mir.txt"
+
+# The manager turns debug information on for `dev` and off for `release`, which
+# is what makes a plain `slopium build` debuggable without asking for anything.
+# The linked section is the check rather than a `.loc` directive, because that
+# is what survives assembly and linking.
+if command -v readelf >/dev/null 2>&1; then
+  run_manager_logged "dev debug build" "$emit_dir/debug-dev.stdout" \
+    "$emit_dir/debug-dev.stderr" "$basic_project/Slopium.toml" build
+  run_manager_logged "release debug build" "$emit_dir/debug-release.stdout" \
+    "$emit_dir/debug-release.stderr" "$basic_project/Slopium.toml" build --release
+  if ! readelf -S "$basic_project/target/$target_triple/dev/basics" |
+    grep -q '\.debug_line'; then
+    echo "project-tests: a dev build carries no line table" >&2
+    exit 1
+  fi
+  if readelf -S "$basic_project/target/$target_triple/release/basics" |
+    grep -q '\.debug_line'; then
+    echo "project-tests: a release build carries a line table" >&2
+    exit 1
+  fi
+  echo "project-tests: dev builds are debuggable and release builds are not ... ok"
+else
+  echo "project-tests: readelf not found; debug-section check skipped" >&2
+fi
 
 set +e
 "$compiler" "$projects_dir/compile-fail/ownership-move/src/main.slp" \

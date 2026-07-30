@@ -41,6 +41,10 @@ struct Cli {
     #[arg(long, value_enum, default_value = "dev")]
     profile: Profile,
 
+    /// Emit DWARF line tables so a debugger can map addresses to source.
+    #[arg(long)]
+    debug: bool,
+
     #[arg(long)]
     runtime: Option<PathBuf>,
 
@@ -175,6 +179,7 @@ fn main() {
             codegen_module: cli.codegen_module,
             language_items,
             validate_entry_point: true,
+            debug: cli.debug,
         },
         runtime: cli.runtime,
         cc: cli.cc,

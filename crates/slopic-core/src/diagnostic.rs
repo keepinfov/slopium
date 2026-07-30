@@ -67,6 +67,54 @@ impl Span {
     }
 }
 
+/// Which source file each span came from.
+///
+/// Package analysis merges every module into one virtual source and shifts
+/// spans by that module's offset into it, so `start` names the file while
+/// `line` and `column` stay file-local. Diagnostics undo the shift; debug
+/// line tables only need the file, which is what this answers.
+#[derive(Clone, Debug, Default)]
+pub struct SourceMap {
+    /// `(base, path)` ascending by base, one entry per file.
+    files: Vec<(usize, String)>,
+}
+
+impl SourceMap {
+    /// The map for a compilation of one file, whose spans are unshifted.
+    pub fn single(path: &str) -> Self {
+        Self {
+            files: vec![(0, path.to_owned())],
+        }
+    }
+
+    /// Builds a map from `(base, path)` pairs in any order.
+    pub fn new(files: impl IntoIterator<Item = (usize, String)>) -> Self {
+        let mut files: Vec<(usize, String)> = files.into_iter().collect();
+        files.sort_by_key(|(base, _)| *base);
+        Self { files }
+    }
+
+    /// The paths, in the order [`SourceMap::index_of`] numbers them.
+    pub fn paths(&self) -> impl Iterator<Item = &str> {
+        self.files.iter().map(|(_, path)| path.as_str())
+    }
+
+    /// Index of the file `span` came from, or `None` when the map is empty.
+    ///
+    /// The first file always starts at offset 0, so every span of a non-empty
+    /// map lands in some file.
+    pub fn index_of(&self, span: Span) -> Option<usize> {
+        if self.files.is_empty() {
+            return None;
+        }
+        Some(
+            self.files
+                .partition_point(|(base, _)| *base <= span.start)
+                .saturating_sub(1),
+        )
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct DiagnosticLabel {
     pub span: Span,
@@ -226,8 +274,58 @@ pub type CompileResult<T> = Result<T, Vec<Diagnostic>>;
 
 #[cfg(test)]
 mod tests {
-    use super::codes;
+    use super::{codes, SourceMap, Span};
     use std::collections::HashSet;
+
+    fn at(start: usize) -> Span {
+        Span {
+            start,
+            end: start,
+            line: 1,
+            column: 1,
+        }
+    }
+
+    #[test]
+    fn a_span_resolves_to_the_file_whose_range_contains_it() {
+        // Three files of four, two and six bytes, laid out the way package
+        // analysis lays them out: one separating byte after each.
+        let map = SourceMap::new([
+            (0, "first.slp".to_owned()),
+            (5, "second.slp".to_owned()),
+            (8, "third.slp".to_owned()),
+        ]);
+
+        for (start, expected) in [(0, 0), (3, 0), (4, 0), (5, 1), (7, 1), (8, 2), (13, 2)] {
+            assert_eq!(
+                map.index_of(at(start)),
+                Some(expected),
+                "offset {start} belongs to file {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_map_is_built_in_base_order_whatever_order_it_is_given() {
+        let map = SourceMap::new([
+            (8, "third.slp".to_owned()),
+            (0, "first.slp".to_owned()),
+            (5, "second.slp".to_owned()),
+        ]);
+
+        assert_eq!(
+            map.paths().collect::<Vec<_>>(),
+            ["first.slp", "second.slp", "third.slp"]
+        );
+        assert_eq!(map.index_of(at(6)), Some(1));
+    }
+
+    #[test]
+    fn an_empty_map_resolves_nothing() {
+        assert_eq!(SourceMap::default().index_of(at(0)), None);
+        assert_eq!(SourceMap::default().paths().count(), 0);
+        assert_eq!(SourceMap::single("only.slp").index_of(at(9000)), Some(0));
+    }
 
     #[test]
     fn diagnostic_codes_are_documented_and_unique() {

@@ -44,7 +44,9 @@ command-line protocol is internal and versioned.
     slot. Allocation runs in both profiles: it is part of code generation
     rather than something the release profile turns on.
 11. A `Backend` partitions MIR by owner module and consumes `MirModule` plus a
-    `TargetSpec`.
+    `TargetSpec`. With debug information requested it also emits `.file` and
+    `.loc` directives from the span each statement carries, which the assembler
+    turns into a DWARF line table.
 
 MIR keeps numbered locals rather than SSA form. The `cfg` module derives what
 SSA would have carried implicitly — successors, predecessors, reverse
@@ -64,6 +66,22 @@ destination — is pinned to memory, because `lea` has no register form. And a
 function that calls anything draws only on callee-saved registers, so no
 clobber set has to be tracked; a function that calls nothing draws first on
 caller-saved registers, which cost no prologue at all.
+
+Debug information is a line table and nothing else. `--debug`, which `slopium`
+passes for any profile whose `debug` is on — the default for `dev` — attributes
+each instruction to the expression it was lowered from, so a debugger can set a
+breakpoint by file and line, step by statement, and produce a backtrace whose
+frames name their own module. Adding it changes no instruction: the emitted
+assembly is the assembly of a build without it, interleaved with directives.
+
+There are no variable locations. A line table needs only spans, but describing
+where a variable lives has to survive register allocation, which gives a local
+one register or one slot for a whole function rather than a fixed frame offset,
+so it would have to choose between `DW_OP_reg` and `DW_OP_fbreg` per local from
+the `Allocation`. Generated code — clone and drop helpers, the entry wrapper,
+the panic trampolines — carries no location of its own and inherits the row
+before it, because the assembler discards the `.loc` that would say "not in the
+source".
 
 The first `Backend` emits Intel-syntax x86-64 assembly for the System V AMD64
 ABI. Adding an architecture means implementing another backend and target

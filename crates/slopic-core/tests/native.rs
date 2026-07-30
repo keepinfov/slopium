@@ -605,6 +605,7 @@ fn c_caller_agrees_with_slopium_stack_parameter_layout() {
             target: SUPPORTED_TARGET.into(),
             test_harness: false,
             emit_entrypoint: false,
+            debug: None,
         },
     )
     .unwrap();

@@ -100,8 +100,11 @@ impl BasicBlock {
 
 /// One instruction together with the source it came from.
 ///
-/// Spans are carried per instruction so a later milestone can emit DWARF line
-/// tables; nothing in code generation reads them yet.
+/// Code generation turns these spans into `.loc` directives, and the assembler
+/// turns those into the DWARF line table, so a span that drifts moves a
+/// breakpoint. In a package build the offsets are into the merged virtual
+/// source while `line` and `column` stay file-local; `diagnostic::SourceMap`
+/// resolves the first back to a file.
 #[derive(Clone, Debug, Serialize)]
 pub struct Statement {
     pub instruction: Instruction,
