@@ -1,5 +1,5 @@
-(take std:option Option)
-(take std:result Result)
+(take mini-std:option Option)
+(take mini-std:result Result)
 
 (fn produce () -> (Result i64 String)
   (Result:Ok 42))

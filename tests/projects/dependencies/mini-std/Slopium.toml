@@ -1,5 +1,5 @@
 [package]
-name = "custom-std"
+name = "mini-std"
 version = "0.2.4"
 source = "src"
 entry = "src/result.slp"

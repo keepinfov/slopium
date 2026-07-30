@@ -29,7 +29,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub const COMPILER_PROTOCOL: u32 = 4;
+pub const COMPILER_PROTOCOL: u32 = 5;
 pub const RUNTIME_SOURCE: &[u8] = include_bytes!("../../../runtime/slop_rt.c");
 pub const STANDARD_LIBRARY_VERSION: &str = env!("CARGO_PKG_VERSION");
 

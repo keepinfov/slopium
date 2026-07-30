@@ -5,7 +5,7 @@ source = "src"
 entry = "src/lib.slp"
 
 [dependencies]
-base = { path = "../foundation" }
+foundation = { path = "../foundation" }
 
 [build]
 target = "x86_64-unknown-linux-gnu"

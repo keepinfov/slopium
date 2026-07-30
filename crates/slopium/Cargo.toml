@@ -11,3 +11,4 @@ serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
 slopic-core = { path = "../slopic-core" }
+slopium-manifest = { path = "../slopium-manifest" }

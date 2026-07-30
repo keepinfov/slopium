@@ -6,3 +6,5 @@
 *.s
 *.out
 nvim.log
+/tests/projects/**/Slopium.lock
+/examples/**/Slopium.lock

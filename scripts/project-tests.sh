@@ -107,7 +107,7 @@ assert_patterns \
   <(printf '%s\n' "$host_target (installed, default)" "$cross_target (installed)") \
   "$result_dir/targets.stdout"
 env SLOPIC="$compiler" "$manager" compiler >"$result_dir/compiler.stdout"
-assert_patterns <(printf '%s\n' '"protocol": 4') "$result_dir/compiler.stdout"
+assert_patterns <(printf '%s\n' '"protocol": 5') "$result_dir/compiler.stdout"
 
 generated_project="$result_dir/generated-project"
 env SLOPIC="$compiler" "$manager" new generated-project --path "$generated_project" \
@@ -132,6 +132,48 @@ if [[ "$format_before" == "$format_after" ]]; then
   exit 1
 fi
 run_manager "$format_project/Slopium.toml" fmt --check >/dev/null
+
+# Lockfile and dependency graph. The diamond fixture is the interesting one:
+# `foundation` is reached through both `mathlib` and `geometry` and must appear
+# once in the lock and once in the build.
+# Run in place: the fixture's dependencies are relative paths, so a copy
+# elsewhere would not resolve. The lock is a build product and gitignored.
+lock_project="$projects_dir/pass/diamond-dependencies"
+run_manager "$lock_project/Slopium.toml" clean >/dev/null
+rm -f "$lock_project/Slopium.lock"
+run_manager "$lock_project/Slopium.toml" check >/dev/null
+if [[ ! -f "$lock_project/Slopium.lock" ]]; then
+  echo "project-tests: check did not write Slopium.lock" >&2
+  exit 1
+fi
+lock_first="$(sha256sum "$lock_project/Slopium.lock" | cut -d ' ' -f 1)"
+assert_patterns <(printf '%s\n' 'name = "foundation"' 'source = "path+../../dependencies/foundation"') \
+  "$lock_project/Slopium.lock"
+if [[ "$(grep -c 'name = "foundation"' "$lock_project/Slopium.lock")" != "1" ]]; then
+  echo "project-tests: the shared dependency appears more than once in the lock" >&2
+  exit 1
+fi
+# Re-resolving is a no-op, and --locked accepts an up-to-date lock.
+run_manager "$lock_project/Slopium.toml" check --locked >/dev/null
+lock_second="$(sha256sum "$lock_project/Slopium.lock" | cut -d ' ' -f 1)"
+if [[ "$lock_first" != "$lock_second" ]]; then
+  echo "project-tests: resolution rewrote an up-to-date lock" >&2
+  exit 1
+fi
+# --locked refuses to update a stale lock.
+printf 'version = 1\n' >"$lock_project/Slopium.lock"
+if run_manager "$lock_project/Slopium.toml" check --locked \
+  >"$result_dir/locked.stdout" 2>"$result_dir/locked.stderr"; then
+  echo "project-tests: --locked accepted a stale lock" >&2
+  exit 1
+fi
+assert_patterns <(printf '%s\n' 'out of date') "$result_dir/locked.stderr"
+rm -f "$lock_project/Slopium.lock"
+run_manager_logged "tree" "$result_dir/tree.stdout" "$result_dir/tree.stderr" \
+  "$lock_project/Slopium.toml" tree
+assert_patterns <(printf '%s\n' 'diamond-dependencies v0.2.4' 'geometry v0.2.4' 'mathlib v0.2.4' 'foundation v0.2.4') \
+  "$result_dir/tree.stdout"
+echo "project-tests: lockfile and tree ... ok"
 
 basic_project="$projects_dir/pass/basics"
 basic_source="$basic_project/src/main.slp"

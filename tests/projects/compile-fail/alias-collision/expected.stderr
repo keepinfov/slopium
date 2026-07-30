@@ -1,1 +1,1 @@
-dependency alias `math` collides with the local module namespace
+dependency `foundation` collides with the local module namespace

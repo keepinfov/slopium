@@ -5,4 +5,4 @@ source = "src"
 entry = "src/main.slp"
 
 [dependencies]
-math = { path = "../../dependencies/foundation" }
+foundation = { path = "../../dependencies/foundation" }

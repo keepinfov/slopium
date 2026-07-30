@@ -1,14 +1,14 @@
-(take math:lib answer)
-(take geo:lib perimeter)
+(take mathlib:lib answer)
+(take geometry:lib perimeter)
 
 (fn main () -> i32
   (println (answer))
   (println (perimeter))
-  (println (+ (math:base:numbers:forty) (geo:base:numbers:forty)))
+  (println (foundation:numbers:forty))
   0)
 
 (test "both branches of a diamond reach the shared dependency"
   (= (+ (answer) (perimeter)) 122))
 
-(test "each branch namespaces the shared dependency separately"
-  (= (math:base:numbers:forty) (geo:base:numbers:forty)))
+(test "the shared dependency is resolved once, under its own package name"
+  (= (perimeter) (+ (foundation:numbers:forty) (foundation:numbers:forty))))

@@ -1,12 +1,12 @@
-(take math:lib answer)
+(take mathlib:lib answer)
 
 (fn main () -> i32
   (println (answer))
-  (println (math:base:numbers:forty))
+  (println (foundation:numbers:forty))
   0)
 
 (test "direct path dependency"
   (= (answer) 42))
 
 (test "transitive dependency namespace"
-  (= (math:base:numbers:forty) 40))
+  (= (foundation:numbers:forty) 40))

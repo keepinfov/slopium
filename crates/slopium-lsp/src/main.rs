@@ -4,7 +4,6 @@ use lsp_types::request::{
     Completion, DocumentSymbolRequest, GotoDefinition, HoverRequest, References, Rename,
     Request as LspRequest, SemanticTokensFullRequest,
 };
-use serde::Deserialize;
 use serde_json::{json, Value};
 use slopic_core::analysis::{analyze_source, Analysis, AnalysisSymbolKind};
 use slopic_core::ast::{Expr, ExprKind, PatternKind, Program, Type};
@@ -14,6 +13,11 @@ use slopic_core::package::{
 };
 use slopic_core::syntax::SyntaxKind;
 use slopic_core::CompileOptions;
+use slopium_manifest::manifest::{load_project, Manifest};
+use slopium_manifest::resolve::{resolve, Resolution};
+use slopium_manifest::source::SourceId;
+use slopium_manifest::std_library::{std_module_path, STD_MODULES};
+use slopium_manifest::version::Version;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fs;
@@ -636,58 +640,18 @@ fn workspace_span_for_uri(symbol: &WorkspaceSymbol, uri: &str) -> Option<Span> {
         .or_else(|| (symbol.definition.uri == uri).then_some(symbol.definition.span))
 }
 
-#[derive(Deserialize)]
-struct WorkspaceManifest {
-    package: WorkspacePackage,
-    #[serde(default)]
-    dependencies: HashMap<String, WorkspaceDependency>,
-    #[serde(default, rename = "language-items")]
-    language_items: WorkspaceLanguageItems,
-}
-
-impl WorkspaceManifest {
-    fn validates_entry_point(&self) -> bool {
-        self.language_items.is_empty()
-            && self
-                .package
-                .entry
-                .file_name()
-                .and_then(|name| name.to_str())
-                != Some("lib.slp")
-    }
-}
-
-#[derive(Deserialize)]
-struct WorkspacePackage {
-    name: String,
-    entry: PathBuf,
-    source: Option<PathBuf>,
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum WorkspaceDependency {
-    Path { path: PathBuf },
-    Toolchain { toolchain: bool },
-}
-
-#[derive(Default, Deserialize)]
-struct WorkspaceLanguageItems {
-    option: Option<String>,
-    result: Option<String>,
-    #[serde(rename = "result-ok")]
-    result_ok: Option<String>,
-    #[serde(rename = "result-err")]
-    result_err: Option<String>,
-}
-
-impl WorkspaceLanguageItems {
-    fn is_empty(&self) -> bool {
-        self.option.is_none()
-            && self.result.is_none()
-            && self.result_ok.is_none()
-            && self.result_err.is_none()
-    }
+/// Whether this package's entry module must define `main`.
+///
+/// `D-015`: a `lib.slp` entry and a manifest defining `[language-items]` are
+/// both library packages, and neither needs an entry point.
+fn validates_entry_point(manifest: &Manifest) -> bool {
+    manifest.language_items.is_empty()
+        && manifest
+            .package
+            .entry
+            .file_name()
+            .and_then(|name| name.to_str())
+            != Some("lib.slp")
 }
 
 struct ParsedWorkspaceFile {
@@ -700,28 +664,11 @@ fn build_workspace(
     manifest_path: &Path,
     open_documents: &HashMap<String, Document>,
 ) -> Result<Workspace, String> {
-    let manifest_source = fs::read_to_string(manifest_path)
-        .map_err(|error| format!("cannot read `{}`: {error}", manifest_path.display()))?;
-    let manifest: WorkspaceManifest = toml::from_str(&manifest_source)
-        .map_err(|error| format!("invalid `{}`: {error}", manifest_path.display()))?;
-    let root = manifest_path
-        .parent()
-        .ok_or_else(|| "manifest has no parent directory".to_owned())?;
-    let source_root = manifest
-        .package
-        .source
-        .as_ref()
-        .map(|source| root.join(source))
-        .unwrap_or_else(|| {
-            root.join(&manifest.package.entry)
-                .parent()
-                .unwrap_or(root)
-                .to_owned()
-        })
-        .canonicalize()
-        .map_err(|error| format!("cannot resolve source root: {error}"))?;
-    let entry = root
-        .join(&manifest.package.entry)
+    let project = load_project(Some(manifest_path.to_path_buf()))?;
+    let manifest = &project.manifest;
+    let source_root = project.source_root()?;
+    let entry = project
+        .entry_path()
         .canonicalize()
         .map_err(|error| format!("cannot resolve package entry: {error}"))?;
     let entry_module = module_from_source_path(&source_root, &entry)?;
@@ -749,17 +696,10 @@ fn build_workspace(
             source: text,
         });
     }
-    let mut language_items = slopic_core::LanguageItems::default();
-    add_workspace_dependencies(
-        manifest_path,
-        &manifest,
-        None,
-        open_documents,
-        &mut files,
-        &mut sources,
-        &mut language_items,
-        &mut HashSet::new(),
-    )?;
+    let toolchain_version = Version::parse(slopic_core::STANDARD_LIBRARY_VERSION)?;
+    let resolution = resolve(&project, &toolchain_version)?;
+    let language_items = language_items_from(&resolution);
+    add_resolved_dependencies(&resolution, open_documents, &mut files, &mut sources)?;
     let input = PackageInput {
         name: manifest.package.name.clone(),
         entry_module,
@@ -769,7 +709,7 @@ fn build_workspace(
         &input,
         &CompileOptions {
             language_items,
-            validate_entry_point: manifest.validates_entry_point(),
+            validate_entry_point: validates_entry_point(manifest),
             ..CompileOptions::default()
         },
     );
@@ -821,118 +761,45 @@ fn build_workspace(
     Ok(workspace)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn add_workspace_dependencies(
-    manifest_path: &Path,
-    manifest: &WorkspaceManifest,
-    prefix: Option<&str>,
+/// Turn a resolved graph into the flat source list `analyze_package` wants.
+///
+/// This replaces a second recursive dependency walk that mirrored the project
+/// manager's. Two walks meant the editor could namespace a module differently
+/// from the build, and nothing compared them (`D-034`).
+fn add_resolved_dependencies(
+    resolution: &Resolution,
     open_documents: &HashMap<String, Document>,
     files: &mut HashMap<String, WorkspaceFile>,
     sources: &mut Vec<PackageSource>,
-    language_items: &mut slopic_core::LanguageItems,
-    visited: &mut HashSet<String>,
 ) -> Result<(), String> {
-    let root = manifest_path
-        .parent()
-        .ok_or_else(|| "dependency manifest has no parent".to_owned())?;
-    let mut dependencies = manifest.dependencies.iter().collect::<Vec<_>>();
-    dependencies.sort_by(|left, right| left.0.cmp(right.0));
-    for (alias, dependency) in dependencies {
-        let namespace = prefix.map_or_else(|| alias.clone(), |prefix| format!("{prefix}:{alias}"));
-        match dependency {
-            WorkspaceDependency::Toolchain { toolchain } => {
-                if !toolchain || alias != "std" {
-                    continue;
-                }
-                for (module, source) in [
-                    (
-                        "option",
-                        "(export Option)\n(enum Option (T) None (Some ((value T))))\n",
-                    ),
-                    (
-                        "result",
-                        "(export Result (Result:Ok :as Ok) (Result:Err :as Err))\n\
-                         (enum Result (T E)\n\
-                           (Ok ((value T)))\n\
-                           (Err ((error E))))\n",
-                    ),
-                ] {
+    for package in resolution.dependencies() {
+        let namespace = package.namespace().to_owned();
+        match (&package.id.source, &package.project) {
+            (SourceId::Toolchain, _) => {
+                for (module, source) in STD_MODULES {
                     sources.push(PackageSource {
-                        path: format!("<toolchain:{namespace}>/{module}.slp"),
+                        path: std_module_path(module),
                         namespace: Some(namespace.clone()),
-                        module: module.into(),
-                        source: source.into(),
+                        module: (*module).into(),
+                        source: (*source).into(),
                     });
                 }
-                if prefix.is_none() {
-                    language_items.option = Some("std:option:Option".into());
-                    language_items.result = Some("std:result:Result".into());
-                    language_items.result_ok = Some("std:result:Ok".into());
-                    language_items.result_err = Some("std:result:Err".into());
-                }
             }
-            WorkspaceDependency::Path { path } => {
-                let dependency_root = root.join(path);
-                let dependency_manifest_path = if dependency_root.is_dir() {
-                    dependency_root.join("Slopium.toml")
-                } else {
-                    dependency_root
-                }
-                .canonicalize()
-                .map_err(|error| format!("cannot resolve dependency `{namespace}`: {error}"))?;
-                let visit_key = format!("{}@{namespace}", dependency_manifest_path.display());
-                if !visited.insert(visit_key) {
-                    continue;
-                }
-                let manifest_source =
-                    fs::read_to_string(&dependency_manifest_path).map_err(|error| {
-                        format!(
-                            "cannot read dependency manifest `{}`: {error}",
-                            dependency_manifest_path.display()
-                        )
-                    })?;
-                let dependency_manifest: WorkspaceManifest = toml::from_str(&manifest_source)
-                    .map_err(|error| {
-                        format!(
-                            "invalid dependency manifest `{}`: {error}",
-                            dependency_manifest_path.display()
-                        )
-                    })?;
-                let dependency_project_root = dependency_manifest_path
-                    .parent()
-                    .ok_or_else(|| "dependency manifest has no parent".to_owned())?;
-                let dependency_source_root = dependency_manifest
-                    .package
-                    .source
-                    .as_ref()
-                    .map(|source| dependency_project_root.join(source))
-                    .unwrap_or_else(|| {
-                        dependency_project_root
-                            .join(&dependency_manifest.package.entry)
-                            .parent()
-                            .unwrap_or(dependency_project_root)
-                            .to_owned()
-                    })
-                    .canonicalize()
-                    .map_err(|error| {
-                        format!("cannot resolve dependency source `{namespace}`: {error}")
-                    })?;
-                let mut dependency_sources = Vec::new();
-                collect_workspace_sources(&dependency_source_root, &mut dependency_sources)?;
-                dependency_sources.sort();
-                for path in dependency_sources {
-                    let canonical = path.canonicalize().map_err(|error| {
-                        format!(
-                            "cannot resolve dependency source `{}`: {error}",
-                            path.display()
-                        )
-                    })?;
+            (SourceId::Path(_), Some(project)) => {
+                let source_root = project.source_root()?;
+                let mut paths = Vec::new();
+                collect_workspace_sources(&source_root, &mut paths)?;
+                paths.sort();
+                for path in paths {
+                    let canonical = path
+                        .canonicalize()
+                        .map_err(|error| format!("cannot resolve `{}`: {error}", path.display()))?;
                     let uri = path_file_uri(&canonical);
                     let text = open_documents
                         .get(&uri)
                         .map(|document| document.text.clone())
                         .unwrap_or_else(|| fs::read_to_string(&canonical).unwrap_or_default());
-                    let module = module_from_source_path(&dependency_source_root, &canonical)?;
+                    let module = module_from_source_path(&source_root, &canonical)?;
                     files.insert(uri, WorkspaceFile { text: text.clone() });
                     sources.push(PackageSource {
                         path: canonical.display().to_string(),
@@ -941,42 +808,33 @@ fn add_workspace_dependencies(
                         source: text,
                     });
                 }
-                if prefix.is_none() && alias == "std" {
-                    language_items.option = dependency_manifest
-                        .language_items
-                        .option
-                        .as_ref()
-                        .map(|path| format!("{namespace}:{path}"));
-                    language_items.result = dependency_manifest
-                        .language_items
-                        .result
-                        .as_ref()
-                        .map(|path| format!("{namespace}:{path}"));
-                    language_items.result_ok = dependency_manifest
-                        .language_items
-                        .result_ok
-                        .as_ref()
-                        .map(|path| format!("{namespace}:{path}"));
-                    language_items.result_err = dependency_manifest
-                        .language_items
-                        .result_err
-                        .as_ref()
-                        .map(|path| format!("{namespace}:{path}"));
-                }
-                add_workspace_dependencies(
-                    &dependency_manifest_path,
-                    &dependency_manifest,
-                    Some(&namespace),
-                    open_documents,
-                    files,
-                    sources,
-                    language_items,
-                    visited,
-                )?;
+            }
+            (SourceId::Path(path), None) => {
+                return Err(format!(
+                    "package `{}` at `{}` was resolved without a manifest",
+                    package.id.name,
+                    path.display()
+                ))
             }
         }
     }
     Ok(())
+}
+
+/// The language items resolution settled on, in the compiler's shape.
+fn language_items_from(resolution: &Resolution) -> slopic_core::LanguageItems {
+    let mut items = slopic_core::LanguageItems::default();
+    for (name, path) in &resolution.language_items {
+        let slot = match name.as_str() {
+            "option" => &mut items.option,
+            "result" => &mut items.result,
+            "result-ok" => &mut items.result_ok,
+            "result-err" => &mut items.result_err,
+            _ => continue,
+        };
+        *slot = Some(path.clone());
+    }
+    items
 }
 
 fn index_workspace_symbols(
@@ -1374,10 +1232,10 @@ fn document_requires_entry_point(uri: &str) -> bool {
     let Ok(manifest_source) = fs::read_to_string(&manifest_path) else {
         return true;
     };
-    let Ok(manifest) = toml::from_str::<WorkspaceManifest>(&manifest_source) else {
+    let Ok(manifest) = toml::from_str::<Manifest>(&manifest_source) else {
         return true;
     };
-    if !manifest.validates_entry_point() {
+    if !validates_entry_point(&manifest) {
         return false;
     }
     let Some(root) = manifest_path.parent() else {

@@ -3,7 +3,13 @@ use clap_complete::{generate, Shell};
 use serde::Deserialize;
 use slopic_core::codegen::{DEFAULT_TARGET, TARGETS};
 use slopic_core::syntax::{format_source, FormatOptions};
-use std::collections::{HashMap, HashSet};
+use slopium_manifest::lock::{Lockfile, LOCK_FILE};
+use slopium_manifest::manifest::{load_project, validate_package_name, Profile, Project};
+use slopium_manifest::resolve::{resolve, Resolution};
+use slopium_manifest::source::SourceId;
+use slopium_manifest::std_library::{std_module_path, STD_MODULES};
+use slopium_manifest::version::Version;
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs;
 use std::fs::OpenOptions;
@@ -43,6 +49,8 @@ enum Commands {
         check: bool,
     },
     Clean,
+    /// Print the resolved package graph.
+    Tree(ResolveArgs),
     Targets,
     Compiler,
     /// Print a shell completion script for `slopium` on stdout.
@@ -58,6 +66,8 @@ struct TargetArgs {
     target: Option<String>,
     #[arg(long)]
     cc: Option<String>,
+    #[command(flatten)]
+    resolve: ResolveArgs,
 }
 
 #[derive(Args, Clone)]
@@ -68,90 +78,37 @@ struct BuildArgs {
     release: bool,
     #[arg(long)]
     cc: Option<String>,
+    #[command(flatten)]
+    resolve: ResolveArgs,
 }
 
-#[derive(Debug, Deserialize)]
-struct Manifest {
-    package: Package,
-    #[serde(default)]
-    dependencies: HashMap<String, DependencySpec>,
-    #[serde(default, rename = "language-items")]
-    language_items: LanguageItemSection,
-    #[serde(default)]
-    build: BuildSection,
-    #[serde(default)]
-    profile: HashMap<String, Profile>,
+/// How resolution is allowed to behave.
+#[derive(Args, Clone, Copy, Default)]
+struct ResolveArgs {
+    /// Fail instead of writing `Slopium.lock`.
+    #[arg(long)]
+    locked: bool,
+    /// Never reach the network. Every source in v0.4.0 is already local, so
+    /// this forbids nothing yet; git and registry sources honour it.
+    #[arg(long)]
+    offline: bool,
+    /// `--locked` and `--offline` together.
+    #[arg(long)]
+    frozen: bool,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
-struct LanguageItemSection {
-    option: Option<String>,
-    result: Option<String>,
-    #[serde(rename = "result-ok")]
-    result_ok: Option<String>,
-    #[serde(rename = "result-err")]
-    result_err: Option<String>,
-}
-
-impl LanguageItemSection {
-    fn entries(&self) -> Vec<(String, String)> {
-        [
-            ("option", self.option.as_ref()),
-            ("result", self.result.as_ref()),
-            ("result-ok", self.result_ok.as_ref()),
-            ("result-err", self.result_err.as_ref()),
-        ]
-        .into_iter()
-        .filter_map(|(name, value)| value.map(|value| (name.to_owned(), value.clone())))
-        .collect()
+impl ResolveArgs {
+    fn locked(self) -> bool {
+        self.locked || self.frozen
     }
-}
 
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum DependencySpec {
-    Path { path: PathBuf },
-    Toolchain { toolchain: bool },
-}
-
-#[derive(Debug, Deserialize)]
-struct Package {
-    name: String,
-    version: String,
-    entry: PathBuf,
-    source: Option<PathBuf>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct BuildSection {
-    target: Option<String>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct Profile {
-    #[serde(rename = "opt-level")]
-    opt_level: Option<u8>,
-    debug: Option<bool>,
-    /// Whether to strip the linked binary. Absent means the conventional
-    /// default: off for a debug build, on otherwise — a stripped binary and a
-    /// debuggable one are opposite intents.
-    strip: Option<bool>,
-    /// `"message"` (default) prints the reason a trap aborted; `"abort"` exits
-    /// silently and leaves no error strings in the binary.
-    panic: Option<String>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct LocalConfig {
-    #[serde(default)]
-    toolchain: Toolchain,
-    #[serde(default)]
-    target: HashMap<String, Toolchain>,
-}
-
-#[derive(Debug, Default, Deserialize, Clone)]
-struct Toolchain {
-    cc: Option<String>,
+    #[allow(
+        dead_code,
+        reason = "honoured by the git and registry sources in v0.4.3 and v0.4.4"
+    )]
+    fn offline(self) -> bool {
+        self.offline || self.frozen
+    }
 }
 
 #[derive(Deserialize)]
@@ -160,20 +117,12 @@ struct CompilerHandshake {
     targets: Vec<String>,
 }
 
-struct Project {
-    root: PathBuf,
-    manifest_path: PathBuf,
-    manifest_source: String,
-    manifest: Manifest,
-    config: LocalConfig,
-}
-
 fn main() {
     let cli = Cli::parse();
     let result = match cli.command {
         Commands::New { name, path } => create_project(&name, path),
         Commands::Check(args) => load_project(cli.manifest_path)
-            .and_then(|project| check(&project, args.target, args.cc)),
+            .and_then(|project| check(&project, args.target, args.cc, args.resolve)),
         Commands::Build(args) => load_project(cli.manifest_path)
             .and_then(|project| build(&project, &args, false).map(|_| ())),
         Commands::Run {
@@ -194,6 +143,9 @@ fn main() {
             load_project(cli.manifest_path).and_then(|project| format_project(&project, check))
         }
         Commands::Clean => load_project(cli.manifest_path).and_then(clean),
+        Commands::Tree(args) => {
+            load_project(cli.manifest_path).and_then(|project| tree(&project, args))
+        }
         Commands::Targets => {
             for spec in TARGETS {
                 let note = if spec.triple == DEFAULT_TARGET {
@@ -330,63 +282,16 @@ fn create_project(name: &str, path: Option<PathBuf>) -> Result<(), String> {
     Ok(())
 }
 
-fn load_project(manifest_path: Option<PathBuf>) -> Result<Project, String> {
-    let manifest_path = match manifest_path {
-        Some(path) => path,
-        None => find_manifest(&std::env::current_dir().map_err(|error| error.to_string())?)?,
-    };
-    let manifest_path = manifest_path
-        .canonicalize()
-        .map_err(|error| format!("cannot resolve `{}`: {error}", manifest_path.display()))?;
-    let root = manifest_path
-        .parent()
-        .ok_or_else(|| "manifest does not have a parent directory".to_owned())?
-        .to_owned();
-    let manifest_source = fs::read_to_string(&manifest_path)
-        .map_err(|error| format!("cannot read `{}`: {error}", manifest_path.display()))?;
-    let manifest: Manifest = toml::from_str(&manifest_source)
-        .map_err(|error| format!("invalid `{}`: {error}", manifest_path.display()))?;
-    validate_package_name(&manifest.package.name)?;
-    if manifest.package.version.trim().is_empty() {
-        return Err("package version cannot be empty".into());
-    }
-    let config_path = root.join(".slopium/config.toml");
-    let config = if config_path.exists() {
-        let source = fs::read_to_string(&config_path)
-            .map_err(|error| format!("cannot read `{}`: {error}", config_path.display()))?;
-        toml::from_str(&source)
-            .map_err(|error| format!("invalid `{}`: {error}", config_path.display()))?
-    } else {
-        LocalConfig::default()
-    };
-    Ok(Project {
-        root,
-        manifest_path,
-        manifest_source,
-        manifest,
-        config,
-    })
-}
-
-fn find_manifest(start: &Path) -> Result<PathBuf, String> {
-    for directory in start.ancestors() {
-        let candidate = directory.join("Slopium.toml");
-        if candidate.is_file() {
-            return Ok(candidate);
-        }
-    }
-    Err("could not find `Slopium.toml` in this directory or its parents".into())
-}
-
 fn check(
     project: &Project,
     target_override: Option<String>,
     cc_override: Option<String>,
+    resolve_args: ResolveArgs,
 ) -> Result<(), String> {
     let target = target(project, target_override);
     let source = source_path(project)?;
-    let source_root = source_root(project)?;
-    let dependencies = resolve_dependencies(project)?;
+    let source_root = project.source_root()?;
+    let dependencies = resolve_dependencies(project, resolve_args)?;
     let mut command = slopic_command(project, &target, cc_override)?;
     command.arg(&source).arg("--source-root").arg(&source_root);
     add_dependency_args(&mut command, &dependencies);
@@ -412,8 +317,8 @@ fn build(project: &Project, args: &BuildArgs, test: bool) -> Result<PathBuf, Str
         ));
     }
     let source = source_path(project)?;
-    let source_root = source_root(project)?;
-    let dependencies = resolve_dependencies(project)?;
+    let source_root = project.source_root()?;
+    let dependencies = resolve_dependencies(project, args.resolve)?;
     let profile_name = if args.release { "release" } else { "dev" };
     let profile = project.manifest.profile.get(profile_name);
     let out_dir = project.root.join("target").join(&target).join(profile_name);
@@ -531,7 +436,7 @@ struct ModuleCacheUnit {
 
 fn codegen_module_units(
     project: &Project,
-    dependencies: &[ResolvedDependency],
+    dependencies: &Dependencies,
 ) -> Result<Vec<ModuleCacheUnit>, String> {
     fn modules(
         root: &Path,
@@ -576,32 +481,20 @@ fn codegen_module_units(
     }
 
     let mut output = Vec::new();
-    modules(&source_root(project)?, None, &mut output)?;
-    for dependency in dependencies {
+    modules(&project.source_root()?, None, &mut output)?;
+    for dependency in &dependencies.packages {
         match &dependency.source {
             ResolvedDependencySource::Path(root) => {
                 modules(root, Some(&dependency.namespace), &mut output)?;
             }
             ResolvedDependencySource::Toolchain => {
-                for (module, source) in [
-                    (
-                        "option",
-                        "(export Option)\n(enum Option (T) None (Some ((value T))))\n",
-                    ),
-                    (
-                        "result",
-                        "(export Result (Result:Ok :as Ok) (Result:Err :as Err))\n\
-                         (enum Result (T E)\n\
-                           (Ok ((value T)))\n\
-                           (Err ((error E))))\n",
-                    ),
-                ] {
+                for (module, source) in STD_MODULES {
                     let name = format!("{}:{module}", dependency.namespace);
                     let (interface, has_generics) =
-                        module_interface(&format!("<toolchain>/{name}.slp"), source)?;
+                        module_interface(&std_module_path(module), source)?;
                     output.push(ModuleCacheUnit {
                         name,
-                        source: source.into(),
+                        source: (*source).into(),
                         interface,
                         has_generics,
                     });
@@ -736,6 +629,66 @@ fn clean(project: Project) -> Result<(), String> {
     Ok(())
 }
 
+/// Print the resolved graph.
+///
+/// A package appears once per place it is depended on, but is only expanded the
+/// first time — the repeat is marked `(*)`. That is the visible shape of
+/// `D-035`: a diamond shows the shared package twice and builds it once.
+fn tree(project: &Project, args: ResolveArgs) -> Result<(), String> {
+    fn walk(
+        name: &str,
+        resolution: &Resolution,
+        prefix: &str,
+        last: bool,
+        root: bool,
+        seen: &mut HashSet<String>,
+    ) {
+        let Some(package) = resolution.packages.get(name) else {
+            return;
+        };
+        let repeated = !seen.insert(name.to_owned());
+        if root {
+            println!("{}", package.id);
+        } else {
+            println!(
+                "{prefix}{}{}{}",
+                if last { "`-- " } else { "|-- " },
+                package.id,
+                if repeated && !package.dependencies.is_empty() {
+                    " (*)"
+                } else {
+                    ""
+                }
+            );
+        }
+        if repeated {
+            return;
+        }
+        let child_prefix = if root {
+            String::new()
+        } else {
+            format!("{prefix}{}", if last { "    " } else { "|   " })
+        };
+        for (index, dependency) in package.dependencies.iter().enumerate() {
+            let last = index + 1 == package.dependencies.len();
+            walk(dependency, resolution, &child_prefix, last, false, seen);
+        }
+    }
+
+    let toolchain_version = Version::parse(slopic_core::STANDARD_LIBRARY_VERSION)?;
+    let resolution = resolve(project, &toolchain_version)?;
+    synchronize_lock(project, &resolution, args)?;
+    walk(
+        &resolution.root.name,
+        &resolution,
+        "",
+        true,
+        true,
+        &mut HashSet::new(),
+    );
+    Ok(())
+}
+
 fn compiler_info() -> Result<(), String> {
     let status = Command::new(slopic_path()?)
         .arg("--info")
@@ -784,7 +737,7 @@ fn materialize_runtime(out_dir: &Path) -> Result<PathBuf, String> {
 }
 
 fn source_path(project: &Project) -> Result<PathBuf, String> {
-    let source = project.root.join(&project.manifest.package.entry);
+    let source = project.entry_path();
     if !source.is_file() {
         return Err(format!(
             "entry source `{}` does not exist",
@@ -794,36 +747,20 @@ fn source_path(project: &Project) -> Result<PathBuf, String> {
     Ok(source)
 }
 
-fn source_root(project: &Project) -> Result<PathBuf, String> {
-    let root = project
-        .manifest
-        .package
-        .source
-        .as_ref()
-        .map(|source| project.root.join(source))
-        .unwrap_or_else(|| {
-            project
-                .root
-                .join(&project.manifest.package.entry)
-                .parent()
-                .unwrap_or(&project.root)
-                .to_owned()
-        });
-    if !root.is_dir() {
-        return Err(format!("source root `{}` does not exist", root.display()));
-    }
-    root.canonicalize()
-        .map_err(|error| format!("cannot resolve source root `{}`: {error}", root.display()))
-}
-
 fn source_files(project: &Project) -> Result<Vec<PathBuf>, String> {
-    let root = source_root(project)?;
+    let root = project.source_root()?;
     let mut files = Vec::new();
     collect_cache_sources(&root, &mut files)?;
     files.sort();
     Ok(files)
 }
 
+/// A resolved package as this build needs it: a namespace and a place to read
+/// modules from.
+///
+/// The resolver returns package identities; codegen and the cache want source
+/// roots. This is the adapter between the two, and the only place that knows a
+/// namespace is a package name (`D-035`).
 #[derive(Clone, Debug)]
 enum ResolvedDependencySource {
     Path(PathBuf),
@@ -834,107 +771,60 @@ enum ResolvedDependencySource {
 struct ResolvedDependency {
     namespace: String,
     source: ResolvedDependencySource,
-    language_items: Vec<(String, String)>,
     manifest_source: Option<String>,
 }
 
-fn resolve_dependencies(project: &Project) -> Result<Vec<ResolvedDependency>, String> {
-    /// Walk the package graph, emitting one entry per dependency *namespace*.
-    ///
-    /// `seen` is keyed on the namespace rather than the manifest path, because a
-    /// namespace is what the compiler resolves a `take` against. Two packages
-    /// reaching the same dependency see it under two different namespaces, so
-    /// keying on the manifest path emitted only whichever arm was walked first
-    /// and left the other one unresolvable.
-    fn visit(
-        project: &Project,
-        prefix: Option<&str>,
-        stack: &mut Vec<PathBuf>,
-        seen: &mut HashSet<String>,
-        output: &mut Vec<ResolvedDependency>,
-    ) -> Result<(), String> {
-        if stack.contains(&project.manifest_path) {
-            let mut cycle = stack
-                .iter()
-                .map(|path| path.display().to_string())
-                .collect::<Vec<_>>();
-            cycle.push(project.manifest_path.display().to_string());
-            return Err(format!("package dependency cycle: {}", cycle.join(" -> ")));
-        }
-        stack.push(project.manifest_path.clone());
-        let mut entries = project.manifest.dependencies.iter().collect::<Vec<_>>();
-        entries.sort_by(|left, right| left.0.cmp(right.0));
-        for (alias, specification) in entries {
-            validate_package_name(alias)?;
-            let namespace =
-                prefix.map_or_else(|| alias.clone(), |prefix| format!("{prefix}:{alias}"));
-            match specification {
-                DependencySpec::Toolchain { toolchain } => {
-                    if !*toolchain {
-                        return Err(format!(
-                            "dependency `{namespace}` has `toolchain = false`; use a path instead"
-                        ));
-                    }
-                    if alias != "std" {
-                        return Err(format!(
-                            "dependency `{namespace}` cannot use the toolchain source; only `std` is bundled"
-                        ));
-                    }
-                    output.push(ResolvedDependency {
-                        namespace,
-                        source: ResolvedDependencySource::Toolchain,
-                        language_items: if prefix.is_none() {
-                            vec![
-                                ("option".into(), "std:option:Option".into()),
-                                ("result".into(), "std:result:Result".into()),
-                                ("result-ok".into(), "std:result:Ok".into()),
-                                ("result-err".into(), "std:result:Err".into()),
-                            ]
-                        } else {
-                            Vec::new()
-                        },
-                        manifest_source: None,
-                    });
-                }
-                DependencySpec::Path { path } => {
-                    let root = project.root.join(path);
-                    let manifest = if root.is_dir() {
-                        root.join("Slopium.toml")
-                    } else {
-                        root
-                    };
-                    let dependency = load_project(Some(manifest))?;
-                    let source = source_root(&dependency)?;
-                    if seen.insert(namespace.clone()) {
-                        output.push(ResolvedDependency {
-                            namespace: namespace.clone(),
-                            source: ResolvedDependencySource::Path(source),
-                            language_items: if prefix.is_none() && alias == "std" {
-                                dependency
-                                    .manifest
-                                    .language_items
-                                    .entries()
-                                    .into_iter()
-                                    .map(|(name, path)| (name, format!("{namespace}:{path}")))
-                                    .collect()
-                            } else {
-                                Vec::new()
-                            },
-                            manifest_source: Some(dependency.manifest_source.clone()),
-                        });
-                    }
-                    visit(&dependency, Some(&namespace), stack, seen, output)?;
-                }
-            }
-        }
-        stack.pop();
-        Ok(())
-    }
+/// Everything resolution produced that the rest of the build consumes.
+#[derive(Clone, Debug, Default)]
+struct Dependencies {
+    packages: Vec<ResolvedDependency>,
+    language_items: Vec<(String, String)>,
+}
 
-    let source_root = source_root(project)?;
-    let mut local_roots = HashSet::new();
+/// Resolve the graph, then reconcile `Slopium.lock` with it.
+fn resolve_dependencies(project: &Project, args: ResolveArgs) -> Result<Dependencies, String> {
+    let toolchain_version = Version::parse(slopic_core::STANDARD_LIBRARY_VERSION)?;
+    let resolution = resolve(project, &toolchain_version)?;
+    reject_namespace_collisions(project, &resolution)?;
+    synchronize_lock(project, &resolution, args)?;
+
+    let mut packages = Vec::new();
+    for package in resolution.dependencies() {
+        let source = match (&package.id.source, &package.project) {
+            (SourceId::Toolchain, _) => ResolvedDependencySource::Toolchain,
+            (SourceId::Path(_), Some(project)) => {
+                ResolvedDependencySource::Path(project.source_root()?)
+            }
+            (SourceId::Path(path), None) => {
+                return Err(format!(
+                    "package `{}` at `{}` was resolved without a manifest",
+                    package.id.name,
+                    path.display()
+                ))
+            }
+        };
+        packages.push(ResolvedDependency {
+            namespace: package.namespace().to_owned(),
+            source,
+            manifest_source: package
+                .project
+                .as_ref()
+                .map(|project| project.manifest_source.clone()),
+        });
+    }
+    Ok(Dependencies {
+        packages,
+        language_items: resolution.language_items.clone(),
+    })
+}
+
+/// A dependency namespace and a local module namespace cannot both be spelled
+/// the same way, because the compiler resolves them in one flat space.
+fn reject_namespace_collisions(project: &Project, resolution: &Resolution) -> Result<(), String> {
+    let source_root = project.source_root()?;
     let mut sources = Vec::new();
     collect_cache_sources(&source_root, &mut sources)?;
+    let mut local_roots = HashSet::new();
     for source in sources {
         let relative = source.strip_prefix(&source_root).map_err(|error| {
             format!(
@@ -943,38 +833,55 @@ fn resolve_dependencies(project: &Project) -> Result<Vec<ResolvedDependency>, St
                 source_root.display()
             )
         })?;
-        let first = relative
-            .components()
-            .next()
-            .and_then(|component| {
-                let path = Path::new(component.as_os_str());
-                path.file_stem().and_then(|name| name.to_str())
-            })
-            .ok_or_else(|| format!("invalid source path `{}`", source.display()))?;
-        local_roots.insert(first.to_owned());
+        if let Some(first) = relative.components().next().and_then(|component| {
+            Path::new(component.as_os_str())
+                .file_stem()
+                .and_then(|name| name.to_str())
+        }) {
+            local_roots.insert(first.to_owned());
+        }
     }
-    for alias in project.manifest.dependencies.keys() {
-        if local_roots.contains(alias) {
+    for package in resolution.dependencies() {
+        if local_roots.contains(package.namespace()) {
             return Err(format!(
-                "dependency alias `{alias}` collides with the local module namespace"
+                "dependency `{}` collides with the local module namespace",
+                package.namespace()
             ));
         }
     }
-
-    let mut output = Vec::new();
-    visit(
-        project,
-        None,
-        &mut Vec::new(),
-        &mut HashSet::new(),
-        &mut output,
-    )?;
-    output.sort_by(|left, right| left.namespace.cmp(&right.namespace));
-    Ok(output)
+    Ok(())
 }
 
-fn add_dependency_args(command: &mut Command, dependencies: &[ResolvedDependency]) {
-    for dependency in dependencies {
+/// Write the lockfile, or refuse to under `--locked`.
+fn synchronize_lock(
+    project: &Project,
+    resolution: &Resolution,
+    args: ResolveArgs,
+) -> Result<(), String> {
+    let path = project.root.join(LOCK_FILE);
+    let resolved = Lockfile::from_resolution(resolution, &project.root);
+    let existing = match fs::read_to_string(&path) {
+        Ok(text) => Some(Lockfile::parse(&text)?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(format!("cannot read `{}`: {error}", path.display())),
+    };
+    if existing.as_ref() == Some(&resolved) {
+        return Ok(());
+    }
+    if args.locked() {
+        return Err(match existing {
+            Some(_) => format!(
+                "`{LOCK_FILE}` is out of date and --locked was given; run without it to update"
+            ),
+            None => format!("`{LOCK_FILE}` is missing and --locked was given"),
+        });
+    }
+    fs::write(&path, resolved.render())
+        .map_err(|error| format!("cannot write `{}`: {error}", path.display()))
+}
+
+fn add_dependency_args(command: &mut Command, dependencies: &Dependencies) {
+    for dependency in &dependencies.packages {
         match &dependency.source {
             ResolvedDependencySource::Path(path) => {
                 command.arg("--dependency").arg(format!(
@@ -989,9 +896,9 @@ fn add_dependency_args(command: &mut Command, dependencies: &[ResolvedDependency
                     .arg(&dependency.namespace);
             }
         }
-        for (name, path) in &dependency.language_items {
-            command.arg("--language-item").arg(format!("{name}={path}"));
-        }
+    }
+    for (name, path) in &dependencies.language_items {
+        command.arg("--language-item").arg(format!("{name}={path}"));
     }
 }
 
@@ -1073,7 +980,7 @@ fn cc_for(project: &Project, target: &str, override_cc: Option<String>) -> Strin
 struct CacheInputs<'a> {
     project: &'a Project,
     source_root: &'a Path,
-    dependencies: &'a [ResolvedDependency],
+    dependencies: &'a Dependencies,
     target: &'a str,
     profile_name: &'a str,
     profile: Option<&'a Profile>,
@@ -1096,7 +1003,7 @@ fn cache_key(input: CacheInputs<'_>) -> Result<String, String> {
                 .map_err(|error| format!("cannot hash `{}`: {error}", source.display()))?,
         );
     }
-    for dependency in input.dependencies {
+    for dependency in &input.dependencies.packages {
         hasher.write(dependency.namespace.as_bytes());
         if let Some(manifest) = &dependency.manifest_source {
             hasher.write(manifest.as_bytes());
@@ -1149,7 +1056,7 @@ fn module_cache_key(
     units: &[ModuleCacheUnit],
 ) -> Result<String, String> {
     let mut hasher = Fnv1a::default();
-    hasher.write(b"slopium-object-cache-v2");
+    hasher.write(b"slopium-object-cache-v3");
     hasher.write(input.project.manifest_source.as_bytes());
     hasher.write(input.target.as_bytes());
     hasher.write(input.profile_name.as_bytes());
@@ -1169,15 +1076,15 @@ fn module_cache_key(
         }
     }
     hasher.write(input.cc.as_bytes());
-    for dependency in input.dependencies {
+    for dependency in &input.dependencies.packages {
         hasher.write(dependency.namespace.as_bytes());
         if let Some(manifest) = &dependency.manifest_source {
             hasher.write(manifest.as_bytes());
         }
-        for (name, path) in &dependency.language_items {
-            hasher.write(name.as_bytes());
-            hasher.write(path.as_bytes());
-        }
+    }
+    for (name, path) in &input.dependencies.language_items {
+        hasher.write(name.as_bytes());
+        hasher.write(path.as_bytes());
     }
     hasher.write(unit.name.as_bytes());
     hasher.write(unit.source.as_bytes());
@@ -1260,37 +1167,9 @@ fn status_result(status: ExitStatus, action: &str) -> Result<(), String> {
     }
 }
 
-fn validate_package_name(name: &str) -> Result<(), String> {
-    let valid = !name.is_empty()
-        && name
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'));
-    if valid {
-        Ok(())
-    } else {
-        Err(format!(
-            "invalid package name `{name}`; use ASCII letters, digits, `-`, or `_`"
-        ))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parses_manifest() {
-        let manifest: Manifest = toml::from_str(
-            r#"
-                [package]
-                name = "hello"
-                version = "0.1.0"
-                entry = "src/main.slp"
-            "#,
-        )
-        .unwrap();
-        assert_eq!(manifest.package.name, "hello");
-    }
 
     #[test]
     fn fnv_is_stable() {
@@ -1336,13 +1215,13 @@ mod tests {
         }
         create_project("cache-test", Some(root.clone())).unwrap();
         let project = load_project(Some(root.join("Slopium.toml"))).unwrap();
-        let source_root = source_root(&project).unwrap();
+        let source_root = project.source_root().unwrap();
         let compiler = root.join("Slopium.toml");
         let runtime = root.join("src/main.slp");
         let inputs = CacheInputs {
             project: &project,
             source_root: &source_root,
-            dependencies: &[],
+            dependencies: &Dependencies::default(),
             target: DEFAULT_TARGET,
             profile_name: "dev",
             profile: project.manifest.profile.get("dev"),
@@ -1390,40 +1269,35 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    /// A dependency reached through two different packages must be resolved
-    /// twice, once per namespace.
+    /// A dependency reached through two different packages is resolved once,
+    /// under its own name.
     ///
-    /// The walker used to remember which manifests it had already emitted, so
-    /// the second branch of a diamond silently lost its copy and every `take`
-    /// through it failed with `SL0450: unknown module`.
+    /// Before `D-035` this produced `left:shared` and `right:shared` — two
+    /// namespaces, two copies in the binary — and before the walker was fixed
+    /// it produced only one of them, leaving the other branch unresolvable.
     #[test]
-    fn diamond_dependency_is_resolved_under_both_namespaces() {
+    fn diamond_dependency_is_resolved_once_under_its_package_name() {
         let root =
             std::env::temp_dir().join(format!("slopium-diamond-test-{}", std::process::id()));
         if root.exists() {
             fs::remove_dir_all(&root).unwrap();
         }
-        let write = |package: &str, manifest: &str, source: &str| {
+        let write = |package: &str, dependencies: &str| {
             let directory = root.join(package);
             fs::create_dir_all(directory.join("src")).unwrap();
-            fs::write(directory.join("Slopium.toml"), manifest).unwrap();
-            fs::write(directory.join("src/lib.slp"), source).unwrap();
+            fs::write(
+                directory.join("Slopium.toml"),
+                format!(
+                    "[package]\nname = \"{package}\"\nversion = \"0.1.0\"\nsource = \"src\"\nentry = \"src/lib.slp\"\n\n[dependencies]\n{dependencies}"
+                ),
+            )
+            .unwrap();
+            fs::write(directory.join("src/lib.slp"), "(fn unused () -> i32 0)\n").unwrap();
         };
 
-        write(
-            "shared",
-            "[package]\nname = \"shared\"\nversion = \"0.1.0\"\nsource = \"src\"\nentry = \"src/lib.slp\"\n",
-            "(export base)\n\n(fn base () -> i64 7)\n",
-        );
-        for branch in ["left", "right"] {
-            write(
-                branch,
-                &format!(
-                    "[package]\nname = \"{branch}\"\nversion = \"0.1.0\"\nsource = \"src\"\nentry = \"src/lib.slp\"\n\n[dependencies]\nshared = {{ path = \"../shared\" }}\n"
-                ),
-                "(take shared:lib base)\n(export value)\n\n(fn value () -> i64 (base))\n",
-            );
-        }
+        write("shared", "");
+        write("left", "shared = { path = \"../shared\" }\n");
+        write("right", "shared = { path = \"../shared\" }\n");
         let application = root.join("application");
         fs::create_dir_all(application.join("src")).unwrap();
         fs::write(
@@ -1434,16 +1308,29 @@ mod tests {
         fs::write(application.join("src/main.slp"), "(fn main () -> i32 0)\n").unwrap();
 
         let project = load_project(Some(application.join("Slopium.toml"))).unwrap();
-        let namespaces = resolve_dependencies(&project)
+        let namespaces = resolve_dependencies(&project, ResolveArgs::default())
             .unwrap()
+            .packages
             .into_iter()
             .map(|dependency| dependency.namespace)
             .collect::<Vec<_>>();
 
-        assert_eq!(
-            namespaces,
-            vec!["left", "left:shared", "right", "right:shared"]
-        );
+        assert_eq!(namespaces, vec!["left", "right", "shared"]);
+
+        // Resolution wrote a lockfile, and re-resolving under `--locked` is a
+        // no-op rather than a rewrite.
+        let lock = application.join("Slopium.lock");
+        assert!(lock.is_file());
+        let locked = ResolveArgs {
+            locked: true,
+            ..ResolveArgs::default()
+        };
+        resolve_dependencies(&project, locked).unwrap();
+
+        fs::write(&lock, "version = 1\n").unwrap();
+        let error = resolve_dependencies(&project, locked).unwrap_err();
+        assert!(error.contains("out of date"), "{error}");
+
         fs::remove_dir_all(root).unwrap();
     }
 }

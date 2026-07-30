@@ -5,4 +5,4 @@ source = "src"
 entry = "src/lib.slp"
 
 [dependencies]
-a = { path = "../cycle-a" }
+cycle-a = { path = "../cycle-a" }

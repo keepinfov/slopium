@@ -203,7 +203,14 @@ spurious missing-`main` diagnostic.
 ## Packages and incremental objects
 
 `slopium` resolves an acyclic graph of path and bundled-toolchain
-dependencies. Each dependency alias becomes a namespace. `slopic` still types
+dependencies into a set of packages, each identified by name and version and
+appearing once however many dependents reach it. A package's namespace is its
+name, so the key in `[dependencies]` must be the package name. The resolved
+graph is written to `Slopium.lock`.
+
+Resolution, the manifest schema, semantic versions and the lockfile live in
+`slopium-manifest`, which both `slopium` and `slopium-lsp` consume — the editor
+and the build cannot namespace a module differently. `slopic` still types
 and lowers the package as one semantic unit, then emits only the selected
 owner module for each object invocation. Generated function/type/drop/clone
 symbols use deterministic global names so objects link independently.

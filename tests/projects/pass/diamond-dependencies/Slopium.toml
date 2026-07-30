@@ -5,8 +5,8 @@ source = "src"
 entry = "src/main.slp"
 
 [dependencies]
-math = { path = "../../dependencies/mathlib" }
-geo = { path = "../../dependencies/geometry" }
+mathlib = { path = "../../dependencies/mathlib" }
+geometry = { path = "../../dependencies/geometry" }
 
 [build]
 target = "x86_64-unknown-linux-gnu"

@@ -1,4 +1,4 @@
-(take base:lib forty)
+(take foundation:lib forty)
 (export answer)
 
 (fn answer () -> i64

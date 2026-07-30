@@ -305,6 +305,7 @@ entry = "src/main.slp"
 [dependencies]
 std = { toolchain = true }
 # geometry = { path = "../geometry" }
+# geometry = { path = "../geometry", version = "^1.2" }
 
 [build]
 target = "x86_64-unknown-linux-gnu"
@@ -318,11 +319,44 @@ opt-level = 1
 debug = false
 ```
 
-`source` задаёт корень path-derived модулей. Path dependencies получают
-namespace из ключа таблицы; `std` можно заменить path-пакетом с секцией
-`[language-items]`. Поля profiles участвуют в cache key; release также включает
-оптимизирующий MIR pass. `debug` управляет DWARF line tables; если поле не
-указано, оно включено для `dev` и выключено для `release`.
+`source` задаёт корень path-derived модулей.
+
+**Ключ в `[dependencies]` — это имя пакета.** Он же становится namespace, под
+которым видны модули зависимости: `geometry = { path = "../geometry" }` даёт
+`geometry:lib`. Если пакет по указанному пути называется иначе, это ошибка.
+Одна и та же зависимость, до которой можно добраться двумя путями, попадает в
+граф ровно один раз — namespace определяется именем пакета, а не путём, которым
+до него дошли. Транзитивные зависимости видны под своими собственными именами.
+
+`version` необязателен для path-зависимостей и проверяется, а не выбирается:
+источник предлагает ровно одну версию. Поддерживаются `^`, `~`, `=`, `>=`, `>`,
+`<=`, `<` и перечисление через запятую; голая версия означает `^`. Две
+несовместимые версии одного имени в одном графе — ошибка.
+
+Стандартную библиотеку заменяет любая прямая зависимость с секцией
+`[language-items]` — важна секция, а не имя пакета. Двух таких в одном графе
+быть не может.
+
+Поля profiles участвуют в cache key; release также включает оптимизирующий MIR
+pass. `debug` управляет DWARF line tables; если поле не указано, оно включено
+для `dev` и выключено для `release`.
+
+### `Slopium.lock`
+
+`check`, `build`, `run` и `test` записывают рядом с manifest файл
+`Slopium.lock` — разрешённый граф: имя, версия, источник и рёбра каждого
+пакета, отсортированные по имени. Пути записываются относительно самого lock,
+поэтому копия проекта в другом каталоге даёт тот же файл.
+
+```sh
+slopium tree                  # разрешённый граф; повтор помечается (*)
+slopium build --locked        # упасть, если lock пришлось бы изменить
+slopium build --offline       # не ходить в сеть (пока нечему)
+slopium build --frozen        # --locked и --offline вместе
+```
+
+Приложению lock стоит коммитить, библиотеке — нет. Checksums появятся вместе с
+content-addressed store.
 
 ### Отладка в GDB
 
@@ -554,9 +588,10 @@ nvim examples/fibonacci.slp
   регистр и на тех участках, где ни разу не упоминается;
 - ссылки и borrowed slices нельзя возвращать или хранить в aggregates и
   коллекциях;
-- нет traits, bounds, registry/Git dependencies, stable FFI и lockfile;
-- dependency graph поддерживает path и bundled-toolchain источники, но пока не
-  registry resolution;
+- нет traits, bounds, registry/Git dependencies и stable FFI;
+- dependency graph поддерживает path и bundled-toolchain источники; registry и
+  Git появятся в v0.4.3–v0.4.4, вместе с ними — checksums в lock;
+- workspaces ещё нет: один manifest — один пакет;
 - два backend — прямой codegen для System V AMD64 и для AAPCS64; сборка под
   aarch64 требует cross-`cc`, а запуск на x86-64-хосте — `qemu-aarch64`;
 - object writer не пишет DWARF, поэтому сборка с `--debug` идёт через
