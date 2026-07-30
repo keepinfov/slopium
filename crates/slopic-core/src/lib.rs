@@ -1,9 +1,12 @@
 pub mod aarch64;
+pub mod aarch64_inst;
 pub mod analysis;
+pub mod asm;
 pub mod ast;
 pub mod cfg;
 pub mod codegen;
 pub mod diagnostic;
+pub mod elf;
 pub mod lexer;
 pub mod lowering;
 pub mod mir;
@@ -15,6 +18,7 @@ pub mod regalloc;
 pub mod sema;
 pub mod syntax;
 pub mod verify;
+pub mod x86_64_inst;
 
 use crate::codegen::{CodegenOptions, DEFAULT_TARGET, TARGET_TRIPLES};
 use crate::diagnostic::{codes, CompileResult, Diagnostic, SourceMap};
@@ -177,6 +181,24 @@ pub fn compile_to_assembly(
     )
 }
 
+pub fn compile_to_object(
+    file: &str,
+    source: &str,
+    options: &CompileOptions,
+) -> CompileResult<Vec<u8>> {
+    let mir = compile_to_mir(file, source, options)?;
+    codegen::emit_object(
+        file,
+        &mir,
+        &CodegenOptions {
+            target: options.target.clone(),
+            test_harness: options.test_harness,
+            emit_entrypoint: true,
+            debug: None,
+        },
+    )
+}
+
 pub fn compile_package_to_assembly(
     input: &package::PackageInput,
     options: &CompileOptions,
@@ -194,6 +216,29 @@ pub fn compile_package_to_assembly(
             test_harness: options.test_harness && emits_entrypoint,
             emit_entrypoint: emits_entrypoint,
             debug: options.debug.then(|| package::source_map(input)),
+        },
+    )
+}
+
+pub fn compile_package_to_object(
+    input: &package::PackageInput,
+    options: &CompileOptions,
+) -> CompileResult<Vec<u8>> {
+    let mir = compile_package_to_mir(input, options)?;
+    let emits_entrypoint = options
+        .codegen_module
+        .as_ref()
+        .is_none_or(|module| module == &input.entry_module);
+    codegen::emit_object(
+        &input.name,
+        &mir,
+        &CodegenOptions {
+            target: options.target.clone(),
+            test_harness: options.test_harness && emits_entrypoint,
+            emit_entrypoint: emits_entrypoint,
+            // The object writer builds no line tables (`D-028`), so a debug
+            // build never reaches it; the caller checks this first.
+            debug: None,
         },
     )
 }
@@ -300,6 +345,18 @@ fn compile_request_to_mir(
     match package_input(request)? {
         Some(input) => compile_package_to_mir(&input, &options),
         None => compile_to_mir(file, source, &options),
+    }
+}
+
+fn compile_request_to_object(
+    request: &CompileRequest,
+    file: &str,
+    source: &str,
+) -> CompileResult<Vec<u8>> {
+    let options = request_options(request);
+    match package_input(request)? {
+        Some(input) => compile_package_to_object(&input, &options),
+        None => compile_to_object(file, source, &options),
     }
 }
 
@@ -580,12 +637,28 @@ fn write_text(request: &CompileRequest, text: &str) -> CompileResult<Option<Path
     }
 }
 
+/// Whether this request's object is written by the compiler or by `as`.
+///
+/// Two things send it back to the assembler. Debug information is one: line
+/// tables are built from the `.file` and `.loc` directives, and the object
+/// writer emits no DWARF (`D-028`). The other is `SLOPIUM_OBJECT_WRITER`,
+/// which exists so that a bug in the encoder has a way around it that does not
+/// involve a different compiler.
+fn writes_its_own_object(request: &CompileRequest) -> bool {
+    if request.options.debug {
+        return false;
+    }
+    if std::env::var("SLOPIUM_OBJECT_WRITER").is_ok_and(|value| value == "external") {
+        return false;
+    }
+    codegen::writes_objects(&request.options.target)
+}
+
 fn native_artifact(
     request: &CompileRequest,
     file: &str,
     source: &str,
 ) -> CompileResult<Option<PathBuf>> {
-    let assembly = compile_request_to_assembly(request, file, source)?;
     let output = request
         .output
         .clone()
@@ -601,13 +674,27 @@ fn native_artifact(
     // predictable, and a pre-created symlink there would redirect our write, or
     // let someone swap the C runtime we are about to hand to `cc`.
     let scratch = Scratch::new(file)?;
-    let assembly_path = scratch.path().join("program.s");
-    write_new(file, &assembly_path, assembly.as_bytes())?;
+    let internal = writes_its_own_object(request);
+    let input_path = if internal {
+        let object = compile_request_to_object(request, file, source)?;
+        if request.emit == EmitKind::Object {
+            write_output(file, &output, &object)?;
+            return Ok(Some(output));
+        }
+        let path = scratch.path().join("program.o");
+        write_new(file, &path, &object)?;
+        path
+    } else {
+        let assembly = compile_request_to_assembly(request, file, source)?;
+        let path = scratch.path().join("program.s");
+        write_new(file, &path, assembly.as_bytes())?;
+        path
+    };
 
     let mut command = Command::new(&request.cc);
     command.arg("-o").arg(&output);
     if request.emit == EmitKind::Object {
-        command.arg("-c").arg(&assembly_path);
+        command.arg("-c").arg(&input_path);
     } else {
         let generated;
         let runtime = if let Some(runtime) = request.runtime.as_ref() {
@@ -617,7 +704,7 @@ fn native_artifact(
             write_new(file, &generated, RUNTIME_SOURCE)?;
             &generated
         };
-        command.arg(&assembly_path).arg(runtime);
+        command.arg(&input_path).arg(runtime);
     }
     let result = command.output().map_err(|error| {
         vec![Diagnostic::error(

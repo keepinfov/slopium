@@ -11,4 +11,5 @@ cargo clippy --workspace --all-targets -- -D warnings
 "$workspace_dir/scripts/runtime-check.sh"
 "$workspace_dir/scripts/debug-check.sh"
 "$workspace_dir/scripts/cross-check.sh"
+"$workspace_dir/scripts/object-check.sh"
 nix flake check "path:$workspace_dir"

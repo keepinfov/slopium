@@ -1,3 +1,4 @@
+use crate::asm::{Assembly, Item, Section, Target};
 use crate::ast::Type;
 use crate::cfg::Cfg;
 use crate::diagnostic::{codes, CompileResult, Diagnostic, SourceMap, Span};
@@ -8,8 +9,8 @@ use crate::lowering::{
 };
 use crate::mir::{BasicBlock, BinaryOp, Instruction, LocalId, MirFunction, MirModule, Terminator};
 use crate::regalloc::{allocate, Allocation, Location};
+use crate::x86_64_inst::{AluOp, Cond, Inst, Mem, Operand, Reg, Size, SseOp};
 use std::collections::HashMap;
-use std::fmt::Write;
 
 /// The registers one function may allocate locals to, in the order the
 /// allocator should hand them out.
@@ -102,6 +103,20 @@ const FLOAT_ARGUMENTS: [&str; 8] = [
     "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7",
 ];
 
+/// The trampolines the arithmetic checks branch to.
+fn overflow_trampoline() -> Target {
+    Target::Named(".Lsl_panic_overflow_trampoline".into())
+}
+
+fn div_zero_trampoline() -> Target {
+    Target::Named(".Lsl_panic_div_zero_trampoline".into())
+}
+
+/// A register as an operand, which is what most of them are.
+fn reg(name: &'static str) -> Operand {
+    Operand::Reg(Reg(name))
+}
+
 pub trait Backend {
     fn target(&self) -> &'static TargetSpec;
     fn emit(
@@ -110,6 +125,41 @@ pub trait Backend {
         module: &MirModule,
         options: &CodegenOptions,
     ) -> CompileResult<String>;
+
+    /// The same program, as a relocatable ELF object.
+    ///
+    /// Assembling is no longer the assembler's: a backend encodes what it
+    /// selected and [`crate::elf`] writes the file. Linking still is, for the
+    /// reason `D-001` gives.
+    fn object(
+        &self,
+        file: &str,
+        module: &MirModule,
+        options: &CodegenOptions,
+    ) -> CompileResult<Vec<u8>>;
+}
+
+/// Lays out an assembled program and writes it as an object file.
+///
+/// A failure here is a compiler bug, not a program error: instruction
+/// selection produced something it has no encoding for, or a label nothing
+/// defines. `SL0700` says so rather than pretending the source was at fault.
+pub fn write_object<I: crate::asm::Instruction>(
+    file: &str,
+    assembly: &crate::asm::Assembly<I>,
+    machine: crate::elf::Machine,
+) -> CompileResult<Vec<u8>> {
+    let internal = |error: String| {
+        vec![Diagnostic::error(
+            codes::INTERNAL,
+            file,
+            Default::default(),
+            format!("cannot write an object for this program: {error}"),
+        )
+        .with_help("compile with `--emit asm` and assemble it, and report this")]
+    };
+    let object = assembly.finish().map_err(internal)?;
+    crate::elf::write(&object, machine).map_err(internal)
 }
 
 pub struct X86_64Backend;
@@ -125,7 +175,17 @@ impl Backend for X86_64Backend {
         module: &MirModule,
         options: &CodegenOptions,
     ) -> CompileResult<String> {
-        Generator::new(file, module, options).generate()
+        Ok(Generator::new(file, module, options).generate()?.to_text())
+    }
+
+    fn object(
+        &self,
+        file: &str,
+        module: &MirModule,
+        options: &CodegenOptions,
+    ) -> CompileResult<Vec<u8>> {
+        let assembly = Generator::new(file, module, options).generate()?;
+        write_object(file, &assembly, crate::elf::X86_64)
     }
 }
 
@@ -182,11 +242,43 @@ pub fn emit_assembly(
     backend.emit(file, module, options)
 }
 
+/// The program as a relocatable object, for the targets whose backend writes
+/// one.
+pub fn emit_object(
+    file: &str,
+    module: &MirModule,
+    options: &CodegenOptions,
+) -> CompileResult<Vec<u8>> {
+    let Some(backend) = backend_for(&options.target) else {
+        return Err(vec![Diagnostic::error(
+            codes::UNSUPPORTED_TARGET,
+            file,
+            Default::default(),
+            format!("unsupported target `{}`", options.target),
+        )]);
+    };
+    backend.object(file, module, options)
+}
+
+/// Whether an assembly line only attributes the instructions around it.
+///
+/// Debug information adds directives and changes no instruction (`D-024`), and
+/// this is what the tests that assert it filter with.
+#[cfg(test)]
+pub(crate) fn is_location(line: &str) -> bool {
+    line.trim_start().starts_with(".loc ")
+}
+
+/// Whether some backend claims `triple` and can therefore write its objects.
+pub fn writes_objects(triple: &str) -> bool {
+    backend_for(triple).is_some()
+}
+
 struct Generator<'a> {
     file: &'a str,
     module: &'a MirModule,
     options: &'a CodegenOptions,
-    output: String,
+    asm: Assembly<Inst>,
     strings: Vec<(String, String)>,
     string_ids: HashMap<String, String>,
     diagnostics: Vec<Diagnostic>,
@@ -208,7 +300,7 @@ impl<'a> Generator<'a> {
             file,
             module,
             options,
-            output: String::new(),
+            asm: Assembly::new(),
             strings: Vec::new(),
             string_ids: HashMap::new(),
             diagnostics: Vec::new(),
@@ -218,17 +310,17 @@ impl<'a> Generator<'a> {
         }
     }
 
-    fn generate(mut self) -> CompileResult<String> {
+    fn generate(mut self) -> CompileResult<Assembly<Inst>> {
         self.collect_strings();
-        writeln!(self.output, ".intel_syntax noprefix").unwrap();
+        self.asm.push(Item::Syntax(".intel_syntax noprefix"));
         self.file_table();
-        writeln!(self.output, ".section .rodata").unwrap();
+        self.asm.push(Item::Section(Section::RoData));
         self.byte_string(".Lsl_panic_div_zero", b"division by zero");
         self.byte_string(".Lsl_panic_overflow", b"integer overflow");
         for (label, value) in self.strings.clone() {
             self.byte_string(&label, value.as_bytes());
         }
-        writeln!(self.output, ".text").unwrap();
+        self.asm.push(Item::Section(Section::Text));
 
         for function in self
             .module
@@ -263,10 +355,11 @@ impl<'a> Generator<'a> {
             self.program_entrypoint();
         }
         self.runtime_panic_trampolines();
-        writeln!(self.output, ".section .note.GNU-stack,\"\",@progbits").unwrap();
+        self.asm.push(Item::Section(Section::GnuStack));
 
         if self.diagnostics.is_empty() {
-            Ok(remove_redundant_copies(&self.output))
+            self.asm.remove_redundant_copies();
+            Ok(self.asm)
         } else {
             Err(self.diagnostics)
         }
@@ -312,15 +405,10 @@ impl<'a> Generator<'a> {
     }
 
     fn byte_string(&mut self, label: &str, bytes: &[u8]) {
-        writeln!(self.output, "{label}:").unwrap();
-        write!(self.output, "  .byte ").unwrap();
-        for (index, byte) in bytes.iter().chain(std::iter::once(&0)).enumerate() {
-            if index != 0 {
-                write!(self.output, ", ").unwrap();
-            }
-            write!(self.output, "{byte}").unwrap();
-        }
-        writeln!(self.output).unwrap();
+        self.asm.push(Item::Label(label.to_owned()));
+        let mut payload = bytes.to_vec();
+        payload.push(0);
+        self.asm.push(Item::Bytes(payload));
     }
 
     /// Declares every file the line table may name, numbered from 1 in the
@@ -336,7 +424,10 @@ impl<'a> Generator<'a> {
             return;
         };
         for (index, path) in sources.paths().enumerate() {
-            writeln!(self.output, ".file {} \"{}\"", index + 1, quoted(path)).unwrap();
+            self.asm.push(Item::File {
+                index: index + 1,
+                path: path.to_owned(),
+            });
         }
     }
 
@@ -360,12 +451,11 @@ impl<'a> Generator<'a> {
             return;
         }
         self.last_location = Some(location);
-        writeln!(
-            self.output,
-            "  .loc {} {} {}",
-            location.0, location.1, location.2
-        )
-        .unwrap();
+        self.asm.push(Item::Loc {
+            file: location.0,
+            line: location.1,
+            column: location.2,
+        });
     }
 
     /// Writes a label and forgets the last `.loc`.
@@ -373,8 +463,12 @@ impl<'a> Generator<'a> {
     /// Forgetting it makes each block open a row of its own rather than
     /// continue the previous block's, so the address a breakpoint resolves to
     /// is the start of the block that begins the line.
+    fn inst(&mut self, instruction: Inst) {
+        self.asm.instruction(instruction);
+    }
+
     fn label(&mut self, label: &str) {
-        writeln!(self.output, "{label}:").unwrap();
+        self.asm.push(Item::Label(label.to_owned()));
         self.last_location = None;
     }
 
@@ -407,25 +501,26 @@ impl<'a> Generator<'a> {
         let save_base = self.alloc.memory_slots();
         let frame_size = align_to((save_base + saved.len()) * 8, 16);
 
-        writeln!(self.output, ".globl {symbol}").unwrap();
-        writeln!(self.output, ".type {symbol}, @function").unwrap();
+        self.asm.push(Item::Global(symbol.to_owned()));
+        self.asm.push(Item::Function(symbol.to_owned()));
         self.label(&symbol);
         // The prologue is attributed to the declaration, so a breakpoint on the
         // function stops before its body rather than inside its first statement.
         self.location(function.span);
-        writeln!(self.output, "  push rbp").unwrap();
-        writeln!(self.output, "  mov rbp, rsp").unwrap();
+        self.inst(Inst::Push(reg("rbp")));
+        self.inst(Inst::Mov(reg("rbp"), reg("rsp")));
         if frame_size != 0 {
-            writeln!(self.output, "  sub rsp, {frame_size}").unwrap();
+            self.inst(Inst::Alu(
+                AluOp::Sub,
+                reg("rsp"),
+                Operand::Imm(frame_size as i64),
+            ));
         }
         for (index, register) in saved.iter().enumerate() {
-            writeln!(
-                self.output,
-                "  mov QWORD PTR {}, {}",
-                frame_slot(save_base + index),
-                self.registers.wide[*register]
-            )
-            .unwrap();
+            self.inst(Inst::Mov(
+                Operand::Mem(frame_slot(Some(Size::Qword), save_base + index)),
+                Operand::Reg(Reg(self.registers.wide[*register])),
+            ));
         }
 
         self.store_parameters(function);
@@ -436,18 +531,15 @@ impl<'a> Generator<'a> {
 
         self.label(epilogue.as_str());
         for (index, register) in saved.iter().enumerate() {
-            writeln!(
-                self.output,
-                "  mov {}, QWORD PTR {}",
-                self.registers.wide[*register],
-                frame_slot(save_base + index)
-            )
-            .unwrap();
+            self.inst(Inst::Mov(
+                Operand::Reg(Reg(self.registers.wide[*register])),
+                Operand::Mem(frame_slot(Some(Size::Qword), save_base + index)),
+            ));
         }
-        writeln!(self.output, "  mov rsp, rbp").unwrap();
-        writeln!(self.output, "  pop rbp").unwrap();
-        writeln!(self.output, "  ret").unwrap();
-        writeln!(self.output, ".size {symbol}, .-{symbol}").unwrap();
+        self.inst(Inst::Mov(reg("rsp"), reg("rbp")));
+        self.inst(Inst::Pop(Reg("rbp")));
+        self.inst(Inst::Ret);
+        self.asm.push(Item::Size(symbol.to_owned()));
     }
 
     /// Whether generated code for this function contains a `call` that
@@ -491,42 +583,37 @@ impl<'a> Generator<'a> {
             let ty = &function.locals[*local].ty;
             if *ty == Type::F64 {
                 if floats >= float_regs.len() {
-                    writeln!(self.output, "  mov rax, QWORD PTR [rbp+{}]", 16 + stack * 8).unwrap();
-                    writeln!(
-                        self.output,
-                        "  mov {}, rax",
-                        operand(&self.alloc, self.registers, *local)
-                    )
-                    .unwrap();
+                    self.inst(Inst::Mov(
+                        reg("rax"),
+                        Operand::slot(Size::Qword, Reg("rbp"), (16 + stack * 8) as i64),
+                    ));
+                    self.inst(Inst::Mov(
+                        operand(&self.alloc, self.registers, *local),
+                        reg("rax"),
+                    ));
                     stack += 1;
                 } else {
-                    writeln!(
-                        self.output,
-                        "  movq {}, {}",
-                        operand(&self.alloc, self.registers, *local),
-                        float_regs[floats]
-                    )
-                    .unwrap();
+                    let destination = operand(&self.alloc, self.registers, *local);
+                    self.store_double(destination, float_regs[floats]);
                     floats += 1;
                 }
             } else {
                 if integers >= integer_regs.len() {
-                    writeln!(self.output, "  mov rax, QWORD PTR [rbp+{}]", 16 + stack * 8).unwrap();
-                    writeln!(
-                        self.output,
-                        "  mov {}, rax",
-                        operand(&self.alloc, self.registers, *local)
-                    )
-                    .unwrap();
+                    self.inst(Inst::Mov(
+                        reg("rax"),
+                        Operand::slot(Size::Qword, Reg("rbp"), (16 + stack * 8) as i64),
+                    ));
+                    self.inst(Inst::Mov(
+                        operand(&self.alloc, self.registers, *local),
+                        reg("rax"),
+                    ));
                     stack += 1;
                 } else {
-                    writeln!(
-                        self.output,
-                        "  mov {}, {}",
-                        operand(&self.alloc, self.registers, *local),
-                        integer_regs[integers]
-                    )
-                    .unwrap();
+                    let destination = operand(&self.alloc, self.registers, *local);
+                    self.inst(Inst::Mov(
+                        destination,
+                        Operand::Reg(Reg(integer_regs[integers])),
+                    ));
                     integers += 1;
                 }
             }
@@ -549,43 +636,45 @@ impl<'a> Generator<'a> {
             Terminator::Return(value) => {
                 if let Some(local) = value {
                     if function.locals[*local].ty == Type::F64 {
-                        writeln!(
-                            self.output,
-                            "  movq xmm0, {}",
-                            operand(&self.alloc, self.registers, *local)
-                        )
-                        .unwrap();
+                        let source = operand(&self.alloc, self.registers, *local);
+                        self.load_double(source);
                     } else {
-                        writeln!(
-                            self.output,
-                            "  mov rax, {}",
-                            operand(&self.alloc, self.registers, *local)
-                        )
-                        .unwrap();
+                        self.inst(Inst::Mov(
+                            reg("rax"),
+                            operand(&self.alloc, self.registers, *local),
+                        ));
                     }
                 } else {
-                    writeln!(self.output, "  xor eax, eax").unwrap();
+                    self.inst(Inst::Alu(AluOp::Xor, reg("eax"), reg("eax")));
                 }
-                writeln!(self.output, "  jmp {epilogue}").unwrap();
+                self.inst(Inst::Jmp(Target::Named(epilogue.to_owned())));
             }
             Terminator::Goto(target) => {
-                writeln!(self.output, "  jmp .L{}_bb{}", symbol, target).unwrap();
+                self.inst(Inst::Jmp(Target::Named(format!(
+                    ".L{}_bb{}",
+                    symbol, target
+                ))));
             }
             Terminator::Branch {
                 condition,
                 then_block,
                 else_block,
             } => {
-                writeln!(
-                    self.output,
-                    "  cmp {}, 0",
-                    operand(&self.alloc, self.registers, *condition)
-                )
-                .unwrap();
-                writeln!(self.output, "  jne .L{}_bb{}", symbol, then_block).unwrap();
-                writeln!(self.output, "  jmp .L{}_bb{}", symbol, else_block).unwrap();
+                self.inst(Inst::Alu(
+                    AluOp::Cmp,
+                    operand(&self.alloc, self.registers, *condition),
+                    Operand::Imm(0),
+                ));
+                self.inst(Inst::Jcc(
+                    Cond::Ne,
+                    Target::Named(format!(".L{}_bb{}", symbol, then_block)),
+                ));
+                self.inst(Inst::Jmp(Target::Named(format!(
+                    ".L{}_bb{}",
+                    symbol, else_block
+                ))));
             }
-            Terminator::Unreachable => writeln!(self.output, "  ud2").unwrap(),
+            Terminator::Unreachable => self.inst(Inst::Ud2),
         }
     }
 
@@ -594,22 +683,42 @@ impl<'a> Generator<'a> {
     /// x86-64 has no store of a 64-bit immediate to memory, so a memory
     /// destination still needs the trip through `rax`. A register destination
     /// takes the immediate directly.
-    fn load_immediate(&mut self, dst: LocalId, value: &str) {
+    fn load_immediate(&mut self, dst: LocalId, value: Operand) {
+        let destination = operand(&self.alloc, self.registers, dst);
         if in_memory(&self.alloc, dst) {
-            writeln!(self.output, "  mov rax, {value}").unwrap();
-            writeln!(
-                self.output,
-                "  mov {}, rax",
-                operand(&self.alloc, self.registers, dst)
-            )
-            .unwrap();
+            self.inst(Inst::Mov(reg("rax"), value));
+            self.inst(Inst::Mov(destination, reg("rax")));
         } else {
-            writeln!(
-                self.output,
-                "  mov {}, {value}",
-                operand(&self.alloc, self.registers, dst)
-            )
-            .unwrap();
+            self.inst(Inst::Mov(destination, value));
+        }
+    }
+
+    /// Moves a double out of the SSE register it arrived in.
+    ///
+    /// A local holding a double is an ordinary 64-bit value everywhere except
+    /// at the two boundaries where the ABI puts it in `xmm0`.
+    fn store_double(&mut self, destination: Operand, source: &'static str) {
+        match destination {
+            Operand::Reg(register) => self.inst(Inst::Movq(register, Reg(source))),
+            destination => {
+                self.inst(Inst::Movq(Reg("rax"), Reg(source)));
+                self.inst(Inst::Mov(destination, reg("rax")));
+            }
+        }
+    }
+
+    /// And back into it, for a return or an argument.
+    fn load_double(&mut self, source: Operand) {
+        self.load_double_into(Reg("xmm0"), source);
+    }
+
+    fn load_double_into(&mut self, destination: Reg, source: Operand) {
+        match source {
+            Operand::Reg(register) => self.inst(Inst::Movq(destination, register)),
+            source => {
+                self.inst(Inst::Mov(reg("rax"), source));
+                self.inst(Inst::Movq(destination, Reg("rax")));
+            }
         }
     }
 
@@ -617,53 +726,41 @@ impl<'a> Generator<'a> {
     /// in memory — `mov` allows at most one memory operand.
     fn copy(&mut self, dst: LocalId, src: LocalId) {
         if in_memory(&self.alloc, dst) && in_memory(&self.alloc, src) {
-            writeln!(
-                self.output,
-                "  mov rax, {}",
-                operand(&self.alloc, self.registers, src)
-            )
-            .unwrap();
-            writeln!(
-                self.output,
-                "  mov {}, rax",
-                operand(&self.alloc, self.registers, dst)
-            )
-            .unwrap();
-        } else {
-            writeln!(
-                self.output,
-                "  mov {}, {}",
+            self.inst(Inst::Mov(
+                reg("rax"),
+                operand(&self.alloc, self.registers, src),
+            ));
+            self.inst(Inst::Mov(
                 operand(&self.alloc, self.registers, dst),
-                operand(&self.alloc, self.registers, src)
-            )
-            .unwrap();
+                reg("rax"),
+            ));
+        } else {
+            self.inst(Inst::Mov(
+                operand(&self.alloc, self.registers, dst),
+                operand(&self.alloc, self.registers, src),
+            ));
         }
     }
 
     fn instruction(&mut self, function: &MirFunction, instruction: &Instruction) {
         match instruction {
-            Instruction::ConstInt { dst, value } => self.load_immediate(*dst, &value.to_string()),
-            Instruction::ConstFloat { dst, bits } => self.load_immediate(*dst, &bits.to_string()),
+            Instruction::ConstInt { dst, value } => self.load_immediate(*dst, Operand::Imm(*value)),
+            Instruction::ConstFloat { dst, bits } => {
+                self.load_immediate(*dst, Operand::Bits(*bits))
+            }
             Instruction::ConstBool { dst, value } => {
-                writeln!(
-                    self.output,
-                    "  mov {}, {}",
-                    operand(&self.alloc, self.registers, *dst),
-                    i32::from(*value)
-                )
-                .unwrap();
+                let destination = operand(&self.alloc, self.registers, *dst);
+                self.inst(Inst::Mov(destination, Operand::Imm(i64::from(*value))));
             }
             Instruction::StringNew { dst, value } => {
                 let label = self.string_ids[value].clone();
-                writeln!(self.output, "  lea rdi, {label}[rip]").unwrap();
-                writeln!(self.output, "  mov rsi, {}", value.len()).unwrap();
-                writeln!(self.output, "  call sl_rt_string_new").unwrap();
-                writeln!(
-                    self.output,
-                    "  mov {}, rax",
-                    operand(&self.alloc, self.registers, *dst)
-                )
-                .unwrap();
+                self.inst(Inst::Lea(Reg("rdi"), Operand::Rip(label)));
+                self.inst(Inst::Mov(reg("rsi"), Operand::Imm(value.len() as i64)));
+                self.inst(Inst::Call("sl_rt_string_new".into()));
+                self.inst(Inst::Mov(
+                    operand(&self.alloc, self.registers, *dst),
+                    reg("rax"),
+                ));
             }
             Instruction::Assign { dst, src } => self.copy(*dst, *src),
             Instruction::AddressOf { dst, src } => {
@@ -677,13 +774,11 @@ impl<'a> Generator<'a> {
                 {
                     self.copy(*dst, *src);
                 } else {
-                    writeln!(self.output, "  lea rax, {}", address(&self.alloc, *src)).unwrap();
-                    writeln!(
-                        self.output,
-                        "  mov {}, rax",
-                        operand(&self.alloc, self.registers, *dst)
-                    )
-                    .unwrap();
+                    self.inst(Inst::Lea(Reg("rax"), address(&self.alloc, *src)));
+                    self.inst(Inst::Mov(
+                        operand(&self.alloc, self.registers, *dst),
+                        reg("rax"),
+                    ));
                 }
             }
             Instruction::Binary {
@@ -709,149 +804,137 @@ impl<'a> Generator<'a> {
                 self.call(*dst, callee, args, arg_types, result);
             }
             Instruction::Drop { local, ty } => {
-                writeln!(
-                    self.output,
-                    "  mov rdi, {}",
-                    operand(&self.alloc, self.registers, *local)
-                )
-                .unwrap();
+                self.inst(Inst::Mov(
+                    reg("rdi"),
+                    operand(&self.alloc, self.registers, *local),
+                ));
                 match ty {
-                    Type::String => writeln!(self.output, "  call sl_rt_string_drop").unwrap(),
+                    Type::String => self.inst(Inst::Call("sl_rt_string_drop".into())),
                     Type::List(_) | Type::Array { .. } => {
-                        writeln!(self.output, "  call sl_rt_list_drop").unwrap()
+                        self.inst(Inst::Call("sl_rt_list_drop".into()))
                     }
-                    Type::Slice(_) => writeln!(self.output, "  call sl_rt_slice_drop").unwrap(),
+                    Type::Slice(_) => self.inst(Inst::Call("sl_rt_slice_drop".into())),
                     Type::Named(name)
                         if self.module.structs.iter().any(|item| &item.name == name) =>
                     {
-                        writeln!(self.output, "  call {}", struct_drop_symbol(name)).unwrap()
+                        self.inst(Inst::Call(struct_drop_symbol(name)))
                     }
                     Type::Named(name)
                         if self.module.enums.iter().any(|item| &item.name == name) =>
                     {
-                        writeln!(self.output, "  call {}", enum_drop_symbol(name)).unwrap()
+                        self.inst(Inst::Call(enum_drop_symbol(name)))
                     }
                     _ => {}
                 }
-                writeln!(
-                    self.output,
-                    "  mov {}, 0",
-                    operand(&self.alloc, self.registers, *local)
-                )
-                .unwrap();
+                self.inst(Inst::Mov(
+                    operand(&self.alloc, self.registers, *local),
+                    Operand::Imm(0),
+                ));
             }
             Instruction::StructNew { dst, name, fields } => {
                 let size = struct_size(self.module, name);
-                writeln!(self.output, "  mov rdi, {size}").unwrap();
-                writeln!(self.output, "  call sl_rt_alloc").unwrap();
+                self.inst(Inst::Mov(reg("rdi"), Operand::Imm(size as i64)));
+                self.inst(Inst::Call("sl_rt_alloc".into()));
                 for (index, field) in fields.iter().enumerate() {
-                    writeln!(
-                        self.output,
-                        "  mov rcx, {}",
-                        operand(&self.alloc, self.registers, *field)
-                    )
-                    .unwrap();
-                    writeln!(self.output, "  mov QWORD PTR [rax+{}], rcx", index * 8).unwrap();
+                    self.inst(Inst::Mov(
+                        reg("rcx"),
+                        operand(&self.alloc, self.registers, *field),
+                    ));
+                    self.inst(Inst::Mov(
+                        Operand::slot(Size::Qword, Reg("rax"), (index * 8) as i64),
+                        reg("rcx"),
+                    ));
                 }
-                writeln!(
-                    self.output,
-                    "  mov {}, rax",
-                    operand(&self.alloc, self.registers, *dst)
-                )
-                .unwrap();
+                self.inst(Inst::Mov(
+                    operand(&self.alloc, self.registers, *dst),
+                    reg("rax"),
+                ));
             }
             Instruction::FieldLoad { dst, base, index } => {
-                writeln!(
-                    self.output,
-                    "  mov rax, {}",
-                    operand(&self.alloc, self.registers, *base)
-                )
-                .unwrap();
-                writeln!(self.output, "  mov rcx, QWORD PTR [rax+{}]", index * 8).unwrap();
-                writeln!(
-                    self.output,
-                    "  mov {}, rcx",
-                    operand(&self.alloc, self.registers, *dst)
-                )
-                .unwrap();
+                self.inst(Inst::Mov(
+                    reg("rax"),
+                    operand(&self.alloc, self.registers, *base),
+                ));
+                self.inst(Inst::Mov(
+                    reg("rcx"),
+                    Operand::slot(Size::Qword, Reg("rax"), (index * 8) as i64),
+                ));
+                self.inst(Inst::Mov(
+                    operand(&self.alloc, self.registers, *dst),
+                    reg("rcx"),
+                ));
             }
             Instruction::EnumNew {
                 dst, tag, fields, ..
             } => {
                 let size = enum_size(fields.len());
-                writeln!(self.output, "  mov rdi, {size}").unwrap();
-                writeln!(self.output, "  call sl_rt_alloc").unwrap();
-                writeln!(self.output, "  mov QWORD PTR [rax], {tag}").unwrap();
+                self.inst(Inst::Mov(reg("rdi"), Operand::Imm(size as i64)));
+                self.inst(Inst::Call("sl_rt_alloc".into()));
+                self.inst(Inst::Mov(
+                    Operand::Mem(Mem {
+                        size: Some(Size::Qword),
+                        base: Reg("rax"),
+                        disp: None,
+                    }),
+                    Operand::Imm(*tag as i64),
+                ));
                 for (index, field) in fields.iter().enumerate() {
-                    writeln!(
-                        self.output,
-                        "  mov rcx, {}",
-                        operand(&self.alloc, self.registers, *field)
-                    )
-                    .unwrap();
-                    writeln!(
-                        self.output,
-                        "  mov QWORD PTR [rax+{}], rcx",
-                        (index + 1) * 8
-                    )
-                    .unwrap();
+                    self.inst(Inst::Mov(
+                        reg("rcx"),
+                        operand(&self.alloc, self.registers, *field),
+                    ));
+                    self.inst(Inst::Mov(
+                        Operand::slot(Size::Qword, Reg("rax"), ((index + 1) * 8) as i64),
+                        reg("rcx"),
+                    ));
                 }
-                writeln!(
-                    self.output,
-                    "  mov {}, rax",
-                    operand(&self.alloc, self.registers, *dst)
-                )
-                .unwrap();
+                self.inst(Inst::Mov(
+                    operand(&self.alloc, self.registers, *dst),
+                    reg("rax"),
+                ));
             }
             Instruction::EnumTag { dst, base } => {
-                writeln!(
-                    self.output,
-                    "  mov rax, {}",
-                    operand(&self.alloc, self.registers, *base)
-                )
-                .unwrap();
-                writeln!(self.output, "  mov rcx, QWORD PTR [rax]").unwrap();
-                writeln!(
-                    self.output,
-                    "  mov {}, rcx",
-                    operand(&self.alloc, self.registers, *dst)
-                )
-                .unwrap();
+                self.inst(Inst::Mov(
+                    reg("rax"),
+                    operand(&self.alloc, self.registers, *base),
+                ));
+                self.inst(Inst::Mov(
+                    reg("rcx"),
+                    Operand::Mem(Mem {
+                        size: Some(Size::Qword),
+                        base: Reg("rax"),
+                        disp: None,
+                    }),
+                ));
+                self.inst(Inst::Mov(
+                    operand(&self.alloc, self.registers, *dst),
+                    reg("rcx"),
+                ));
             }
             Instruction::EnumFieldLoad { dst, base, index } => {
-                writeln!(
-                    self.output,
-                    "  mov rax, {}",
-                    operand(&self.alloc, self.registers, *base)
-                )
-                .unwrap();
-                writeln!(
-                    self.output,
-                    "  mov rcx, QWORD PTR [rax+{}]",
-                    (index + 1) * 8
-                )
-                .unwrap();
-                writeln!(
-                    self.output,
-                    "  mov {}, rcx",
-                    operand(&self.alloc, self.registers, *dst)
-                )
-                .unwrap();
+                self.inst(Inst::Mov(
+                    reg("rax"),
+                    operand(&self.alloc, self.registers, *base),
+                ));
+                self.inst(Inst::Mov(
+                    reg("rcx"),
+                    Operand::slot(Size::Qword, Reg("rax"), ((index + 1) * 8) as i64),
+                ));
+                self.inst(Inst::Mov(
+                    operand(&self.alloc, self.registers, *dst),
+                    reg("rcx"),
+                ));
             }
             Instruction::Free { local } => {
-                writeln!(
-                    self.output,
-                    "  mov rdi, {}",
-                    operand(&self.alloc, self.registers, *local)
-                )
-                .unwrap();
-                writeln!(self.output, "  call sl_rt_free").unwrap();
-                writeln!(
-                    self.output,
-                    "  mov {}, 0",
-                    operand(&self.alloc, self.registers, *local)
-                )
-                .unwrap();
+                self.inst(Inst::Mov(
+                    reg("rdi"),
+                    operand(&self.alloc, self.registers, *local),
+                ));
+                self.inst(Inst::Call("sl_rt_free".into()));
+                self.inst(Inst::Mov(
+                    operand(&self.alloc, self.registers, *local),
+                    Operand::Imm(0),
+                ));
             }
         }
     }
@@ -899,32 +982,26 @@ impl<'a> Generator<'a> {
         let narrow = *ty == Type::I32;
         let (target, source) = if narrow {
             (
-                self.registers.narrow[register].to_owned(),
+                Reg(self.registers.narrow[register]),
                 narrow_operand(&self.alloc, self.registers, rhs),
             )
         } else {
             (
-                self.registers.wide[register].to_owned(),
+                Reg(self.registers.wide[register]),
                 operand(&self.alloc, self.registers, rhs),
             )
         };
-        let mnemonic = match op {
-            BinaryOp::Add => "add",
-            BinaryOp::Sub => "sub",
-            BinaryOp::Mul => "imul",
+        match op {
+            BinaryOp::Add => self.inst(Inst::Alu(AluOp::Add, Operand::Reg(target), source)),
+            BinaryOp::Sub => self.inst(Inst::Alu(AluOp::Sub, Operand::Reg(target), source)),
+            BinaryOp::Mul => self.inst(Inst::Imul(target, source)),
             _ => unreachable!("only the accumulating operators reach here"),
-        };
-        writeln!(self.output, "  {mnemonic} {target}, {source}").unwrap();
-        writeln!(self.output, "  jo .Lsl_panic_overflow_trampoline").unwrap();
+        }
+        self.inst(Inst::Jcc(Cond::O, overflow_trampoline()));
         if narrow {
             // The 32-bit form zero-extends into the full register; the local's
             // value is a sign-extended i32.
-            writeln!(
-                self.output,
-                "  movsxd {}, {target}",
-                self.registers.wide[register]
-            )
-            .unwrap();
+            self.inst(Inst::Movsxd(Reg(self.registers.wide[register]), target));
         }
         true
     }
@@ -938,26 +1015,22 @@ impl<'a> Generator<'a> {
         if in_memory(&self.alloc, lhs) && in_memory(&self.alloc, rhs) {
             return false;
         }
-        writeln!(
-            self.output,
-            "  cmp {}, {}",
+        self.inst(Inst::Alu(
+            AluOp::Cmp,
             operand(&self.alloc, self.registers, lhs),
-            operand(&self.alloc, self.registers, rhs)
-        )
-        .unwrap();
-        writeln!(self.output, "  {} al", set_condition(op)).unwrap();
+            operand(&self.alloc, self.registers, rhs),
+        ));
+        self.inst(Inst::Setcc(set_condition(op), Reg("al")));
         match self.alloc.location(dst) {
             Location::Register(register) => {
-                writeln!(self.output, "  movzx {}, al", self.registers.wide[register]).unwrap()
+                self.inst(Inst::Movzx(Reg(self.registers.wide[register]), Reg("al")))
             }
             Location::Memory(_) => {
-                writeln!(self.output, "  movzx rax, al").unwrap();
-                writeln!(
-                    self.output,
-                    "  mov {}, rax",
-                    operand(&self.alloc, self.registers, dst)
-                )
-                .unwrap();
+                self.inst(Inst::Movzx(Reg("rax"), Reg("al")));
+                self.inst(Inst::Mov(
+                    operand(&self.alloc, self.registers, dst),
+                    reg("rax"),
+                ));
             }
         }
         true
@@ -971,91 +1044,80 @@ impl<'a> Generator<'a> {
         rhs: LocalId,
         ty: &Type,
     ) {
-        writeln!(
-            self.output,
-            "  mov rax, {}",
-            operand(&self.alloc, self.registers, lhs)
-        )
-        .unwrap();
-        writeln!(
-            self.output,
-            "  mov rcx, {}",
-            operand(&self.alloc, self.registers, rhs)
-        )
-        .unwrap();
+        self.inst(Inst::Mov(
+            reg("rax"),
+            operand(&self.alloc, self.registers, lhs),
+        ));
+        self.inst(Inst::Mov(
+            reg("rcx"),
+            operand(&self.alloc, self.registers, rhs),
+        ));
         let width = if *ty == Type::I32 { "e" } else { "r" };
-        let accumulator = if width == "e" { "eax" } else { "rax" };
-        let argument = if width == "e" { "ecx" } else { "rcx" };
+        let accumulator = reg(if width == "e" { "eax" } else { "rax" });
+        let argument = reg(if width == "e" { "ecx" } else { "rcx" });
         match op {
             BinaryOp::Add => {
-                writeln!(self.output, "  add {accumulator}, {argument}").unwrap();
-                writeln!(self.output, "  jo .Lsl_panic_overflow_trampoline").unwrap();
+                self.inst(Inst::Alu(AluOp::Add, accumulator.clone(), argument.clone()));
+                self.inst(Inst::Jcc(Cond::O, overflow_trampoline()));
             }
             BinaryOp::Sub => {
-                writeln!(self.output, "  sub {accumulator}, {argument}").unwrap();
-                writeln!(self.output, "  jo .Lsl_panic_overflow_trampoline").unwrap();
+                self.inst(Inst::Alu(AluOp::Sub, accumulator.clone(), argument.clone()));
+                self.inst(Inst::Jcc(Cond::O, overflow_trampoline()));
             }
             BinaryOp::Mul => {
-                writeln!(self.output, "  imul {accumulator}, {argument}").unwrap();
-                writeln!(self.output, "  jo .Lsl_panic_overflow_trampoline").unwrap();
+                self.inst(Inst::Imul(
+                    Reg(if width == "e" { "eax" } else { "rax" }),
+                    argument.clone(),
+                ));
+                self.inst(Inst::Jcc(Cond::O, overflow_trampoline()));
             }
             BinaryOp::Div => {
-                writeln!(self.output, "  test {argument}, {argument}").unwrap();
-                writeln!(self.output, "  je .Lsl_panic_div_zero_trampoline").unwrap();
+                self.inst(Inst::Test(argument.clone(), argument.clone()));
+                self.inst(Inst::Jcc(Cond::E, div_zero_trampoline()));
                 if *ty == Type::I32 {
-                    writeln!(self.output, "  cmp eax, -2147483648").unwrap();
-                    writeln!(self.output, "  jne 1f").unwrap();
-                    writeln!(self.output, "  cmp ecx, -1").unwrap();
-                    writeln!(self.output, "  je .Lsl_panic_overflow_trampoline").unwrap();
-                    writeln!(self.output, "1:").unwrap();
-                    writeln!(self.output, "  cdq").unwrap();
-                    writeln!(self.output, "  idiv ecx").unwrap();
+                    self.inst(Inst::Alu(AluOp::Cmp, reg("eax"), Operand::Imm(-2147483648)));
+                    self.inst(Inst::Jcc(Cond::Ne, Target::Forward(1)));
+                    self.inst(Inst::Alu(AluOp::Cmp, reg("ecx"), Operand::Imm(-1)));
+                    self.inst(Inst::Jcc(Cond::E, overflow_trampoline()));
+                    self.asm.push(Item::Numeric(1));
+                    self.inst(Inst::Cdq);
+                    self.inst(Inst::Idiv(Reg("ecx")));
                 } else {
-                    writeln!(self.output, "  mov rdx, -9223372036854775808").unwrap();
-                    writeln!(self.output, "  cmp rax, rdx").unwrap();
-                    writeln!(self.output, "  jne 1f").unwrap();
-                    writeln!(self.output, "  cmp rcx, -1").unwrap();
-                    writeln!(self.output, "  je .Lsl_panic_overflow_trampoline").unwrap();
-                    writeln!(self.output, "1:").unwrap();
-                    writeln!(self.output, "  cqo").unwrap();
-                    writeln!(self.output, "  idiv rcx").unwrap();
+                    self.inst(Inst::Mov(reg("rdx"), Operand::Imm(i64::MIN)));
+                    self.inst(Inst::Alu(AluOp::Cmp, reg("rax"), reg("rdx")));
+                    self.inst(Inst::Jcc(Cond::Ne, Target::Forward(1)));
+                    self.inst(Inst::Alu(AluOp::Cmp, reg("rcx"), Operand::Imm(-1)));
+                    self.inst(Inst::Jcc(Cond::E, overflow_trampoline()));
+                    self.asm.push(Item::Numeric(1));
+                    self.inst(Inst::Cqo);
+                    self.inst(Inst::Idiv(Reg("rcx")));
                 }
             }
             BinaryOp::Less | BinaryOp::Greater | BinaryOp::Equal => {
-                writeln!(self.output, "  cmp rax, rcx").unwrap();
-                writeln!(self.output, "  {} al", set_condition(op)).unwrap();
-                writeln!(self.output, "  movzx rax, al").unwrap();
+                self.inst(Inst::Alu(AluOp::Cmp, reg("rax"), reg("rcx")));
+                self.inst(Inst::Setcc(set_condition(op), Reg("al")));
+                self.inst(Inst::Movzx(Reg("rax"), Reg("al")));
             }
         }
         if *ty == Type::I32 && !matches!(op, BinaryOp::Less | BinaryOp::Greater | BinaryOp::Equal) {
-            writeln!(self.output, "  movsxd rax, eax").unwrap();
+            self.inst(Inst::Movsxd(Reg("rax"), Reg("eax")));
         }
-        writeln!(
-            self.output,
-            "  mov {}, rax",
-            operand(&self.alloc, self.registers, dst)
-        )
-        .unwrap();
+        self.inst(Inst::Mov(
+            operand(&self.alloc, self.registers, dst),
+            reg("rax"),
+        ));
     }
 
     fn float_binary(&mut self, dst: LocalId, op: BinaryOp, lhs: LocalId, rhs: LocalId) {
-        writeln!(
-            self.output,
-            "  movq xmm0, {}",
-            operand(&self.alloc, self.registers, lhs)
-        )
-        .unwrap();
-        writeln!(
-            self.output,
-            "  movq xmm1, {}",
-            operand(&self.alloc, self.registers, rhs)
-        )
-        .unwrap();
+        let left = operand(&self.alloc, self.registers, lhs);
+        self.load_double(left);
+        let right = operand(&self.alloc, self.registers, rhs);
+        self.load_double_into(Reg("xmm1"), right);
         match op {
-            BinaryOp::Add => writeln!(self.output, "  addsd xmm0, xmm1").unwrap(),
-            BinaryOp::Sub => writeln!(self.output, "  subsd xmm0, xmm1").unwrap(),
-            BinaryOp::Mul => writeln!(self.output, "  mulsd xmm0, xmm1").unwrap(),
-            BinaryOp::Div => writeln!(self.output, "  divsd xmm0, xmm1").unwrap(),
+            BinaryOp::Add => self.inst(Inst::Sse(SseOp::Add, Reg("xmm0"), Reg("xmm1"))),
+            BinaryOp::Sub => self.inst(Inst::Sse(SseOp::Sub, Reg("xmm0"), Reg("xmm1"))),
+            BinaryOp::Mul => self.inst(Inst::Sse(SseOp::Mul, Reg("xmm0"), Reg("xmm1"))),
+            BinaryOp::Div => self.inst(Inst::Sse(SseOp::Div, Reg("xmm0"), Reg("xmm1"))),
             // `ucomisd` reports "unordered" — either operand a NaN — with the
             // same flags it uses for "below" and for "equal", so `setb` and a
             // bare `sete` both answer true for a NaN. IEEE 754 says a NaN is
@@ -1065,38 +1127,34 @@ impl<'a> Generator<'a> {
             BinaryOp::Less => {
                 // Asking "is the right side above the left" rather than "is the
                 // left below the right": `seta` is false when unordered.
-                writeln!(self.output, "  ucomisd xmm1, xmm0").unwrap();
-                writeln!(self.output, "  seta al").unwrap();
+                self.inst(Inst::Sse(SseOp::Ucomi, Reg("xmm1"), Reg("xmm0")));
+                self.inst(Inst::Setcc(Cond::A, Reg("al")));
                 self.widen_flag_into_xmm0();
             }
             BinaryOp::Greater => {
-                writeln!(self.output, "  ucomisd xmm0, xmm1").unwrap();
-                writeln!(self.output, "  seta al").unwrap();
+                self.inst(Inst::Sse(SseOp::Ucomi, Reg("xmm0"), Reg("xmm1")));
+                self.inst(Inst::Setcc(Cond::A, Reg("al")));
                 self.widen_flag_into_xmm0();
             }
             BinaryOp::Equal => {
                 // Equality has no single condition that excludes unordered, so
                 // the parity flag — set only when unordered — is anded in.
-                writeln!(self.output, "  ucomisd xmm0, xmm1").unwrap();
-                writeln!(self.output, "  sete al").unwrap();
-                writeln!(self.output, "  setnp cl").unwrap();
-                writeln!(self.output, "  and al, cl").unwrap();
+                self.inst(Inst::Sse(SseOp::Ucomi, Reg("xmm0"), Reg("xmm1")));
+                self.inst(Inst::Setcc(Cond::E, Reg("al")));
+                self.inst(Inst::Setcc(Cond::Np, Reg("cl")));
+                self.inst(Inst::Alu(AluOp::And, reg("al"), reg("cl")));
                 self.widen_flag_into_xmm0();
             }
         }
-        writeln!(
-            self.output,
-            "  movq {}, xmm0",
-            operand(&self.alloc, self.registers, dst)
-        )
-        .unwrap();
+        let destination = operand(&self.alloc, self.registers, dst);
+        self.store_double(destination, "xmm0");
     }
 
     /// Moves the flag byte a float comparison just produced into `xmm0`,
     /// where the rest of `float_binary` expects its result.
     fn widen_flag_into_xmm0(&mut self) {
-        writeln!(self.output, "  movzx rax, al").unwrap();
-        writeln!(self.output, "  movq xmm0, rax").unwrap();
+        self.inst(Inst::Movzx(Reg("rax"), Reg("al")));
+        self.inst(Inst::Movq(Reg("xmm0"), Reg("rax")));
     }
 
     fn call(
@@ -1113,18 +1171,17 @@ impl<'a> Generator<'a> {
         }
         match result {
             Type::Unit => {}
-            Type::F64 => writeln!(
-                self.output,
-                "  movq {}, xmm0",
-                operand(&self.alloc, self.registers, dst)
-            )
-            .unwrap(),
-            _ => writeln!(
-                self.output,
-                "  mov {}, rax",
-                operand(&self.alloc, self.registers, dst)
-            )
-            .unwrap(),
+            Type::F64 => {
+                let destination = operand(&self.alloc, self.registers, dst);
+                let Operand::Reg(destination) = destination else {
+                    unreachable!("a double is returned into a register")
+                };
+                self.inst(Inst::Movq(destination, Reg("xmm0")))
+            }
+            _ => {
+                let destination = operand(&self.alloc, self.registers, dst);
+                self.inst(Inst::Mov(destination, reg("rax")))
+            }
         }
     }
 
@@ -1139,71 +1196,89 @@ impl<'a> Generator<'a> {
                     for (index, argument) in arguments.iter().enumerate() {
                         let register = INTEGER_ARGUMENTS[index];
                         match argument {
-                            Argument::Value(local) => writeln!(
-                                self.output,
-                                "  mov {register}, {}",
-                                operand(&self.alloc, self.registers, *local)
-                            )
-                            .unwrap(),
-                            Argument::Address(local) => writeln!(
-                                self.output,
-                                "  lea {register}, {}",
-                                address(&self.alloc, *local)
-                            )
-                            .unwrap(),
-                            Argument::Immediate(value) => {
-                                writeln!(self.output, "  mov {register}, {value}").unwrap()
+                            Argument::Value(local) => {
+                                let source = operand(&self.alloc, self.registers, *local);
+                                self.inst(Inst::Mov(Operand::Reg(Reg(register)), source))
                             }
+                            Argument::Address(local) => {
+                                let source = address(&self.alloc, *local);
+                                self.inst(Inst::Lea(Reg(register), source))
+                            }
+                            Argument::Immediate(value) => self
+                                .inst(Inst::Mov(Operand::Reg(Reg(register)), Operand::Imm(*value))),
                             Argument::Function(Some(symbol)) => {
-                                writeln!(self.output, "  lea {register}, {symbol}[rip]").unwrap()
+                                self.inst(Inst::Lea(Reg(register), Operand::Rip(symbol.clone())))
                             }
                             // Writing the 32-bit view clears the whole
                             // register and encodes one byte shorter.
                             Argument::Function(None) => {
                                 let narrow = NARROW_ARGUMENTS[index];
-                                writeln!(self.output, "  xor {narrow}, {narrow}").unwrap()
+                                self.inst(Inst::Alu(
+                                    AluOp::Xor,
+                                    Operand::Reg(Reg(narrow)),
+                                    Operand::Reg(Reg(narrow)),
+                                ))
                             }
                         }
                     }
                     match tail {
-                        Tail::Call(symbol) => writeln!(self.output, "  call {symbol}").unwrap(),
-                        Tail::FirstArgument => {
-                            writeln!(self.output, "  mov rax, {}", INTEGER_ARGUMENTS[0]).unwrap()
-                        }
+                        Tail::Call(symbol) => self.inst(Inst::Call(symbol.clone())),
+                        Tail::FirstArgument => self.inst(Inst::Mov(
+                            reg("rax"),
+                            Operand::Reg(Reg(INTEGER_ARGUMENTS[0])),
+                        )),
                     }
                 }
-                Step::Save => writeln!(
-                    self.output,
-                    "  mov {}, rax",
-                    operand(&self.alloc, self.registers, dst)
-                )
-                .unwrap(),
-                Step::Restore => writeln!(
-                    self.output,
-                    "  mov rax, {}",
-                    operand(&self.alloc, self.registers, dst)
-                )
-                .unwrap(),
-                Step::Load => writeln!(self.output, "  mov rax, QWORD PTR [rax]").unwrap(),
+                Step::Save => {
+                    let destination = operand(&self.alloc, self.registers, dst);
+                    self.inst(Inst::Mov(destination, reg("rax")))
+                }
+                Step::Restore => {
+                    let source = operand(&self.alloc, self.registers, dst);
+                    self.inst(Inst::Mov(reg("rax"), source))
+                }
+                Step::Load => self.inst(Inst::Mov(
+                    reg("rax"),
+                    Operand::Mem(Mem {
+                        size: Some(Size::Qword),
+                        base: Reg("rax"),
+                        disp: None,
+                    }),
+                )),
                 Step::WrapOption { some_tag, none_tag } => {
-                    writeln!(self.output, "  test rax, rax").unwrap();
-                    writeln!(self.output, "  jz 1f").unwrap();
-                    writeln!(self.output, "  mov rdi, {}", enum_size(1)).unwrap();
-                    writeln!(self.output, "  call sl_rt_alloc").unwrap();
-                    writeln!(self.output, "  mov QWORD PTR [rax], {some_tag}").unwrap();
-                    writeln!(
-                        self.output,
-                        "  mov rcx, {}",
-                        operand(&self.alloc, self.registers, dst)
-                    )
-                    .unwrap();
-                    writeln!(self.output, "  mov QWORD PTR [rax+8], rcx").unwrap();
-                    writeln!(self.output, "  jmp 2f").unwrap();
-                    writeln!(self.output, "1:").unwrap();
-                    writeln!(self.output, "  mov rdi, {}", enum_size(0)).unwrap();
-                    writeln!(self.output, "  call sl_rt_alloc").unwrap();
-                    writeln!(self.output, "  mov QWORD PTR [rax], {none_tag}").unwrap();
-                    writeln!(self.output, "2:").unwrap();
+                    self.inst(Inst::Test(reg("rax"), reg("rax")));
+                    self.inst(Inst::Jcc(Cond::Z, Target::Forward(1)));
+                    self.inst(Inst::Mov(reg("rdi"), Operand::Imm(enum_size(1) as i64)));
+                    self.inst(Inst::Call("sl_rt_alloc".into()));
+                    self.inst(Inst::Mov(
+                        Operand::Mem(Mem {
+                            size: Some(Size::Qword),
+                            base: Reg("rax"),
+                            disp: None,
+                        }),
+                        Operand::Imm(*some_tag as i64),
+                    ));
+                    self.inst(Inst::Mov(
+                        reg("rcx"),
+                        operand(&self.alloc, self.registers, dst),
+                    ));
+                    self.inst(Inst::Mov(
+                        Operand::slot(Size::Qword, Reg("rax"), 8),
+                        reg("rcx"),
+                    ));
+                    self.inst(Inst::Jmp(Target::Forward(2)));
+                    self.asm.push(Item::Numeric(1));
+                    self.inst(Inst::Mov(reg("rdi"), Operand::Imm(enum_size(0) as i64)));
+                    self.inst(Inst::Call("sl_rt_alloc".into()));
+                    self.inst(Inst::Mov(
+                        Operand::Mem(Mem {
+                            size: Some(Size::Qword),
+                            base: Reg("rax"),
+                            disp: None,
+                        }),
+                        Operand::Imm(*none_tag as i64),
+                    ));
+                    self.asm.push(Item::Numeric(2));
                 }
             }
         }
@@ -1219,79 +1294,82 @@ impl<'a> Generator<'a> {
                 if floats >= FLOAT_ARGUMENTS.len() {
                     stack_args.push((*arg, ty));
                 } else {
-                    writeln!(
-                        self.output,
-                        "  movq {}, {}",
-                        FLOAT_ARGUMENTS[floats],
-                        operand(&self.alloc, self.registers, *arg)
-                    )
-                    .unwrap();
+                    let source = operand(&self.alloc, self.registers, *arg);
+                    self.load_double_into(Reg(FLOAT_ARGUMENTS[floats]), source);
                     floats += 1;
                 }
             } else {
                 if integers >= INTEGER_ARGUMENTS.len() {
                     stack_args.push((*arg, ty));
                 } else {
-                    writeln!(
-                        self.output,
-                        "  mov {}, {}",
-                        INTEGER_ARGUMENTS[integers],
-                        operand(&self.alloc, self.registers, *arg)
-                    )
-                    .unwrap();
+                    let source = operand(&self.alloc, self.registers, *arg);
+                    self.inst(Inst::Mov(
+                        Operand::Reg(Reg(INTEGER_ARGUMENTS[integers])),
+                        source,
+                    ));
                     integers += 1;
                 }
             }
         }
         let padding = usize::from(stack_args.len() % 2 != 0);
         if padding != 0 {
-            writeln!(self.output, "  sub rsp, 8").unwrap();
+            self.inst(Inst::Alu(AluOp::Sub, reg("rsp"), Operand::Imm(8)));
         }
         for (arg, _) in stack_args.iter().rev() {
-            writeln!(
-                self.output,
-                "  push {}",
-                operand(&self.alloc, self.registers, *arg)
-            )
-            .unwrap();
+            self.inst(Inst::Push(operand(&self.alloc, self.registers, *arg)));
         }
-        writeln!(self.output, "  call {}", self.symbol(callee, false)).unwrap();
+        self.inst(Inst::Call(self.symbol(callee, false)));
         let cleanup = (stack_args.len() + padding) * 8;
         if cleanup != 0 {
-            writeln!(self.output, "  add rsp, {cleanup}").unwrap();
+            self.inst(Inst::Alu(
+                AluOp::Add,
+                reg("rsp"),
+                Operand::Imm(cleanup as i64),
+            ));
         }
     }
 
     fn test_harness(&mut self) {
-        writeln!(self.output, ".globl main").unwrap();
-        writeln!(self.output, ".type main, @function").unwrap();
-        writeln!(self.output, "main:").unwrap();
-        writeln!(self.output, "  push rbp").unwrap();
-        writeln!(self.output, "  mov rbp, rsp").unwrap();
-        writeln!(self.output, "  sub rsp, 16").unwrap();
-        writeln!(self.output, "  mov QWORD PTR [rbp-16], rsi").unwrap();
-        writeln!(self.output, "  mov QWORD PTR [rbp-8], rdi").unwrap();
-        writeln!(self.output, "  call sl_rt_args_init").unwrap();
-        writeln!(self.output, "  mov QWORD PTR [rbp-8], 0").unwrap();
+        self.asm.push(Item::Global("main".into()));
+        self.asm.push(Item::Function("main".into()));
+        self.asm.push(Item::Label("main".into()));
+        self.inst(Inst::Push(reg("rbp")));
+        self.inst(Inst::Mov(reg("rbp"), reg("rsp")));
+        self.inst(Inst::Alu(AluOp::Sub, reg("rsp"), Operand::Imm(16)));
+        self.inst(Inst::Mov(
+            Operand::slot(Size::Qword, Reg("rbp"), -16),
+            reg("rsi"),
+        ));
+        self.inst(Inst::Mov(
+            Operand::slot(Size::Qword, Reg("rbp"), -8),
+            reg("rdi"),
+        ));
+        self.inst(Inst::Call("sl_rt_args_init".into()));
+        self.inst(Inst::Mov(
+            Operand::slot(Size::Qword, Reg("rbp"), -8),
+            Operand::Imm(0),
+        ));
         for (index, test) in self.module.tests.iter().enumerate() {
             let name = self.string_ids[&test.name].clone();
-            writeln!(
-                self.output,
-                "  call {}",
-                self.symbol(&test.function.name, true)
-            )
-            .unwrap();
-            writeln!(self.output, "  mov esi, eax").unwrap();
-            writeln!(self.output, "  lea rdi, {name}[rip]").unwrap();
-            writeln!(self.output, "  call sl_rt_test_result").unwrap();
-            writeln!(self.output, "  add QWORD PTR [rbp-8], rax").unwrap();
+            self.inst(Inst::Call(self.symbol(&test.function.name, true)));
+            self.inst(Inst::Mov(reg("esi"), reg("eax")));
+            self.inst(Inst::Lea(Reg("rdi"), Operand::Rip(name.to_owned())));
+            self.inst(Inst::Call("sl_rt_test_result".into()));
+            self.inst(Inst::Alu(
+                AluOp::Add,
+                Operand::slot(Size::Qword, Reg("rbp"), -8),
+                reg("rax"),
+            ));
             let _ = index;
         }
-        writeln!(self.output, "  mov rax, QWORD PTR [rbp-8]").unwrap();
-        writeln!(self.output, "  mov rsp, rbp").unwrap();
-        writeln!(self.output, "  pop rbp").unwrap();
-        writeln!(self.output, "  ret").unwrap();
-        writeln!(self.output, ".size main, .-main").unwrap();
+        self.inst(Inst::Mov(
+            reg("rax"),
+            Operand::slot(Size::Qword, Reg("rbp"), -8),
+        ));
+        self.inst(Inst::Mov(reg("rsp"), reg("rbp")));
+        self.inst(Inst::Pop(Reg("rbp")));
+        self.inst(Inst::Ret);
+        self.asm.push(Item::Size("main".into()));
     }
 
     fn program_entrypoint(&mut self) {
@@ -1312,199 +1390,314 @@ impl<'a> Generator<'a> {
             );
             return;
         };
-        writeln!(self.output, ".globl main").unwrap();
-        writeln!(self.output, ".type main, @function").unwrap();
-        writeln!(self.output, "main:").unwrap();
-        writeln!(self.output, "  push rbp").unwrap();
-        writeln!(self.output, "  mov rbp, rsp").unwrap();
-        writeln!(self.output, "  sub rsp, 16").unwrap();
-        writeln!(self.output, "  mov QWORD PTR [rbp-8], rdi").unwrap();
-        writeln!(self.output, "  mov QWORD PTR [rbp-16], rsi").unwrap();
-        writeln!(self.output, "  call sl_rt_args_init").unwrap();
-        writeln!(self.output, "  call {}", self.symbol(&main.name, false)).unwrap();
+        self.asm.push(Item::Global("main".into()));
+        self.asm.push(Item::Function("main".into()));
+        self.asm.push(Item::Label("main".into()));
+        self.inst(Inst::Push(reg("rbp")));
+        self.inst(Inst::Mov(reg("rbp"), reg("rsp")));
+        self.inst(Inst::Alu(AluOp::Sub, reg("rsp"), Operand::Imm(16)));
+        self.inst(Inst::Mov(
+            Operand::slot(Size::Qword, Reg("rbp"), -8),
+            reg("rdi"),
+        ));
+        self.inst(Inst::Mov(
+            Operand::slot(Size::Qword, Reg("rbp"), -16),
+            reg("rsi"),
+        ));
+        self.inst(Inst::Call("sl_rt_args_init".into()));
+        self.inst(Inst::Call(self.symbol(&main.name, false)));
         if main.return_type == Type::Unit {
-            writeln!(self.output, "  xor eax, eax").unwrap();
+            self.inst(Inst::Alu(AluOp::Xor, reg("eax"), reg("eax")));
         }
-        writeln!(self.output, "  mov rsp, rbp").unwrap();
-        writeln!(self.output, "  pop rbp").unwrap();
-        writeln!(self.output, "  ret").unwrap();
-        writeln!(self.output, ".size main, .-main").unwrap();
+        self.inst(Inst::Mov(reg("rsp"), reg("rbp")));
+        self.inst(Inst::Pop(Reg("rbp")));
+        self.inst(Inst::Ret);
+        self.asm.push(Item::Size("main".into()));
     }
 
     fn runtime_panic_trampolines(&mut self) {
-        writeln!(self.output, ".Lsl_panic_div_zero_trampoline:").unwrap();
-        writeln!(self.output, "  lea rdi, .Lsl_panic_div_zero[rip]").unwrap();
-        writeln!(self.output, "  call sl_rt_panic").unwrap();
-        writeln!(self.output, "  ud2").unwrap();
-        writeln!(self.output, ".Lsl_panic_overflow_trampoline:").unwrap();
-        writeln!(self.output, "  lea rdi, .Lsl_panic_overflow[rip]").unwrap();
-        writeln!(self.output, "  call sl_rt_panic").unwrap();
-        writeln!(self.output, "  ud2").unwrap();
+        self.asm
+            .push(Item::Label(".Lsl_panic_div_zero_trampoline".into()));
+        self.inst(Inst::Lea(
+            Reg("rdi"),
+            Operand::Rip(".Lsl_panic_div_zero".into()),
+        ));
+        self.inst(Inst::Call("sl_rt_panic".into()));
+        self.inst(Inst::Ud2);
+        self.asm
+            .push(Item::Label(".Lsl_panic_overflow_trampoline".into()));
+        self.inst(Inst::Lea(
+            Reg("rdi"),
+            Operand::Rip(".Lsl_panic_overflow".into()),
+        ));
+        self.inst(Inst::Call("sl_rt_panic".into()));
+        self.inst(Inst::Ud2);
     }
 
     fn struct_clone_helper(&mut self, name: &str, fields: &[(String, Type)]) {
         let symbol = struct_clone_symbol(name);
         let size = struct_size(self.module, name);
-        writeln!(self.output, ".globl {symbol}").unwrap();
-        writeln!(self.output, ".type {symbol}, @function").unwrap();
-        writeln!(self.output, "{symbol}:").unwrap();
-        writeln!(self.output, "  push rbp").unwrap();
-        writeln!(self.output, "  mov rbp, rsp").unwrap();
-        writeln!(self.output, "  sub rsp, 16").unwrap();
-        writeln!(self.output, "  mov QWORD PTR [rbp-8], rdi").unwrap();
-        writeln!(self.output, "  mov rdi, {size}").unwrap();
-        writeln!(self.output, "  call sl_rt_alloc").unwrap();
-        writeln!(self.output, "  mov QWORD PTR [rbp-16], rax").unwrap();
+        self.asm.push(Item::Global(symbol.to_owned()));
+        self.asm.push(Item::Function(symbol.to_owned()));
+        self.asm.push(Item::Label(symbol.to_owned()));
+        self.inst(Inst::Push(reg("rbp")));
+        self.inst(Inst::Mov(reg("rbp"), reg("rsp")));
+        self.inst(Inst::Alu(AluOp::Sub, reg("rsp"), Operand::Imm(16)));
+        self.inst(Inst::Mov(
+            Operand::slot(Size::Qword, Reg("rbp"), -8),
+            reg("rdi"),
+        ));
+        self.inst(Inst::Mov(reg("rdi"), Operand::Imm(size as i64)));
+        self.inst(Inst::Call("sl_rt_alloc".into()));
+        self.inst(Inst::Mov(
+            Operand::slot(Size::Qword, Reg("rbp"), -16),
+            reg("rax"),
+        ));
         for (index, (_, ty)) in fields.iter().enumerate() {
-            writeln!(self.output, "  mov rax, QWORD PTR [rbp-8]").unwrap();
-            writeln!(self.output, "  mov rdi, QWORD PTR [rax+{}]", index * 8).unwrap();
+            self.inst(Inst::Mov(
+                reg("rax"),
+                Operand::slot(Size::Qword, Reg("rbp"), -8),
+            ));
+            self.inst(Inst::Mov(
+                reg("rdi"),
+                Operand::slot(Size::Qword, Reg("rax"), (index * 8) as i64),
+            ));
             if let Some(clone_function) = self.clone_function(ty) {
-                writeln!(self.output, "  call {clone_function}").unwrap();
+                self.inst(Inst::Call(clone_function));
             } else {
-                writeln!(self.output, "  mov rax, rdi").unwrap();
+                self.inst(Inst::Mov(reg("rax"), reg("rdi")));
             }
-            writeln!(self.output, "  mov rcx, QWORD PTR [rbp-16]").unwrap();
-            writeln!(self.output, "  mov QWORD PTR [rcx+{}], rax", index * 8).unwrap();
+            self.inst(Inst::Mov(
+                reg("rcx"),
+                Operand::slot(Size::Qword, Reg("rbp"), -16),
+            ));
+            self.inst(Inst::Mov(
+                Operand::slot(Size::Qword, Reg("rcx"), (index * 8) as i64),
+                reg("rax"),
+            ));
         }
-        writeln!(self.output, "  mov rax, QWORD PTR [rbp-16]").unwrap();
-        writeln!(self.output, "  mov rsp, rbp").unwrap();
-        writeln!(self.output, "  pop rbp").unwrap();
-        writeln!(self.output, "  ret").unwrap();
-        writeln!(self.output, ".size {symbol}, .-{symbol}").unwrap();
+        self.inst(Inst::Mov(
+            reg("rax"),
+            Operand::slot(Size::Qword, Reg("rbp"), -16),
+        ));
+        self.inst(Inst::Mov(reg("rsp"), reg("rbp")));
+        self.inst(Inst::Pop(Reg("rbp")));
+        self.inst(Inst::Ret);
+        self.asm.push(Item::Size(symbol.to_owned()));
     }
 
     fn enum_clone_helper(&mut self, name: &str, variants: &[crate::mir::MirVariant]) {
         let symbol = enum_clone_symbol(name);
         let size = enum_clone_size(self.module, name);
-        writeln!(self.output, ".globl {symbol}").unwrap();
-        writeln!(self.output, ".type {symbol}, @function").unwrap();
-        writeln!(self.output, "{symbol}:").unwrap();
-        writeln!(self.output, "  push rbp").unwrap();
-        writeln!(self.output, "  mov rbp, rsp").unwrap();
-        writeln!(self.output, "  sub rsp, 16").unwrap();
-        writeln!(self.output, "  mov QWORD PTR [rbp-8], rdi").unwrap();
-        writeln!(self.output, "  mov rdi, {size}").unwrap();
-        writeln!(self.output, "  call sl_rt_alloc").unwrap();
-        writeln!(self.output, "  mov QWORD PTR [rbp-16], rax").unwrap();
-        writeln!(self.output, "  mov rcx, QWORD PTR [rbp-8]").unwrap();
-        writeln!(self.output, "  mov rcx, QWORD PTR [rcx]").unwrap();
-        writeln!(self.output, "  mov QWORD PTR [rax], rcx").unwrap();
+        self.asm.push(Item::Global(symbol.to_owned()));
+        self.asm.push(Item::Function(symbol.to_owned()));
+        self.asm.push(Item::Label(symbol.to_owned()));
+        self.inst(Inst::Push(reg("rbp")));
+        self.inst(Inst::Mov(reg("rbp"), reg("rsp")));
+        self.inst(Inst::Alu(AluOp::Sub, reg("rsp"), Operand::Imm(16)));
+        self.inst(Inst::Mov(
+            Operand::slot(Size::Qword, Reg("rbp"), -8),
+            reg("rdi"),
+        ));
+        self.inst(Inst::Mov(reg("rdi"), Operand::Imm(size as i64)));
+        self.inst(Inst::Call("sl_rt_alloc".into()));
+        self.inst(Inst::Mov(
+            Operand::slot(Size::Qword, Reg("rbp"), -16),
+            reg("rax"),
+        ));
+        self.inst(Inst::Mov(
+            reg("rcx"),
+            Operand::slot(Size::Qword, Reg("rbp"), -8),
+        ));
+        self.inst(Inst::Mov(
+            reg("rcx"),
+            Operand::Mem(Mem {
+                size: Some(Size::Qword),
+                base: Reg("rcx"),
+                disp: None,
+            }),
+        ));
+        self.inst(Inst::Mov(
+            Operand::Mem(Mem {
+                size: Some(Size::Qword),
+                base: Reg("rax"),
+                disp: None,
+            }),
+            reg("rcx"),
+        ));
         for variant in variants {
-            writeln!(self.output, "  cmp rcx, {}", variant.tag).unwrap();
-            writeln!(
-                self.output,
-                "  je .L{}_clone_variant_{}",
+            self.inst(Inst::Alu(
+                AluOp::Cmp,
+                reg("rcx"),
+                Operand::Imm(variant.tag as i64),
+            ));
+            self.inst(Inst::Jcc(
+                Cond::E,
+                Target::Named(format!(".L{}_clone_variant_{}", symbol, variant.tag)),
+            ));
+        }
+        self.inst(Inst::Jmp(Target::Named(format!(
+            ".L{}_clone_return",
+            symbol
+        ))));
+        for variant in variants {
+            self.asm.push(Item::Label(format!(
+                ".L{}_clone_variant_{}",
                 symbol, variant.tag
-            )
-            .unwrap();
-        }
-        writeln!(self.output, "  jmp .L{}_clone_return", symbol).unwrap();
-        for variant in variants {
-            writeln!(self.output, ".L{}_clone_variant_{}:", symbol, variant.tag).unwrap();
+            )));
             for (index, (_, ty)) in variant.fields.iter().enumerate() {
-                writeln!(self.output, "  mov rax, QWORD PTR [rbp-8]").unwrap();
-                writeln!(
-                    self.output,
-                    "  mov rdi, QWORD PTR [rax+{}]",
-                    (index + 1) * 8
-                )
-                .unwrap();
+                self.inst(Inst::Mov(
+                    reg("rax"),
+                    Operand::slot(Size::Qword, Reg("rbp"), -8),
+                ));
+                self.inst(Inst::Mov(
+                    reg("rdi"),
+                    Operand::slot(Size::Qword, Reg("rax"), ((index + 1) * 8) as i64),
+                ));
                 if let Some(clone_function) = self.clone_function(ty) {
-                    writeln!(self.output, "  call {clone_function}").unwrap();
+                    self.inst(Inst::Call(clone_function));
                 } else {
-                    writeln!(self.output, "  mov rax, rdi").unwrap();
+                    self.inst(Inst::Mov(reg("rax"), reg("rdi")));
                 }
-                writeln!(self.output, "  mov rcx, QWORD PTR [rbp-16]").unwrap();
-                writeln!(
-                    self.output,
-                    "  mov QWORD PTR [rcx+{}], rax",
-                    (index + 1) * 8
-                )
-                .unwrap();
+                self.inst(Inst::Mov(
+                    reg("rcx"),
+                    Operand::slot(Size::Qword, Reg("rbp"), -16),
+                ));
+                self.inst(Inst::Mov(
+                    Operand::slot(Size::Qword, Reg("rcx"), ((index + 1) * 8) as i64),
+                    reg("rax"),
+                ));
             }
-            writeln!(self.output, "  jmp .L{}_clone_return", symbol).unwrap();
+            self.inst(Inst::Jmp(Target::Named(format!(
+                ".L{}_clone_return",
+                symbol
+            ))));
         }
-        writeln!(self.output, ".L{}_clone_return:", symbol).unwrap();
-        writeln!(self.output, "  mov rax, QWORD PTR [rbp-16]").unwrap();
-        writeln!(self.output, "  mov rsp, rbp").unwrap();
-        writeln!(self.output, "  pop rbp").unwrap();
-        writeln!(self.output, "  ret").unwrap();
-        writeln!(self.output, ".size {symbol}, .-{symbol}").unwrap();
+        self.asm
+            .push(Item::Label(format!(".L{}_clone_return", symbol)));
+        self.inst(Inst::Mov(
+            reg("rax"),
+            Operand::slot(Size::Qword, Reg("rbp"), -16),
+        ));
+        self.inst(Inst::Mov(reg("rsp"), reg("rbp")));
+        self.inst(Inst::Pop(Reg("rbp")));
+        self.inst(Inst::Ret);
+        self.asm.push(Item::Size(symbol.to_owned()));
     }
 
     fn struct_drop_helper(&mut self, name: &str, fields: &[(String, Type)]) {
         let symbol = struct_drop_symbol(name);
-        writeln!(self.output, ".globl {symbol}").unwrap();
-        writeln!(self.output, ".type {symbol}, @function").unwrap();
-        writeln!(self.output, "{symbol}:").unwrap();
-        writeln!(self.output, "  push rbp").unwrap();
-        writeln!(self.output, "  mov rbp, rsp").unwrap();
-        writeln!(self.output, "  sub rsp, 16").unwrap();
+        self.asm.push(Item::Global(symbol.to_owned()));
+        self.asm.push(Item::Function(symbol.to_owned()));
+        self.asm.push(Item::Label(symbol.to_owned()));
+        self.inst(Inst::Push(reg("rbp")));
+        self.inst(Inst::Mov(reg("rbp"), reg("rsp")));
+        self.inst(Inst::Alu(AluOp::Sub, reg("rsp"), Operand::Imm(16)));
         // Match sl_rt_string_drop/sl_rt_list_drop: a null pointer is a no-op
         // rather than a wild load, so a dropped-and-zeroed slot stays benign.
-        writeln!(self.output, "  test rdi, rdi").unwrap();
-        writeln!(self.output, "  je .L{}_return", symbol).unwrap();
-        writeln!(self.output, "  mov QWORD PTR [rbp-8], rdi").unwrap();
+        self.inst(Inst::Test(reg("rdi"), reg("rdi")));
+        self.inst(Inst::Jcc(
+            Cond::E,
+            Target::Named(format!(".L{}_return", symbol)),
+        ));
+        self.inst(Inst::Mov(
+            Operand::slot(Size::Qword, Reg("rbp"), -8),
+            reg("rdi"),
+        ));
         for (index, (_, ty)) in fields.iter().enumerate().rev() {
             let drop_function = self.drop_function(ty);
             if let Some(drop_function) = drop_function {
-                writeln!(self.output, "  mov rax, QWORD PTR [rbp-8]").unwrap();
-                writeln!(self.output, "  mov rdi, QWORD PTR [rax+{}]", index * 8).unwrap();
-                writeln!(self.output, "  call {drop_function}").unwrap();
+                self.inst(Inst::Mov(
+                    reg("rax"),
+                    Operand::slot(Size::Qword, Reg("rbp"), -8),
+                ));
+                self.inst(Inst::Mov(
+                    reg("rdi"),
+                    Operand::slot(Size::Qword, Reg("rax"), (index * 8) as i64),
+                ));
+                self.inst(Inst::Call(drop_function));
             }
         }
-        writeln!(self.output, "  mov rdi, QWORD PTR [rbp-8]").unwrap();
-        writeln!(self.output, "  call sl_rt_free").unwrap();
-        writeln!(self.output, ".L{}_return:", symbol).unwrap();
-        writeln!(self.output, "  mov rsp, rbp").unwrap();
-        writeln!(self.output, "  pop rbp").unwrap();
-        writeln!(self.output, "  ret").unwrap();
-        writeln!(self.output, ".size {symbol}, .-{symbol}").unwrap();
+        self.inst(Inst::Mov(
+            reg("rdi"),
+            Operand::slot(Size::Qword, Reg("rbp"), -8),
+        ));
+        self.inst(Inst::Call("sl_rt_free".into()));
+        self.asm.push(Item::Label(format!(".L{}_return", symbol)));
+        self.inst(Inst::Mov(reg("rsp"), reg("rbp")));
+        self.inst(Inst::Pop(Reg("rbp")));
+        self.inst(Inst::Ret);
+        self.asm.push(Item::Size(symbol.to_owned()));
     }
 
     fn enum_drop_helper(&mut self, name: &str, variants: &[crate::mir::MirVariant]) {
         let symbol = enum_drop_symbol(name);
-        writeln!(self.output, ".globl {symbol}").unwrap();
-        writeln!(self.output, ".type {symbol}, @function").unwrap();
-        writeln!(self.output, "{symbol}:").unwrap();
-        writeln!(self.output, "  push rbp").unwrap();
-        writeln!(self.output, "  mov rbp, rsp").unwrap();
-        writeln!(self.output, "  sub rsp, 16").unwrap();
+        self.asm.push(Item::Global(symbol.to_owned()));
+        self.asm.push(Item::Function(symbol.to_owned()));
+        self.asm.push(Item::Label(symbol.to_owned()));
+        self.inst(Inst::Push(reg("rbp")));
+        self.inst(Inst::Mov(reg("rbp"), reg("rsp")));
+        self.inst(Inst::Alu(AluOp::Sub, reg("rsp"), Operand::Imm(16)));
         // As in the struct helper: tolerate a null pointer instead of loading
         // the tag from address zero.
-        writeln!(self.output, "  test rdi, rdi").unwrap();
-        writeln!(self.output, "  je .L{}_return", symbol).unwrap();
-        writeln!(self.output, "  mov QWORD PTR [rbp-8], rdi").unwrap();
-        writeln!(self.output, "  mov rax, QWORD PTR [rdi]").unwrap();
+        self.inst(Inst::Test(reg("rdi"), reg("rdi")));
+        self.inst(Inst::Jcc(
+            Cond::E,
+            Target::Named(format!(".L{}_return", symbol)),
+        ));
+        self.inst(Inst::Mov(
+            Operand::slot(Size::Qword, Reg("rbp"), -8),
+            reg("rdi"),
+        ));
+        self.inst(Inst::Mov(
+            reg("rax"),
+            Operand::Mem(Mem {
+                size: Some(Size::Qword),
+                base: Reg("rdi"),
+                disp: None,
+            }),
+        ));
         for variant in variants {
-            writeln!(self.output, "  cmp rax, {}", variant.tag).unwrap();
-            writeln!(self.output, "  je .L{}_variant_{}", symbol, variant.tag).unwrap();
+            self.inst(Inst::Alu(
+                AluOp::Cmp,
+                reg("rax"),
+                Operand::Imm(variant.tag as i64),
+            ));
+            self.inst(Inst::Jcc(
+                Cond::E,
+                Target::Named(format!(".L{}_variant_{}", symbol, variant.tag)),
+            ));
         }
-        writeln!(self.output, "  jmp .L{}_free", symbol).unwrap();
+        self.inst(Inst::Jmp(Target::Named(format!(".L{}_free", symbol))));
         for variant in variants {
-            writeln!(self.output, ".L{}_variant_{}:", symbol, variant.tag).unwrap();
+            self.asm
+                .push(Item::Label(format!(".L{}_variant_{}", symbol, variant.tag)));
             for (index, (_, ty)) in variant.fields.iter().enumerate().rev() {
                 if let Some(drop_function) = self.drop_function(ty) {
-                    writeln!(self.output, "  mov rax, QWORD PTR [rbp-8]").unwrap();
-                    writeln!(
-                        self.output,
-                        "  mov rdi, QWORD PTR [rax+{}]",
-                        (index + 1) * 8
-                    )
-                    .unwrap();
-                    writeln!(self.output, "  call {drop_function}").unwrap();
+                    self.inst(Inst::Mov(
+                        reg("rax"),
+                        Operand::slot(Size::Qword, Reg("rbp"), -8),
+                    ));
+                    self.inst(Inst::Mov(
+                        reg("rdi"),
+                        Operand::slot(Size::Qword, Reg("rax"), ((index + 1) * 8) as i64),
+                    ));
+                    self.inst(Inst::Call(drop_function));
                 }
             }
-            writeln!(self.output, "  jmp .L{}_free", symbol).unwrap();
+            self.inst(Inst::Jmp(Target::Named(format!(".L{}_free", symbol))));
         }
-        writeln!(self.output, ".L{}_free:", symbol).unwrap();
-        writeln!(self.output, "  mov rdi, QWORD PTR [rbp-8]").unwrap();
-        writeln!(self.output, "  call sl_rt_free").unwrap();
-        writeln!(self.output, ".L{}_return:", symbol).unwrap();
-        writeln!(self.output, "  mov rsp, rbp").unwrap();
-        writeln!(self.output, "  pop rbp").unwrap();
-        writeln!(self.output, "  ret").unwrap();
-        writeln!(self.output, ".size {symbol}, .-{symbol}").unwrap();
+        self.asm.push(Item::Label(format!(".L{}_free", symbol)));
+        self.inst(Inst::Mov(
+            reg("rdi"),
+            Operand::slot(Size::Qword, Reg("rbp"), -8),
+        ));
+        self.inst(Inst::Call("sl_rt_free".into()));
+        self.asm.push(Item::Label(format!(".L{}_return", symbol)));
+        self.inst(Inst::Mov(reg("rsp"), reg("rbp")));
+        self.inst(Inst::Pop(Reg("rbp")));
+        self.inst(Inst::Ret);
+        self.asm.push(Item::Size(symbol.to_owned()));
     }
 
     fn drop_function(&self, ty: &Type) -> Option<String> {
@@ -1522,10 +1715,10 @@ impl<'a> Generator<'a> {
 
 /// The assembly operand naming a local, ready to substitute into any
 /// instruction that accepts a register or a 64-bit memory operand.
-fn operand(allocation: &Allocation, file: &RegisterFile, local: LocalId) -> String {
+fn operand(allocation: &Allocation, file: &RegisterFile, local: LocalId) -> Operand {
     match allocation.location(local) {
-        Location::Register(register) => file.wide[register].to_owned(),
-        Location::Memory(slot) => format!("QWORD PTR {}", frame_slot(slot)),
+        Location::Register(register) => Operand::Reg(Reg(file.wide[register])),
+        Location::Memory(slot) => Operand::Mem(frame_slot(Some(Size::Qword), slot)),
     }
 }
 
@@ -1533,17 +1726,23 @@ fn operand(allocation: &Allocation, file: &RegisterFile, local: LocalId) -> Stri
 ///
 /// `lea` has no register form, so every local reaching here must have been
 /// pinned to memory by [`address_taken`]. The two are kept in step by a test.
-fn address(allocation: &Allocation, local: LocalId) -> String {
+fn address(allocation: &Allocation, local: LocalId) -> Operand {
     match allocation.location(local) {
-        Location::Memory(slot) => frame_slot(slot),
+        Location::Memory(slot) => Operand::Mem(frame_slot(None, slot)),
         Location::Register(_) => {
             unreachable!("local {local} has its address taken but was given a register")
         }
     }
 }
 
-fn frame_slot(slot: usize) -> String {
-    format!("[rbp-{}]", (slot + 1) * 8)
+/// The `n`th frame slot, with the size prefix an instruction reading it needs
+/// and `None` for `lea`, which takes the address rather than the value.
+fn frame_slot(size: Option<Size>, slot: usize) -> Mem {
+    Mem {
+        size,
+        base: Reg("rbp"),
+        disp: Some(-(((slot + 1) * 8) as i64)),
+    }
 }
 
 fn in_memory(allocation: &Allocation, local: LocalId) -> bool {
@@ -1551,75 +1750,20 @@ fn in_memory(allocation: &Allocation, local: LocalId) -> bool {
 }
 
 /// The 32-bit view of a local, for `i32` arithmetic.
-fn narrow_operand(allocation: &Allocation, file: &RegisterFile, local: LocalId) -> String {
+fn narrow_operand(allocation: &Allocation, file: &RegisterFile, local: LocalId) -> Operand {
     match allocation.location(local) {
-        Location::Register(register) => file.narrow[register].to_owned(),
-        Location::Memory(slot) => format!("DWORD PTR {}", frame_slot(slot)),
+        Location::Register(register) => Operand::Reg(Reg(file.narrow[register])),
+        Location::Memory(slot) => Operand::Mem(frame_slot(Some(Size::Dword), slot)),
     }
 }
 
-fn set_condition(op: BinaryOp) -> &'static str {
+fn set_condition(op: BinaryOp) -> Cond {
     match op {
-        BinaryOp::Less => "setl",
-        BinaryOp::Greater => "setg",
-        BinaryOp::Equal => "sete",
+        BinaryOp::Less => Cond::L,
+        BinaryOp::Greater => Cond::G,
+        BinaryOp::Equal => Cond::E,
         _ => unreachable!("only the comparison operators produce a flag byte"),
     }
-}
-
-/// Deletes a `mov` that copies a value straight back where it just came from.
-///
-/// Instruction selection is per-MIR-statement and routes results through `rax`,
-/// so a result written to a register and immediately read again — the shape of
-/// `let x = ...` followed by `return x` — leaves a copy that undoes itself.
-/// Only adjacent lines are considered, so a label or any other instruction in
-/// between blocks the rewrite, and `mov` sets no flags, so removing one cannot
-/// change what a following branch sees.
-pub(crate) fn remove_redundant_copies(assembly: &str) -> String {
-    let mut kept: Vec<&str> = Vec::new();
-    for line in assembly.lines() {
-        // A `.loc` between the two halves of a mirrored pair must not hide it:
-        // debug information is not allowed to change which instructions are
-        // emitted. The directive stays where it is and covers whatever the
-        // deletion leaves after it.
-        let undoes_previous = kept
-            .iter()
-            .rev()
-            .find(|kept| !is_location(kept))
-            .and_then(|previous| move_operands(previous))
-            .zip(move_operands(line))
-            .is_some_and(|((dst, src), (next_dst, next_src))| dst == next_src && src == next_dst);
-        if undoes_previous {
-            continue;
-        }
-        kept.push(line);
-    }
-    let mut output = kept.join("\n");
-    output.push('\n');
-    output
-}
-
-pub(crate) fn is_location(line: &str) -> bool {
-    line.trim_start().starts_with(".loc ")
-}
-
-/// The destination and source of a plain `mov`, or `None` for anything else.
-fn move_operands(line: &str) -> Option<(&str, &str)> {
-    let operands = line.strip_prefix("  mov ")?;
-    let (dst, src) = operands.split_once(", ")?;
-    // A `mov` whose source is an immediate or a `[...]` expression that is not
-    // a plain slot reference cannot be part of a mirrored pair anyway, but
-    // rejecting nothing here is still correct: equality of the two operand
-    // strings is what makes the pair redundant.
-    Some((dst.trim(), src.trim()))
-}
-
-/// A path as the body of an assembler string literal.
-///
-/// Only the two characters that would end or continue the literal need
-/// escaping; a path is bytes and the assembler passes the rest through.
-pub(crate) fn quoted(path: &str) -> String {
-    path.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 pub(crate) fn align_to(value: usize, alignment: usize) -> usize {
@@ -1629,8 +1773,8 @@ pub(crate) fn align_to(value: usize, alignment: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        address_taken, backend_for, is_location, remove_redundant_copies, CALLEE_SAVED,
-        DEFAULT_TARGET, LEAF, TARGETS, TARGET_TRIPLES,
+        address_taken, backend_for, is_location, reg, AluOp, Inst, Operand, Reg, Size,
+        CALLEE_SAVED, DEFAULT_TARGET, LEAF, TARGETS, TARGET_TRIPLES,
     };
     use crate::ast::Type;
     use crate::cfg::Cfg;
@@ -1854,33 +1998,59 @@ mod tests {
         assert!(checked > 0, "no fixture compiled; the corpus path is wrong");
     }
 
+    /// The peephole itself is [`crate::asm::Assembly::remove_redundant_copies`]
+    /// and is tested there. What is architecture-specific, and tested here, is
+    /// which instructions it is allowed to see as a mirrored pair — that is
+    /// `Inst::undo`, and getting it wrong would delete something that is not a
+    /// copy.
+    #[test]
+    fn only_a_copy_undoes_a_copy() {
+        let pairs: Vec<(Inst, Option<Inst>)> = vec![
+            (
+                Inst::Mov(reg("r13"), reg("rax")),
+                Some(Inst::Mov(reg("rax"), reg("r13"))),
+            ),
+            (
+                Inst::Mov(Operand::slot(Size::Qword, Reg("rbp"), -8), reg("rax")),
+                Some(Inst::Mov(
+                    reg("rax"),
+                    Operand::slot(Size::Qword, Reg("rbp"), -8),
+                )),
+            ),
+            (Inst::Alu(AluOp::Add, reg("rax"), reg("rcx")), None),
+            (Inst::Lea(Reg("rax"), Operand::Rip(".Lstr".into())), None),
+            (Inst::Push(reg("rbp")), None),
+            (Inst::Call("sl_rt_alloc".into()), None),
+        ];
+        for (instruction, undo) in pairs {
+            assert_eq!(
+                crate::asm::Instruction::undo(&instruction),
+                undo,
+                "for `{instruction}`"
+            );
+        }
+    }
+
     #[test]
     fn a_copy_that_undoes_the_previous_one_is_deleted() {
-        let assembly = remove_redundant_copies("  mov r13, rax\n  mov rax, r13\n  ret\n");
-        assert_eq!(assembly, "  mov r13, rax\n  ret\n");
-    }
-
-    #[test]
-    fn a_label_between_two_copies_stops_the_rewrite() {
-        let source = "  mov r13, rax\n.Lsomewhere:\n  mov rax, r13\n";
-        assert_eq!(remove_redundant_copies(source), source);
-    }
-
-    #[test]
-    fn an_unrelated_copy_survives() {
-        let source = "  mov r13, rax\n  mov rcx, r12\n";
-        assert_eq!(remove_redundant_copies(source), source);
-    }
-
-    /// Debug information must not cost an optimization: a `.loc` landing
-    /// between the two halves of a mirrored pair still lets the pair collapse.
-    #[test]
-    fn a_location_between_two_copies_does_not_save_the_second() {
-        let source = "  mov r13, rax\n  .loc 1 7 3\n  mov rax, r13\n  ret\n";
-        assert_eq!(
-            remove_redundant_copies(source),
-            "  mov r13, rax\n  .loc 1 7 3\n  ret\n"
-        );
+        let source = "(fn identity ((n i32)) -> i32 n)\n(fn main () -> i32 (identity 1))";
+        let assembly = compile_to_assembly("copy.slp", source, &CompileOptions::default()).unwrap();
+        for pair in assembly.lines().collect::<Vec<_>>().windows(2) {
+            let (first, second) = (pair[0].trim(), pair[1].trim());
+            let operands = |line: &str| {
+                line.strip_prefix("mov ")
+                    .and_then(|rest| rest.split_once(", "))
+                    .map(|(dst, src)| (dst.to_owned(), src.to_owned()))
+            };
+            if let (Some((dst, src)), Some((next_dst, next_src))) =
+                (operands(first), operands(second))
+            {
+                assert!(
+                    !(dst == next_src && src == next_dst),
+                    "`{first}` and `{second}` undo each other"
+                );
+            }
+        }
     }
 
     const DEBUGGED: &str = "\

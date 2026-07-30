@@ -119,6 +119,40 @@ caller built by the platform toolchain, with more arguments than either
 register class holds, so the two only agree if both placed them where the ABI
 says.
 
+## Objects
+
+A backend does not produce text. It produces a stream of items — sections,
+labels, symbol attributes, data, and instructions — and that one stream is
+either rendered as assembly or encoded into a relocatable ELF object. Both
+readings come from the same description of the program, so there is nothing for
+them to disagree about, and an instruction with no encoding is a compile error
+in the compiler rather than a surprise at assembly time.
+
+`asm` owns the half neither architecture decides: section identity, label
+scope, symbol binding, and the layout pass that turns labels into addresses and
+then into either patched bytes or relocations. A branch to a local label inside
+`.text` is arithmetic the compiler can do; a call, or an address in another
+section, is left to the linker under the same rules a linker expects. `elf`
+turns the result into a file, and knows only two things per architecture: the
+machine number, and which relocation type spells each fixup.
+
+Linking is still the system linker's. It is what knows where the C runtime
+lives, which dynamic loader to name, and how the platform starts a process —
+none of which is a code generation question.
+
+Two things send a build back to the platform assembler. Debug information is
+one: line tables are built from the `.file` and `.loc` directives, and the
+object writer emits no DWARF. The other is `SLOPIUM_OBJECT_WRITER=external`,
+which exists so a bug in an encoder has a way around it that is not a different
+compiler.
+
+The encoders are checked against the assembler rather than trusted.
+`scripts/object-check.sh` compiles the corpus both ways for both targets and
+compares the results: byte for byte on AArch64, where fixed-width instructions
+make that achievable, and instruction by instruction on x86-64, where this
+compiler always uses a 32-bit jump displacement and the assembler shortens the
+ones that fit. Relocations and symbol tables are compared on both, and both
+objects are linked and run.
 
 `Analysis` combines syntax, diagnostics, optional typed HIR, and a semantic
 symbol/occurrence index. `slopium-lsp` discovers `Slopium.toml`, overlays all
