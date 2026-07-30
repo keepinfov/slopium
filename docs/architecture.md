@@ -39,21 +39,36 @@ command-line protocol is internal and versioned.
    layout, call arity, operand types, and that every read has a reaching
    definition. It reports `SL0700` internal errors rather than panicking, and
    runs in debug builds or under `SLOPIUM_VERIFY_MIR=1`.
-10. A `Backend` partitions MIR by owner module and consumes `MirModule` plus a
+10. Backward liveness dataflow yields live intervals over a linear block order,
+    and a linear-scan allocator places every local in a register or a frame
+    slot. Allocation runs in both profiles: it is part of code generation
+    rather than something the release profile turns on.
+11. A `Backend` partitions MIR by owner module and consumes `MirModule` plus a
     `TargetSpec`.
 
 MIR keeps numbered locals rather than SSA form. The `cfg` module derives what
 SSA would have carried implicitly — successors, predecessors, reverse
-postorder, reachability, def/use, and live intervals — which is what a
-linear-scan register allocator needs. Drop elaboration is fused into lowering:
-the builder compares per-branch liveness maps and inserts drops at merges, so
-ownership correctness lives in the lowering code rather than in a later pass.
-`--emit mir-text` renders the whole module for reading.
+postorder, reachability, def/use, liveness, and live intervals. Drop
+elaboration is fused into lowering: the builder compares per-branch liveness
+maps and inserts drops at merges, so ownership correctness lives in the
+lowering code rather than in a later pass. `--emit mir-text` renders the whole
+module for reading.
 
-The first `Backend` uses stack slots and emits Intel-syntax x86-64 assembly for
-the System V AMD64 ABI. Adding an architecture means implementing another
-backend and target specification; parsing, typing, ownership, and MIR remain
-unchanged.
+Register allocation is whole-interval: a local lives in one register for its
+entire function or in its frame slot for the entire function, with no interval
+splitting and no mid-interval reload. A local that loses the scan simply keeps
+the slot it would have had, so spilling can neither fail nor add instructions.
+Two rules make the register choice safe rather than merely fast. A local whose
+address the backend takes — a borrowed scalar, a collection element, a pop
+destination — is pinned to memory, because `lea` has no register form. And a
+function that calls anything draws only on callee-saved registers, so no
+clobber set has to be tracked; a function that calls nothing draws first on
+caller-saved registers, which cost no prologue at all.
+
+The first `Backend` emits Intel-syntax x86-64 assembly for the System V AMD64
+ABI. Adding an architecture means implementing another backend and target
+specification, and supplying its own register file; parsing, typing,
+ownership, MIR, and the allocator itself remain unchanged.
 
 `Analysis` combines syntax, diagnostics, optional typed HIR, and a semantic
 symbol/occurrence index. `slopium-lsp` discovers `Slopium.toml`, overlays all

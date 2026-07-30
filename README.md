@@ -351,10 +351,12 @@ nvim examples/fibonacci.slp
 Удаление: `./scripts/uninstall-nvim.sh`. Подробности:
 [`editors/nvim/README.md`](editors/nvim/README.md).
 
-## Ограничения v0.2
+## Ограничения
 
 - только Linux x86-64 glibc;
-- stack-slot backend без register allocator;
+- нет debug info: `.loc` и DWARF line tables ещё не эмитируются;
+- register allocator не разрезает live interval, поэтому значение держит
+  регистр и на тех участках, где ни разу не упоминается;
 - ссылки и borrowed slices нельзя возвращать или хранить в aggregates и
   коллекциях;
 - нет traits, bounds, registry/Git dependencies, stable FFI и lockfile;
