@@ -1,4 +1,5 @@
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand};
+use clap_complete::{generate, Shell};
 use serde::Deserialize;
 use slopic_core::codegen::{DEFAULT_TARGET, TARGETS};
 use slopic_core::syntax::{format_source, FormatOptions};
@@ -44,6 +45,11 @@ enum Commands {
     Clean,
     Targets,
     Compiler,
+    /// Print a shell completion script for `slopium` on stdout.
+    Completions {
+        #[arg(value_enum)]
+        shell: Shell,
+    },
 }
 
 #[derive(Args, Clone)]
@@ -200,6 +206,12 @@ fn main() {
             Ok(())
         }
         Commands::Compiler => compiler_info(),
+        Commands::Completions { shell } => {
+            let mut command = Cli::command();
+            let name = command.get_name().to_string();
+            generate(shell, &mut command, name, &mut std::io::stdout());
+            Ok(())
+        }
     };
 
     if let Err(error) = result {

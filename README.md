@@ -51,6 +51,49 @@ Rust/Cargo, rustfmt, Clippy, GCC, binutils, GDB, aarch64 cross-toolchain и
 `qemu-aarch64`. Два последних нужны, чтобы собирать и запускать код второго
 backend на x86-64-хосте.
 
+## Установка в конфигурацию NixOS
+
+Flake отдаёт overlay и два модуля, поэтому toolchain ставится системно, а не
+через `nix shell` в каждой сессии.
+
+```nix
+{
+  inputs.slopium = {
+    url = "git+file:///home/x/dev/slopium";
+    inputs.nixpkgs.follows = "nixpkgs";
+  };
+
+  # в списке модулей хоста:
+  #   inputs.slopium.nixosModules.default
+}
+```
+
+```nix
+# NixOS: slopic, slopium, slopium-lsp и completions для bash/zsh/fish
+programs.slopium.enable = true;
+
+# home-manager: плагин Neovim без симлинков вручную
+programs.slopium.neovim.enable = true;
+programs.slopium.neovim.lazySpec = true;  # если plugin manager сбрасывает rtp
+```
+
+- `nixosModules.default` — `programs.slopium.{enable,package,overlay}`; кладёт
+  toolchain в `environment.systemPackages` и по умолчанию подключает overlay;
+- `homeModules.default` — `programs.slopium.{enable,package,neovim}`; ставит
+  плагин как native package в `~/.local/share/nvim/site/pack`;
+- `overlays.default` — `pkgs.slopium` и `pkgs.vimPlugins.slopium-nvim`.
+
+`lazySpec` нужен конфигурациям вроде lazy.nvim, которые по умолчанию сбрасывают
+`runtimepath` и не видят native packages; он пишет
+`~/.config/nvim/lua/plugins/slopium.lua`, указывающий на копию плагина в store.
+
+Completions можно получить и без модуля:
+
+```sh
+slopium completions fish > ~/.config/fish/completions/slopium.fish
+slopic --completions fish > ~/.config/fish/completions/slopic.fish
+```
+
 ## Сборка без Nix
 
 Требования:
@@ -488,6 +531,11 @@ nvim examples/fibonacci.slp
 
 Удаление: `./scripts/uninstall-nvim.sh`. Подробности:
 [`editors/nvim/README.md`](editors/nvim/README.md).
+
+Декларативная альтернатива этому скрипту — `programs.slopium.neovim.enable` из
+`homeModules.default`; тогда плагин берётся из store, а не из рабочего дерева.
+Одновременно держать оба способа не нужно: сначала
+`./scripts/uninstall-nvim.sh`, потом rebuild.
 
 ## Ограничения
 

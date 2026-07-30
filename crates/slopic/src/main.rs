@@ -1,4 +1,5 @@
-use clap::{Parser, ValueEnum};
+use clap::{CommandFactory, Parser, ValueEnum};
+use clap_complete::{generate, Shell};
 use slopic_core::diagnostic::Diagnostic;
 use slopic_core::{
     compile, compiler_info, CompileOptions, CompileRequest, DependencySource, EmitKind,
@@ -67,6 +68,10 @@ struct Cli {
 
     #[arg(long)]
     info: bool,
+
+    /// Print a shell completion script for `slopic` on stdout and exit.
+    #[arg(long, value_name = "SHELL", value_enum)]
+    completions: Option<Shell>,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -88,6 +93,12 @@ enum DiagnosticFormat {
 
 fn main() {
     let cli = Cli::parse();
+    if let Some(shell) = cli.completions {
+        let mut command = Cli::command();
+        let name = command.get_name().to_string();
+        generate(shell, &mut command, name, &mut std::io::stdout());
+        return;
+    }
     if cli.info {
         println!(
             "{}",
