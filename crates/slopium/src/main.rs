@@ -237,6 +237,9 @@ fn format_project(project: &Project, check: bool) -> Result<(), String> {
                 .collect::<Vec<_>>()
                 .join("\n\n")
         })?;
+        // Only a file that was actually rewritten is reported. Announcing
+        // `Formatted` for an unchanged file — or for any file at all under
+        // `--check`, which writes nothing — describes work that did not happen.
         if formatted != source {
             if check {
                 differences.push(source_path);
@@ -244,8 +247,6 @@ fn format_project(project: &Project, check: bool) -> Result<(), String> {
                 atomic_write(&source_path, formatted.as_bytes())?;
                 println!("Formatted {}", source_path.display());
             }
-        } else {
-            println!("Formatted {}", source_path.display());
         }
     }
     if !differences.is_empty() {
@@ -838,11 +839,18 @@ struct ResolvedDependency {
 }
 
 fn resolve_dependencies(project: &Project) -> Result<Vec<ResolvedDependency>, String> {
+    /// Walk the package graph, emitting one entry per dependency *namespace*.
+    ///
+    /// `seen` is keyed on the namespace rather than the manifest path, because a
+    /// namespace is what the compiler resolves a `take` against. Two packages
+    /// reaching the same dependency see it under two different namespaces, so
+    /// keying on the manifest path emitted only whichever arm was walked first
+    /// and left the other one unresolvable.
     fn visit(
         project: &Project,
         prefix: Option<&str>,
         stack: &mut Vec<PathBuf>,
-        seen: &mut HashSet<PathBuf>,
+        seen: &mut HashSet<String>,
         output: &mut Vec<ResolvedDependency>,
     ) -> Result<(), String> {
         if stack.contains(&project.manifest_path) {
@@ -897,7 +905,7 @@ fn resolve_dependencies(project: &Project) -> Result<Vec<ResolvedDependency>, St
                     };
                     let dependency = load_project(Some(manifest))?;
                     let source = source_root(&dependency)?;
-                    if seen.insert(dependency.manifest_path.clone()) {
+                    if seen.insert(namespace.clone()) {
                         output.push(ResolvedDependency {
                             namespace: namespace.clone(),
                             source: ResolvedDependencySource::Path(source),
@@ -1378,6 +1386,63 @@ mod tests {
         assert_ne!(
             module_cache_key(inputs, &main, &original).unwrap(),
             module_cache_key(inputs, &main, &interface_changed).unwrap()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A dependency reached through two different packages must be resolved
+    /// twice, once per namespace.
+    ///
+    /// The walker used to remember which manifests it had already emitted, so
+    /// the second branch of a diamond silently lost its copy and every `take`
+    /// through it failed with `SL0450: unknown module`.
+    #[test]
+    fn diamond_dependency_is_resolved_under_both_namespaces() {
+        let root =
+            std::env::temp_dir().join(format!("slopium-diamond-test-{}", std::process::id()));
+        if root.exists() {
+            fs::remove_dir_all(&root).unwrap();
+        }
+        let write = |package: &str, manifest: &str, source: &str| {
+            let directory = root.join(package);
+            fs::create_dir_all(directory.join("src")).unwrap();
+            fs::write(directory.join("Slopium.toml"), manifest).unwrap();
+            fs::write(directory.join("src/lib.slp"), source).unwrap();
+        };
+
+        write(
+            "shared",
+            "[package]\nname = \"shared\"\nversion = \"0.1.0\"\nsource = \"src\"\nentry = \"src/lib.slp\"\n",
+            "(export base)\n\n(fn base () -> i64 7)\n",
+        );
+        for branch in ["left", "right"] {
+            write(
+                branch,
+                &format!(
+                    "[package]\nname = \"{branch}\"\nversion = \"0.1.0\"\nsource = \"src\"\nentry = \"src/lib.slp\"\n\n[dependencies]\nshared = {{ path = \"../shared\" }}\n"
+                ),
+                "(take shared:lib base)\n(export value)\n\n(fn value () -> i64 (base))\n",
+            );
+        }
+        let application = root.join("application");
+        fs::create_dir_all(application.join("src")).unwrap();
+        fs::write(
+            application.join("Slopium.toml"),
+            "[package]\nname = \"application\"\nversion = \"0.1.0\"\nsource = \"src\"\nentry = \"src/main.slp\"\n\n[dependencies]\nleft = { path = \"../left\" }\nright = { path = \"../right\" }\n",
+        )
+        .unwrap();
+        fs::write(application.join("src/main.slp"), "(fn main () -> i32 0)\n").unwrap();
+
+        let project = load_project(Some(application.join("Slopium.toml"))).unwrap();
+        let namespaces = resolve_dependencies(&project)
+            .unwrap()
+            .into_iter()
+            .map(|dependency| dependency.namespace)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            namespaces,
+            vec!["left", "left:shared", "right", "right:shared"]
         );
         fs::remove_dir_all(root).unwrap();
     }

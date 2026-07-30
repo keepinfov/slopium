@@ -20,6 +20,13 @@ jobs:
         env:
           SLOPIUM_ASAN_DETECT_LEAKS: "1"
 
+  projects:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: scripts/project-tests.sh
+
   nix:
     runs-on: ubuntu-latest
     steps:

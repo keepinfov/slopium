@@ -1,0 +1,5 @@
+(take base:lib forty)
+(export perimeter)
+
+(fn perimeter () -> i64
+  (+ (forty) (forty)))

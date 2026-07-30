@@ -23,6 +23,7 @@ scripts/project-tests.sh
 | `generics-std` | Generic functions/structs/enums, bundled `Option`/`Result`, successful and propagated `try` |
 | `modules` | Nested path modules, exports, `take` aliases, re-exports, qualified calls, separate objects |
 | `path-dependencies` | Manifest aliases plus direct and transitive path dependencies |
+| `diamond-dependencies` | One dependency reached through two packages, resolved under both namespaces |
 | `custom-std` | Path replacement for `std` and manifest-defined language items |
 | `process-io` | stdin, `read-line`, `read-i64`, `parse-i64`, environment, argv |
 

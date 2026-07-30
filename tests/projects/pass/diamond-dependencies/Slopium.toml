@@ -1,0 +1,12 @@
+[package]
+name = "diamond-dependencies"
+version = "0.2.4"
+source = "src"
+entry = "src/main.slp"
+
+[dependencies]
+math = { path = "../../dependencies/mathlib" }
+geo = { path = "../../dependencies/geometry" }
+
+[build]
+target = "x86_64-unknown-linux-gnu"
