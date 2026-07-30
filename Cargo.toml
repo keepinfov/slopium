@@ -3,6 +3,7 @@ members = [
     "crates/slopic-core",
     "crates/slopic",
     "crates/slopium",
+    "crates/slopium-manifest",
     "crates/slopium-lsp",
 ]
 resolver = "2"
