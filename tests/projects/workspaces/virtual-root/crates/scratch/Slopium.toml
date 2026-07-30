@@ -1,0 +1,11 @@
+# Matched by `members = ["crates/*"]` and taken back out by `exclude`, so this
+# package is not part of the workspace and does not appear in its lock. It is
+# deliberately broken: a member would fail to resolve.
+[package]
+name = "scratch"
+version = "0.2.4"
+source = "src"
+entry = "src/lib.slp"
+
+[dependencies]
+absent = { path = "../absent" }

@@ -248,6 +248,12 @@ cd hello
 slopium new hello --path /tmp/hello
 ```
 
+Библиотека создаётся с `--lib`: точка входа — `src/lib.slp`, `main` не нужен.
+
+```sh
+slopium new geometry --lib
+```
+
 Структура:
 
 ```text
@@ -274,6 +280,10 @@ slopium targets               # доступные targets
 slopium compiler              # handshake с найденным slopic
 ```
 
+В workspace каждая из этих команд принимает `-p <имя>` (один пакет) или
+`--workspace` (все). Без флагов берётся пакет, в каталоге которого выполнена
+команда.
+
 Команды ищут `Slopium.toml` в текущем каталоге и его родителях. Можно указать
 manifest явно:
 
@@ -286,7 +296,15 @@ slopium --manifest-path /path/to/project/Slopium.toml build --release
 ```text
 target/<target>/<dev|release>/<package-name>
 target/<target>/<dev|release>/<package-name>-tests
+target/<target>/<dev|release>/objects/<package-name>/
 ```
+
+`target/` лежит в корне workspace; для одиночного пакета это его собственный
+каталог.
+
+У библиотеки (`entry` — `lib.slp`) нечего линковать, поэтому `build` для неё
+означает `check`, а `run` — ошибка. `test` работает: harness сам приносит точку
+входа.
 
 Каждый модуль компилируется в отдельный object. Изменение только тела
 пересобирает его object; изменение публичного интерфейса инвалидирует
@@ -357,6 +375,56 @@ slopium build --frozen        # --locked и --offline вместе
 
 Приложению lock стоит коммитить, библиотеке — нет. Checksums появятся вместе с
 content-addressed store.
+
+### Workspace
+
+Несколько пакетов могут делить один `Slopium.lock`, один `target/` и одно
+разрешение графа. Корневой manifest перечисляет участников; `[package]` в нём
+необязателен — manifest без него описывает только workspace.
+
+```toml
+[workspace]
+members = ["crates/*"]
+exclude = ["crates/scratch"]
+
+# То, что участник берёт через `version.workspace = true`.
+[workspace.package]
+version = "0.3.0"
+
+# То, что участник берёт через `<имя> = { workspace = true }`.
+[workspace.dependencies]
+geometry = { path = "vendor/geometry" }
+```
+
+```toml
+# crates/app/Slopium.toml
+[package]
+name = "app"
+version.workspace = true
+entry = "src/main.slp"
+
+[dependencies]
+geometry = { workspace = true }
+```
+
+В `members` понимается только завершающая `*` — она означает «каждый
+подкаталог с manifest». Унаследованный `path` записан относительно корня
+workspace, а не участника. Наследуется запись целиком: `{ workspace = true }`
+рядом с собственным `path` или `version` — ошибка.
+
+```sh
+slopium check --workspace     # все участники
+slopium build -p app          # один
+slopium run                   # тот, в чьём каталоге вы находитесь
+```
+
+`Slopium.lock` и `target/` — только в корне workspace, поэтому участники делят
+собранные зависимости, а общая зависимость попадает в lock один раз. Участник,
+на который ссылается `path`-зависимость другого участника, разрешается как этот
+участник, а не читается заново.
+
+`slopium test` запускает тесты только того пакета, который собирается: тесты
+зависимости принадлежат ей самой.
 
 ### Отладка в GDB
 

@@ -11,7 +11,7 @@
 //! the content-addressed store, which is the first source that has immutable
 //! bytes to address.
 
-use crate::resolve::Resolution;
+use crate::resolve::ResolvedPackage;
 use crate::source::SourceId;
 use crate::version::Version;
 use std::fmt::Write as _;
@@ -40,9 +40,14 @@ pub struct Lockfile {
 
 impl Lockfile {
     /// Describe a resolved graph, with path sources written relative to `base`.
-    pub fn from_resolution(resolution: &Resolution, base: &Path) -> Self {
-        let mut packages = resolution
-            .packages
+    ///
+    /// The graph is the whole workspace's, not one package's: members share a
+    /// lock, so building one member must not rewrite what another recorded.
+    pub fn from_packages(
+        packages: &std::collections::BTreeMap<String, ResolvedPackage>,
+        base: &Path,
+    ) -> Self {
+        let mut packages = packages
             .values()
             .map(|package| LockedPackage {
                 name: package.id.name.clone(),

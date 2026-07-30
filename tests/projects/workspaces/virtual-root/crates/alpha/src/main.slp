@@ -1,0 +1,8 @@
+(take beta:lib tripled)
+
+(fn main () -> i32
+  (println (tripled))
+  0)
+
+(test "a member reaches another member"
+  (= (tripled) 120))

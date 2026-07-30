@@ -236,9 +236,16 @@ pub fn analyze_package(input: &PackageInput, options: &CompileOptions) -> Packag
         structs: Vec::new(),
         enums: Vec::new(),
     };
-    for unit in &mut units {
+    for (unit, source) in units.iter_mut().zip(&input.files) {
         merged.functions.append(&mut unit.program.functions);
-        merged.tests.append(&mut unit.program.tests);
+        // A dependency's tests belong to the dependency. Collecting them here
+        // would run another package's suite from this one's binary, and — since
+        // codegen only emits the test bodies owned by the module it is
+        // compiling — would leave the harness calling functions no object
+        // defines.
+        if source.namespace.is_none() {
+            merged.tests.append(&mut unit.program.tests);
+        }
         merged.structs.append(&mut unit.program.structs);
         merged.enums.append(&mut unit.program.enums);
     }

@@ -1,0 +1,12 @@
+# A workspace root that defines no package of its own: there is nothing to
+# build here, only members to build. Every command needs `--package` or
+# `--workspace`, because there is no package the working directory is in.
+[workspace]
+members = ["crates/*"]
+exclude = ["crates/scratch"]
+
+[workspace.package]
+version = "0.2.4"
+
+[workspace.dependencies]
+foundation = { path = "../../dependencies/foundation" }

@@ -13,11 +13,12 @@ use slopic_core::package::{
 };
 use slopic_core::syntax::SyntaxKind;
 use slopic_core::CompileOptions;
-use slopium_manifest::manifest::{load_project, Manifest};
+use slopium_manifest::manifest::Project;
 use slopium_manifest::resolve::{resolve, Resolution};
 use slopium_manifest::source::SourceId;
 use slopium_manifest::std_library::{std_module_path, STD_MODULES};
 use slopium_manifest::version::Version;
+use slopium_manifest::workspace::{load_project, load_workspace};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fs;
@@ -644,14 +645,8 @@ fn workspace_span_for_uri(symbol: &WorkspaceSymbol, uri: &str) -> Option<Span> {
 ///
 /// `D-015`: a `lib.slp` entry and a manifest defining `[language-items]` are
 /// both library packages, and neither needs an entry point.
-fn validates_entry_point(manifest: &Manifest) -> bool {
-    manifest.language_items.is_empty()
-        && manifest
-            .package
-            .entry
-            .file_name()
-            .and_then(|name| name.to_str())
-            != Some("lib.slp")
+fn validates_entry_point(project: &Project) -> bool {
+    project.manifest.language_items.is_empty() && !project.is_library()
 }
 
 struct ParsedWorkspaceFile {
@@ -660,12 +655,19 @@ struct ParsedWorkspaceFile {
     tokens: Vec<slopic_core::lexer::Token>,
 }
 
+/// Analyze the package an open file belongs to.
+///
+/// The manifest passed in is the nearest one above the file, so in a workspace
+/// that is the file's own member: a member is analyzed as itself, against its
+/// own dependencies, rather than as part of one flat blob of every member's
+/// sources. The workspace is still loaded around it, because a member manifest
+/// may inherit fields that only the workspace knows.
 fn build_workspace(
     manifest_path: &Path,
     open_documents: &HashMap<String, Document>,
 ) -> Result<Workspace, String> {
-    let project = load_project(Some(manifest_path.to_path_buf()))?;
-    let manifest = &project.manifest;
+    let loaded = load_workspace(Some(manifest_path.to_path_buf()))?;
+    let project = loaded.select(None, false)?[0].clone();
     let source_root = project.source_root()?;
     let entry = project
         .entry_path()
@@ -697,11 +699,11 @@ fn build_workspace(
         });
     }
     let toolchain_version = Version::parse(slopic_core::STANDARD_LIBRARY_VERSION)?;
-    let resolution = resolve(&project, &toolchain_version)?;
+    let resolution = resolve(&project, &loaded, &toolchain_version)?;
     let language_items = language_items_from(&resolution);
     add_resolved_dependencies(&resolution, open_documents, &mut files, &mut sources)?;
     let input = PackageInput {
-        name: manifest.package.name.clone(),
+        name: project.name.clone(),
         entry_module,
         files: sources,
     };
@@ -709,7 +711,7 @@ fn build_workspace(
         &input,
         &CompileOptions {
             language_items,
-            validate_entry_point: validates_entry_point(manifest),
+            validate_entry_point: validates_entry_point(&project),
             ..CompileOptions::default()
         },
     );
@@ -1229,19 +1231,13 @@ fn document_requires_entry_point(uri: &str) -> bool {
     let Some(manifest_path) = find_manifest(&path) else {
         return true;
     };
-    let Ok(manifest_source) = fs::read_to_string(&manifest_path) else {
+    let Ok(project) = load_project(Some(manifest_path)) else {
         return true;
     };
-    let Ok(manifest) = toml::from_str::<Manifest>(&manifest_source) else {
-        return true;
-    };
-    if !validates_entry_point(&manifest) {
+    if !validates_entry_point(&project) {
         return false;
     }
-    let Some(root) = manifest_path.parent() else {
-        return true;
-    };
-    let entry = root.join(&manifest.package.entry);
+    let entry = project.entry_path();
     match (path.canonicalize(), entry.canonicalize()) {
         (Ok(path), Ok(entry)) => path == entry,
         _ => path == entry,

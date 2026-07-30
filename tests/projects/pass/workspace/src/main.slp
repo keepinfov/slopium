@@ -1,0 +1,12 @@
+(take helper:lib doubled)
+
+(fn main () -> i32
+  (println (foundation:numbers:forty))
+  (println (doubled))
+  0)
+
+(test "a member of the same workspace is an ordinary dependency"
+  (= (doubled) 80))
+
+(test "the workspace shares one copy of foundation"
+  (= (doubled) (+ (foundation:numbers:forty) (foundation:numbers:forty))))

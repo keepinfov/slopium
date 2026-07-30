@@ -1,0 +1,4 @@
+(export tripled)
+
+(fn tripled () -> i64
+  (* 3 (foundation:numbers:forty)))

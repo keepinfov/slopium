@@ -107,7 +107,7 @@ assert_patterns \
   <(printf '%s\n' "$host_target (installed, default)" "$cross_target (installed)") \
   "$result_dir/targets.stdout"
 env SLOPIC="$compiler" "$manager" compiler >"$result_dir/compiler.stdout"
-assert_patterns <(printf '%s\n' '"protocol": 5') "$result_dir/compiler.stdout"
+assert_patterns <(printf '%s\n' '"protocol": 6') "$result_dir/compiler.stdout"
 
 generated_project="$result_dir/generated-project"
 env SLOPIC="$compiler" "$manager" new generated-project --path "$generated_project" \
@@ -174,6 +174,101 @@ run_manager_logged "tree" "$result_dir/tree.stdout" "$result_dir/tree.stderr" \
 assert_patterns <(printf '%s\n' 'diamond-dependencies v0.2.4' 'geometry v0.2.4' 'mathlib v0.2.4' 'foundation v0.2.4') \
   "$result_dir/tree.stdout"
 echo "project-tests: lockfile and tree ... ok"
+
+# Workspaces: one lock and one target directory at the root, package selection,
+# and a member reached as a path dependency resolved as that member.
+workspace_project="$projects_dir/pass/workspace"
+run_manager "$workspace_project/Slopium.toml" clean >/dev/null
+rm -f "$workspace_project/Slopium.lock" "$workspace_project/helper/Slopium.lock"
+run_manager_logged "workspace fmt" "$result_dir/ws-fmt.stdout" "$result_dir/ws-fmt.stderr" \
+  "$workspace_project/Slopium.toml" fmt --check --workspace
+run_manager_logged "workspace check" "$result_dir/ws-check.stdout" "$result_dir/ws-check.stderr" \
+  "$workspace_project/Slopium.toml" check --workspace
+assert_patterns <(printf '%s\n' 'Checked helper v0.2.4' 'Checked workspace v0.2.4') \
+  "$result_dir/ws-check.stdout"
+if [[ ! -f "$workspace_project/Slopium.lock" ]]; then
+  echo "project-tests: the workspace root has no lock" >&2
+  exit 1
+fi
+if [[ -f "$workspace_project/helper/Slopium.lock" ]]; then
+  echo "project-tests: a workspace member has its own lock" >&2
+  exit 1
+fi
+if [[ "$(grep -c 'name = "foundation"' "$workspace_project/Slopium.lock")" != "1" ]]; then
+  echo "project-tests: the shared dependency appears more than once in the workspace lock" >&2
+  exit 1
+fi
+assert_patterns <(printf '%s\n' 'name = "helper"' 'source = "path+helper"') \
+  "$workspace_project/Slopium.lock"
+# `-p` selects one member, and a member's version came from the workspace.
+run_manager_logged "workspace -p" "$result_dir/ws-package.stdout" \
+  "$result_dir/ws-package.stderr" "$workspace_project/Slopium.toml" check -p helper
+assert_patterns <(printf '%s\n' 'Checked helper v0.2.4') "$result_dir/ws-package.stdout"
+if grep --quiet 'workspace v0.2.4' "$result_dir/ws-package.stdout"; then
+  echo "project-tests: --package checked more than the named member" >&2
+  exit 1
+fi
+# Each member runs its own tests, and only its own.
+run_manager_logged "workspace test" "$result_dir/ws-test.stdout" "$result_dir/ws-test.stderr" \
+  "$workspace_project/Slopium.toml" test --workspace
+assert_patterns <(printf '%s\n' 'test lib:a library member has its own tests' \
+  'test main:a member of the same workspace is an ordinary dependency') \
+  "$result_dir/ws-test.stdout"
+if [[ "$(grep -c 'test lib:a library member has its own tests' "$result_dir/ws-test.stdout")" != "1" ]]; then
+  echo "project-tests: a member's tests ran from another member's binary" >&2
+  exit 1
+fi
+# One target directory, at the root.
+if [[ -d "$workspace_project/helper/target" ]]; then
+  echo "project-tests: a workspace member has its own target directory" >&2
+  exit 1
+fi
+if [[ ! -x "$workspace_project/target/$host_target/dev/helper-tests" ]]; then
+  echo "project-tests: the member's test binary is not under the workspace target directory" >&2
+  exit 1
+fi
+run_manager "$workspace_project/Slopium.toml" clean >/dev/null
+rm -f "$workspace_project/Slopium.lock"
+
+# A root that defines no package of its own: selection is mandatory, `exclude`
+# keeps a directory out, and `members` accepts a trailing `*`.
+virtual_project="$projects_dir/workspaces/virtual-root"
+run_manager "$virtual_project/Slopium.toml" clean >/dev/null
+rm -f "$virtual_project/Slopium.lock"
+if run_manager "$virtual_project/Slopium.toml" check \
+  >"$result_dir/virtual.stdout" 2>"$result_dir/virtual.stderr"; then
+  echo "project-tests: a virtual workspace root built without a package selection" >&2
+  exit 1
+fi
+assert_patterns <(printf '%s\n' '--package' '--workspace') "$result_dir/virtual.stderr"
+run_manager_logged "virtual workspace" "$result_dir/virtual-check.stdout" \
+  "$result_dir/virtual-check.stderr" "$virtual_project/Slopium.toml" check --workspace
+assert_patterns <(printf '%s\n' 'Checked alpha v0.2.4' 'Checked beta v0.2.4') \
+  "$result_dir/virtual-check.stdout"
+if grep --quiet 'scratch' "$virtual_project/Slopium.lock"; then
+  echo "project-tests: an excluded directory is in the workspace lock" >&2
+  exit 1
+fi
+run_manager_logged "virtual run" "$result_dir/virtual-run.stdout" \
+  "$result_dir/virtual-run.stderr" "$virtual_project/Slopium.toml" run -p alpha
+assert_patterns <(printf '%s\n' '120') "$result_dir/virtual-run.stdout"
+run_manager "$virtual_project/Slopium.toml" clean >/dev/null
+rm -f "$virtual_project/Slopium.lock"
+
+# `new --lib` produces a package that checks and tests but has nothing to run.
+library_project="$result_dir/new-library"
+run_manager "$projects_dir/pass/basics/Slopium.toml" new library-package \
+  --lib --path "$library_project" >/dev/null
+run_manager_logged "new --lib" "$result_dir/new-lib.stdout" "$result_dir/new-lib.stderr" \
+  "$library_project/Slopium.toml" test
+assert_patterns <(printf '%s\n' 'test lib:addition ... ok') "$result_dir/new-lib.stdout"
+if run_manager "$library_project/Slopium.toml" run \
+  >"$result_dir/new-lib-run.stdout" 2>"$result_dir/new-lib-run.stderr"; then
+  echo "project-tests: a library package produced something to run" >&2
+  exit 1
+fi
+assert_patterns <(printf '%s\n' 'is a library') "$result_dir/new-lib-run.stderr"
+echo "project-tests: workspaces ... ok"
 
 basic_project="$projects_dir/pass/basics"
 basic_source="$basic_project/src/main.slp"
@@ -374,7 +469,7 @@ cp -R "$projects_dir/pass/modules" "$cache_project"
 cache_manifest="$cache_project/Slopium.toml"
 run_manager "$cache_manifest" clean >/dev/null
 run_manager "$cache_manifest" build >/dev/null
-cache_objects="$cache_project/target/$host_target/dev/objects"
+cache_objects="$cache_project/target/$host_target/dev/objects/modules"
 main_stamp="$cache_objects/6d61696e.slop-cache"
 core_stamp="$cache_objects/6d6174683a636f7265.slop-cache"
 main_before="$(sha256sum "$main_stamp" | cut -d ' ' -f 1)"

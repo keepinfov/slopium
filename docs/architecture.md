@@ -208,9 +208,19 @@ appearing once however many dependents reach it. A package's namespace is its
 name, so the key in `[dependencies]` must be the package name. The resolved
 graph is written to `Slopium.lock`.
 
-Resolution, the manifest schema, semantic versions and the lockfile live in
-`slopium-manifest`, which both `slopium` and `slopium-lsp` consume — the editor
-and the build cannot namespace a module differently. `slopic` still types
+Several packages may share one workspace: `[workspace] members` at a root
+manifest that need not define a package of its own. A workspace has one
+`Slopium.lock` and one `target/`, and resolution covers every member at once, so
+building one member cannot rewrite what another recorded. A member reached as a
+`path` dependency resolves to that member rather than being read again, which is
+what lets it inherit `version` and `[dependencies]` entries from the root. A
+lone package is loaded as a workspace of one, so there is one code path rather
+than two.
+
+Resolution, the manifest schema, semantic versions, workspaces and the lockfile
+live in `slopium-manifest`, which both `slopium` and `slopium-lsp` consume — the
+editor and the build cannot namespace a module differently. The language server
+analyzes an open file as the member that owns it. `slopic` still types
 and lowers the package as one semantic unit, then emits only the selected
 owner module for each object invocation. Generated function/type/drop/clone
 symbols use deterministic global names so objects link independently.
@@ -219,6 +229,13 @@ Object cache keys include the selected module body plus every module
 interface. A body-only change keeps independent objects fresh; an interface
 change invalidates consumers. Generic owner modules additionally include
 consumer bodies because their reachable concrete instance set can change.
+Objects live under `objects/<package>/`, because two members can compile a
+module of the same name.
+
+A package's test harness carries that package's tests only. A dependency's
+tests belong to the dependency: codegen emits a test body only in the object
+that owns it, so collecting a dependency's tests would leave the harness calling
+functions no object defines.
 
 ## Runtime boundary
 

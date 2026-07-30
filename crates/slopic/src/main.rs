@@ -39,6 +39,12 @@ struct Cli {
     #[arg(long)]
     codegen_module: Option<String>,
 
+    /// Compile a library: no entry point is required, because nothing here is
+    /// linked into an executable on its own. `slopium` passes this for a
+    /// package entered through `lib.slp` (`D-015`).
+    #[arg(long)]
+    library: bool,
+
     /// Run the optimization pipeline. `slopic` knows nothing about "profiles":
     /// the manager decides that a release build optimizes and passes this.
     #[arg(long)]
@@ -194,7 +200,7 @@ fn main() {
             optimize: cli.optimize,
             codegen_module: cli.codegen_module,
             language_items,
-            validate_entry_point: true,
+            validate_entry_point: !cli.library,
             debug: cli.debug,
             panic_abort: cli.panic_abort,
             strip: cli.strip,

@@ -1,0 +1,24 @@
+[workspace]
+members = ["helper"]
+
+# What a member takes with `version.workspace = true`.
+[workspace.package]
+version = "0.2.4"
+
+# What a member takes with `<name> = { workspace = true }`. Both this package
+# and `helper` depend on it, and it appears once in the lock.
+[workspace.dependencies]
+foundation = { path = "../../dependencies/foundation" }
+
+[package]
+name = "workspace"
+version.workspace = true
+source = "src"
+entry = "src/main.slp"
+
+[dependencies]
+helper = { path = "helper" }
+foundation = { workspace = true }
+
+[build]
+target = "x86_64-unknown-linux-gnu"

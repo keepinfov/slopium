@@ -25,7 +25,13 @@ scripts/project-tests.sh
 | `path-dependencies` | Direct and transitive path dependencies, each under its package name |
 | `diamond-dependencies` | One dependency reached through two packages, resolved once under its own name; lockfile and `tree` |
 | `custom-std` | A path package supplying `[language-items]` in place of the bundled `std` |
+| `workspace` | A root package with a library member: inherited version and dependency, one lock, one `target/`, per-package tests |
 | `process-io` | stdin, `read-line`, `read-i64`, `parse-i64`, environment, argv |
+
+`workspaces/virtual-root` is not a passing project, because its root defines no
+package to run: it has its own phase in the runner, which asserts that a command
+without `-p` or `--workspace` fails, that `members = ["crates/*"]` expands, that
+`exclude` keeps a directory out of the lock, and that `-p` builds one member.
 
 Every passing project must pass `fmt --check`, `check`, `run`, and `test`.
 Selected projects also build and run under the release profile.

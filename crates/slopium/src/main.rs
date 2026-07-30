@@ -4,11 +4,12 @@ use serde::Deserialize;
 use slopic_core::codegen::{DEFAULT_TARGET, TARGETS};
 use slopic_core::syntax::{format_source, FormatOptions};
 use slopium_manifest::lock::{Lockfile, LOCK_FILE};
-use slopium_manifest::manifest::{load_project, validate_package_name, Profile, Project};
-use slopium_manifest::resolve::{resolve, Resolution};
+use slopium_manifest::manifest::{validate_package_name, Profile, Project};
+use slopium_manifest::resolve::{resolve_workspace, Resolution, WorkspaceResolution};
 use slopium_manifest::source::SourceId;
 use slopium_manifest::std_library::{std_module_path, STD_MODULES};
 use slopium_manifest::version::Version;
+use slopium_manifest::workspace::{load_workspace, Workspace};
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs;
@@ -34,6 +35,10 @@ enum Commands {
         name: String,
         #[arg(long)]
         path: Option<PathBuf>,
+        /// Create a library package: entered through `src/lib.slp`, with no
+        /// `main` and nothing to link.
+        #[arg(long)]
+        lib: bool,
     },
     Check(TargetArgs),
     Build(BuildArgs),
@@ -47,10 +52,17 @@ enum Commands {
     Fmt {
         #[arg(long)]
         check: bool,
+        #[command(flatten)]
+        select: SelectArgs,
     },
-    Clean,
+    Clean(SelectArgs),
     /// Print the resolved package graph.
-    Tree(ResolveArgs),
+    Tree {
+        #[command(flatten)]
+        resolve: ResolveArgs,
+        #[command(flatten)]
+        select: SelectArgs,
+    },
     Targets,
     Compiler,
     /// Print a shell completion script for `slopium` on stdout.
@@ -68,6 +80,8 @@ struct TargetArgs {
     cc: Option<String>,
     #[command(flatten)]
     resolve: ResolveArgs,
+    #[command(flatten)]
+    select: SelectArgs,
 }
 
 #[derive(Args, Clone)]
@@ -80,6 +94,19 @@ struct BuildArgs {
     cc: Option<String>,
     #[command(flatten)]
     resolve: ResolveArgs,
+    #[command(flatten)]
+    select: SelectArgs,
+}
+
+/// Which packages of a workspace a command acts on.
+#[derive(Args, Clone, Default)]
+struct SelectArgs {
+    /// Act on this package instead of the one the working directory is in.
+    #[arg(short, long, value_name = "NAME")]
+    package: Option<String>,
+    /// Act on every member of the workspace.
+    #[arg(long)]
+    workspace: bool,
 }
 
 /// How resolution is allowed to behave.
@@ -95,6 +122,22 @@ struct ResolveArgs {
     /// `--locked` and `--offline` together.
     #[arg(long)]
     frozen: bool,
+}
+
+impl SelectArgs {
+    /// The one package a command that cannot act on several is aimed at.
+    fn one<'a>(&self, workspace: &'a Workspace, action: &str) -> Result<&'a Project, String> {
+        if self.workspace {
+            return Err(format!(
+                "`{action}` acts on one package, but `--workspace` names every member"
+            ));
+        }
+        workspace.select_one(self.package.as_deref(), action)
+    }
+
+    fn all<'a>(&self, workspace: &'a Workspace) -> Result<Vec<&'a Project>, String> {
+        workspace.select(self.package.as_deref(), self.workspace)
+    }
 }
 
 impl ResolveArgs {
@@ -120,31 +163,81 @@ struct CompilerHandshake {
 fn main() {
     let cli = Cli::parse();
     let result = match cli.command {
-        Commands::New { name, path } => create_project(&name, path),
-        Commands::Check(args) => load_project(cli.manifest_path)
-            .and_then(|project| check(&project, args.target, args.cc, args.resolve)),
-        Commands::Build(args) => load_project(cli.manifest_path)
-            .and_then(|project| build(&project, &args, false).map(|_| ())),
+        Commands::New { name, path, lib } => create_project(&name, path, lib),
+        Commands::Check(args) => {
+            Session::open(cli.manifest_path, args.resolve).and_then(|session| {
+                for project in args.select.all(&session.workspace)? {
+                    check(&session, project, &args)?;
+                }
+                Ok(())
+            })
+        }
+        Commands::Build(args) => {
+            Session::open(cli.manifest_path, args.resolve).and_then(|session| {
+                for project in args.select.all(&session.workspace)? {
+                    build(&session, project, &args, false)?;
+                }
+                Ok(())
+            })
+        }
         Commands::Run {
             build: args,
             args: program_args,
-        } => load_project(cli.manifest_path).and_then(|project| {
-            let artifact = build(&project, &args, false)?;
+        } => Session::open(cli.manifest_path, args.resolve).and_then(|session| {
+            let project = args.select.one(&session.workspace, "run")?;
+            if project.is_library() {
+                return Err(format!(
+                    "`{}` is a library and has no executable to run",
+                    project.name
+                ));
+            }
+            let artifact = build(&session, project, &args, false)?
+                .ok_or_else(|| format!("`{}` produced no executable", project.name))?;
             run_artifact(&artifact, &program_args)
         }),
-        Commands::Test(args) => load_project(cli.manifest_path).and_then(|project| {
-            let artifact = build(&project, &args, true)?;
-            let status = Command::new(&artifact)
-                .status()
-                .map_err(|error| format!("cannot execute tests: {error}"))?;
-            status_result(status, "tests")
-        }),
-        Commands::Fmt { check } => {
-            load_project(cli.manifest_path).and_then(|project| format_project(&project, check))
+        Commands::Test(args) => {
+            Session::open(cli.manifest_path, args.resolve).and_then(|session| {
+                for project in args.select.all(&session.workspace)? {
+                    let Some(artifact) = build(&session, project, &args, true)? else {
+                        continue;
+                    };
+                    let status = Command::new(&artifact)
+                        .status()
+                        .map_err(|error| format!("cannot execute tests: {error}"))?;
+                    status_result(status, "tests")?;
+                }
+                Ok(())
+            })
         }
-        Commands::Clean => load_project(cli.manifest_path).and_then(clean),
-        Commands::Tree(args) => {
-            load_project(cli.manifest_path).and_then(|project| tree(&project, args))
+        Commands::Fmt { check, select } => {
+            load_workspace(cli.manifest_path).and_then(|workspace| {
+                let mut differences = Vec::new();
+                for project in select.all(&workspace)? {
+                    differences.extend(format_project(project, check)?);
+                }
+                if differences.is_empty() {
+                    return Ok(());
+                }
+                Err(format!(
+                    "formatting differs: {}",
+                    differences
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+            })
+        }
+        Commands::Clean(select) => {
+            load_workspace(cli.manifest_path).and_then(|workspace| clean(&workspace, &select))
+        }
+        Commands::Tree { resolve, select } => {
+            Session::open(cli.manifest_path, resolve).and_then(|session| {
+                for project in select.all(&session.workspace)? {
+                    tree(&session, project)?;
+                }
+                Ok(())
+            })
         }
         Commands::Targets => {
             for spec in TARGETS {
@@ -172,7 +265,8 @@ fn main() {
     }
 }
 
-fn format_project(project: &Project, check: bool) -> Result<(), String> {
+/// Format one package, returning the files that were not already formatted.
+fn format_project(project: &Project, check: bool) -> Result<Vec<PathBuf>, String> {
     let mut differences = Vec::new();
     for source_path in source_files(project)? {
         let source = fs::read_to_string(&source_path)
@@ -201,17 +295,7 @@ fn format_project(project: &Project, check: bool) -> Result<(), String> {
             }
         }
     }
-    if !differences.is_empty() {
-        return Err(format!(
-            "formatting differs: {}",
-            differences
-                .iter()
-                .map(|path| path.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-    }
-    Ok(())
+    Ok(differences)
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -254,7 +338,7 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     result
 }
 
-fn create_project(name: &str, path: Option<PathBuf>) -> Result<(), String> {
+fn create_project(name: &str, path: Option<PathBuf>, library: bool) -> Result<(), String> {
     validate_package_name(name)?;
     let root = path.unwrap_or_else(|| PathBuf::from(name));
     if root.exists() {
@@ -262,52 +346,121 @@ fn create_project(name: &str, path: Option<PathBuf>) -> Result<(), String> {
     }
     fs::create_dir_all(root.join("src"))
         .map_err(|error| format!("cannot create project: {error}"))?;
+    // A library has no `main` to run and nothing to link, so a target triple
+    // and a release profile would describe work it never does.
+    let entry = if library {
+        "src/lib.slp"
+    } else {
+        "src/main.slp"
+    };
+    let build = if library {
+        String::new()
+    } else {
+        format!("[build]\ntarget = \"{DEFAULT_TARGET}\"\n\n")
+    };
     let manifest = format!(
-        "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nsource = \"src\"\nentry = \"src/main.slp\"\n\n\
-         [build]\ntarget = \"{DEFAULT_TARGET}\"\n\n\
+        "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nsource = \"src\"\nentry = \"{entry}\"\n\n\
+         {build}\
          [profile.dev]\nopt-level = 0\ndebug = true\nstrip = false\npanic = \"message\"\n\n\
          [profile.release]\nopt-level = 1\ndebug = false\nstrip = true\npanic = \"message\"\n"
     );
-    let source = format!(
-        "(fn main () -> i32\n  (let message \"hello from {name}\")\n  (println (& message))\n  0)\n\n\
-         (test \"arithmetic\"\n  (= (+ 20 22) 42))\n"
-    );
+    let source = if library {
+        "(export add)\n\n\
+         (fn add ((left i64) (right i64)) -> i64\n  (+ left right))\n\n\
+         (test \"addition\"\n  (= (add 20 22) 42))\n"
+            .to_owned()
+    } else {
+        format!(
+            "(fn main () -> i32\n  (let message \"hello from {name}\")\n  (println (& message))\n  0)\n\n\
+             (test \"arithmetic\"\n  (= (+ 20 22) 42))\n"
+        )
+    };
     fs::write(root.join("Slopium.toml"), manifest)
         .map_err(|error| format!("cannot write manifest: {error}"))?;
-    fs::write(root.join("src/main.slp"), source)
-        .map_err(|error| format!("cannot write source: {error}"))?;
+    fs::write(root.join(entry), source).map_err(|error| format!("cannot write source: {error}"))?;
     fs::write(root.join(".gitignore"), "/target/\n/.slopium/\n")
         .map_err(|error| format!("cannot write .gitignore: {error}"))?;
-    println!("Created package `{name}` at {}", root.display());
+    let kind = if library { "library" } else { "package" };
+    println!("Created {kind} `{name}` at {}", root.display());
     Ok(())
 }
 
-fn check(
-    project: &Project,
-    target_override: Option<String>,
-    cc_override: Option<String>,
-    resolve_args: ResolveArgs,
-) -> Result<(), String> {
-    let target = target(project, target_override);
+/// One load of the workspace, one resolution of it, and one reconciliation with
+/// the lock — shared by every command that compiles something.
+///
+/// Resolution covers the whole workspace even when a command acts on one
+/// member, because the lock does: building `-p a` must not rewrite what `b`
+/// recorded.
+#[derive(Debug)]
+struct Session {
+    workspace: Workspace,
+    resolution: WorkspaceResolution,
+}
+
+impl Session {
+    fn open(manifest_path: Option<PathBuf>, args: ResolveArgs) -> Result<Self, String> {
+        let workspace = load_workspace(manifest_path)?;
+        let toolchain_version = Version::parse(slopic_core::STANDARD_LIBRARY_VERSION)?;
+        let resolution = resolve_workspace(&workspace, &toolchain_version)?;
+        synchronize_lock(&workspace, &resolution, args)?;
+        Ok(Self {
+            workspace,
+            resolution,
+        })
+    }
+
+    /// What one member compiles against.
+    fn dependencies(&self, project: &Project) -> Result<Dependencies, String> {
+        let resolution = self.resolution.member(&project.name)?;
+        dependencies_of(project, resolution)
+    }
+}
+
+fn check(session: &Session, project: &Project, args: &TargetArgs) -> Result<(), String> {
+    let target = target(project, args.target.clone());
     let source = source_path(project)?;
     let source_root = project.source_root()?;
-    let dependencies = resolve_dependencies(project, resolve_args)?;
-    let mut command = slopic_command(project, &target, cc_override)?;
+    let dependencies = session.dependencies(project)?;
+    let mut command = slopic_command(project, &target, args.cc.clone())?;
     command.arg(&source).arg("--source-root").arg(&source_root);
     add_dependency_args(&mut command, &dependencies);
+    if project.is_library() {
+        command.arg("--library");
+    }
     let status = command
         .args(["--emit", "check", "--target", &target])
         .status()
         .map_err(|error| format!("cannot start slopic: {error}"))?;
     status_result(status, "check")?;
-    println!(
-        "Checked {} v{}",
-        project.manifest.package.name, project.manifest.package.version
-    );
+    println!("Checked {} v{}", project.name, project.version);
     Ok(())
 }
 
-fn build(project: &Project, args: &BuildArgs, test: bool) -> Result<PathBuf, String> {
+/// Build one package, or check it when there is nothing to link.
+///
+/// A library has no `main`, so `build` on one means "compile it and say so":
+/// erroring would make `build --workspace` useless in any workspace that holds
+/// a library, and linking would fail on the missing entry point. `test` still
+/// produces an executable, because the harness supplies its own entry point.
+fn build(
+    session: &Session,
+    project: &Project,
+    args: &BuildArgs,
+    test: bool,
+) -> Result<Option<PathBuf>, String> {
+    if project.is_library() && !test {
+        check(
+            session,
+            project,
+            &TargetArgs {
+                target: args.target.clone(),
+                cc: args.cc.clone(),
+                resolve: args.resolve,
+                select: SelectArgs::default(),
+            },
+        )?;
+        return Ok(None);
+    }
     let target = target(project, args.target.clone());
     if !TARGETS.iter().any(|spec| spec.triple == target) {
         let available: Vec<&str> = TARGETS.iter().map(|spec| spec.triple).collect();
@@ -318,16 +471,22 @@ fn build(project: &Project, args: &BuildArgs, test: bool) -> Result<PathBuf, Str
     }
     let source = source_path(project)?;
     let source_root = project.source_root()?;
-    let dependencies = resolve_dependencies(project, args.resolve)?;
+    let dependencies = session.dependencies(project)?;
     let profile_name = if args.release { "release" } else { "dev" };
     let profile = project.manifest.profile.get(profile_name);
-    let out_dir = project.root.join("target").join(&target).join(profile_name);
+    // One `target/` for the whole workspace, so members share compiled
+    // dependencies instead of each rebuilding them under their own root.
+    let out_dir = session
+        .workspace
+        .target_dir()
+        .join(&target)
+        .join(profile_name);
     fs::create_dir_all(&out_dir)
         .map_err(|error| format!("cannot create `{}`: {error}", out_dir.display()))?;
     let artifact_name = if test {
-        format!("{}-tests", project.manifest.package.name)
+        format!("{}-tests", project.name)
     } else {
-        project.manifest.package.name.clone()
+        project.name.clone()
     };
     let artifact = out_dir.join(artifact_name);
     let stamp = artifact.with_extension("slop-cache");
@@ -349,15 +508,19 @@ fn build(project: &Project, args: &BuildArgs, test: bool) -> Result<PathBuf, Str
     };
     let cache_key = cache_key(cache_inputs)?;
     if artifact.is_file() && fs::read_to_string(&stamp).ok().as_deref() == Some(&cache_key) {
-        println!("Fresh {} ({profile_name})", project.manifest.package.name);
-        return Ok(artifact);
+        println!("Fresh {} ({profile_name})", project.name);
+        return Ok(Some(artifact));
     }
 
     println!(
         "Compiling {} v{} ({profile_name})",
-        project.manifest.package.name, project.manifest.package.version
+        project.name, project.version
     );
-    let object_dir = out_dir.join(if test { "test-objects" } else { "objects" });
+    // Per package, because two members compile a module of the same name into
+    // objects with the same encoded file name.
+    let object_dir = out_dir
+        .join(if test { "test-objects" } else { "objects" })
+        .join(&project.name);
     fs::create_dir_all(&object_dir)
         .map_err(|error| format!("cannot create `{}`: {error}", object_dir.display()))?;
     let mut objects = Vec::new();
@@ -423,7 +586,7 @@ fn build(project: &Project, args: &BuildArgs, test: bool) -> Result<PathBuf, Str
     fs::write(&stamp, &cache_key)
         .map_err(|error| format!("cannot write build cache stamp: {error}"))?;
     println!("Finished {} ({})", profile_name, artifact.display());
-    Ok(artifact)
+    Ok(Some(artifact))
 }
 
 #[derive(Clone, Debug)]
@@ -619,14 +782,73 @@ fn run_artifact(artifact: &Path, args: &[OsString]) -> Result<(), String> {
     status_result(status, "program")
 }
 
-fn clean(project: Project) -> Result<(), String> {
-    let target = project.root.join("target");
-    if target.exists() {
+/// Remove build output: the whole workspace's, or one package's.
+///
+/// Naming a package removes what that package produced under every target and
+/// profile and leaves its dependencies' objects alone, which is the only reason
+/// to name one at all.
+fn clean(workspace: &Workspace, select: &SelectArgs) -> Result<(), String> {
+    let target = workspace.target_dir();
+    if !target.exists() {
+        return Ok(());
+    }
+    if select.package.is_none() {
         fs::remove_dir_all(&target)
             .map_err(|error| format!("cannot remove `{}`: {error}", target.display()))?;
         println!("Removed {}", target.display());
+        return Ok(());
+    }
+    for project in select.all(workspace)? {
+        for profile_dir in profile_directories(&target)? {
+            let artifacts = [
+                profile_dir.join(&project.name),
+                profile_dir.join(format!("{}.slop-cache", project.name)),
+                profile_dir.join(format!("{}-tests", project.name)),
+                profile_dir.join(format!("{}-tests.slop-cache", project.name)),
+            ];
+            for artifact in artifacts {
+                if artifact.is_file() {
+                    fs::remove_file(&artifact).map_err(|error| {
+                        format!("cannot remove `{}`: {error}", artifact.display())
+                    })?;
+                }
+            }
+            for objects in ["objects", "test-objects"] {
+                let directory = profile_dir.join(objects).join(&project.name);
+                if directory.is_dir() {
+                    fs::remove_dir_all(&directory).map_err(|error| {
+                        format!("cannot remove `{}`: {error}", directory.display())
+                    })?;
+                }
+            }
+        }
+        println!("Removed build output for {}", project.name);
     }
     Ok(())
+}
+
+/// Every `<target>/<profile>` directory under `target/`.
+fn profile_directories(target: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut directories = Vec::new();
+    let triples = fs::read_dir(target)
+        .map_err(|error| format!("cannot read `{}`: {error}", target.display()))?;
+    for triple in triples {
+        let triple =
+            triple.map_err(|error| format!("cannot read `{}`: {error}", target.display()))?;
+        if !triple.path().is_dir() {
+            continue;
+        }
+        let profiles = fs::read_dir(triple.path())
+            .map_err(|error| format!("cannot read `{}`: {error}", triple.path().display()))?;
+        for profile in profiles {
+            let profile = profile
+                .map_err(|error| format!("cannot read `{}`: {error}", triple.path().display()))?;
+            if profile.path().is_dir() {
+                directories.push(profile.path());
+            }
+        }
+    }
+    Ok(directories)
 }
 
 /// Print the resolved graph.
@@ -634,7 +856,7 @@ fn clean(project: Project) -> Result<(), String> {
 /// A package appears once per place it is depended on, but is only expanded the
 /// first time — the repeat is marked `(*)`. That is the visible shape of
 /// `D-035`: a diamond shows the shared package twice and builds it once.
-fn tree(project: &Project, args: ResolveArgs) -> Result<(), String> {
+fn tree(session: &Session, project: &Project) -> Result<(), String> {
     fn walk(
         name: &str,
         resolution: &Resolution,
@@ -675,12 +897,10 @@ fn tree(project: &Project, args: ResolveArgs) -> Result<(), String> {
         }
     }
 
-    let toolchain_version = Version::parse(slopic_core::STANDARD_LIBRARY_VERSION)?;
-    let resolution = resolve(project, &toolchain_version)?;
-    synchronize_lock(project, &resolution, args)?;
+    let resolution = session.resolution.member(&project.name)?;
     walk(
         &resolution.root.name,
-        &resolution,
+        resolution,
         "",
         true,
         true,
@@ -781,12 +1001,9 @@ struct Dependencies {
     language_items: Vec<(String, String)>,
 }
 
-/// Resolve the graph, then reconcile `Slopium.lock` with it.
-fn resolve_dependencies(project: &Project, args: ResolveArgs) -> Result<Dependencies, String> {
-    let toolchain_version = Version::parse(slopic_core::STANDARD_LIBRARY_VERSION)?;
-    let resolution = resolve(project, &toolchain_version)?;
-    reject_namespace_collisions(project, &resolution)?;
-    synchronize_lock(project, &resolution, args)?;
+/// Turn one member's resolved graph into what its build consumes.
+fn dependencies_of(project: &Project, resolution: &Resolution) -> Result<Dependencies, String> {
+    reject_namespace_collisions(project, resolution)?;
 
     let mut packages = Vec::new();
     for package in resolution.dependencies() {
@@ -852,14 +1069,14 @@ fn reject_namespace_collisions(project: &Project, resolution: &Resolution) -> Re
     Ok(())
 }
 
-/// Write the lockfile, or refuse to under `--locked`.
+/// Write the workspace's lockfile, or refuse to under `--locked`.
 fn synchronize_lock(
-    project: &Project,
-    resolution: &Resolution,
+    workspace: &Workspace,
+    resolution: &WorkspaceResolution,
     args: ResolveArgs,
 ) -> Result<(), String> {
-    let path = project.root.join(LOCK_FILE);
-    let resolved = Lockfile::from_resolution(resolution, &project.root);
+    let path = workspace.lock_path();
+    let resolved = Lockfile::from_packages(&resolution.packages, &workspace.root);
     let existing = match fs::read_to_string(&path) {
         Ok(text) => Some(Lockfile::parse(&text)?),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -1170,6 +1387,7 @@ fn status_result(status: ExitStatus, action: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use slopium_manifest::workspace::load_project;
 
     #[test]
     fn fnv_is_stable() {
@@ -1186,16 +1404,22 @@ mod tests {
         if root.exists() {
             fs::remove_dir_all(&root).unwrap();
         }
-        create_project("format-test", Some(root.clone())).unwrap();
+        create_project("format-test", Some(root.clone()), false).unwrap();
         let source_path = root.join("src/main.slp");
         let unformatted = "(fn main () -> i32   ; keep\n 0)";
         fs::write(&source_path, unformatted).unwrap();
         let project = load_project(Some(root.join("Slopium.toml"))).unwrap();
 
-        assert!(format_project(&project, true).is_err());
+        assert_eq!(
+            format_project(&project, true).unwrap(),
+            vec![source_path.clone()]
+        );
         assert_eq!(fs::read_to_string(&source_path).unwrap(), unformatted);
-        format_project(&project, false).unwrap();
-        assert!(format_project(&project, true).is_ok());
+        assert_eq!(
+            format_project(&project, false).unwrap(),
+            Vec::<PathBuf>::new()
+        );
+        assert!(format_project(&project, true).unwrap().is_empty());
         let formatted = fs::read_to_string(&source_path).unwrap();
         assert!(formatted.contains("; keep"));
         assert!(formatted.ends_with('\n'));
@@ -1213,7 +1437,7 @@ mod tests {
         if root.exists() {
             fs::remove_dir_all(&root).unwrap();
         }
-        create_project("cache-test", Some(root.clone())).unwrap();
+        create_project("cache-test", Some(root.clone()), false).unwrap();
         let project = load_project(Some(root.join("Slopium.toml"))).unwrap();
         let source_root = project.source_root().unwrap();
         let compiler = root.join("Slopium.toml");
@@ -1307,8 +1531,11 @@ mod tests {
         .unwrap();
         fs::write(application.join("src/main.slp"), "(fn main () -> i32 0)\n").unwrap();
 
-        let project = load_project(Some(application.join("Slopium.toml"))).unwrap();
-        let namespaces = resolve_dependencies(&project, ResolveArgs::default())
+        let manifest = application.join("Slopium.toml");
+        let session = Session::open(Some(manifest.clone()), ResolveArgs::default()).unwrap();
+        let project = session.workspace.member("application").unwrap();
+        let namespaces = session
+            .dependencies(project)
             .unwrap()
             .packages
             .into_iter()
@@ -1325,10 +1552,10 @@ mod tests {
             locked: true,
             ..ResolveArgs::default()
         };
-        resolve_dependencies(&project, locked).unwrap();
+        Session::open(Some(manifest.clone()), locked).unwrap();
 
         fs::write(&lock, "version = 1\n").unwrap();
-        let error = resolve_dependencies(&project, locked).unwrap_err();
+        let error = Session::open(Some(manifest), locked).unwrap_err();
         assert!(error.contains("out of date"), "{error}");
 
         fs::remove_dir_all(root).unwrap();

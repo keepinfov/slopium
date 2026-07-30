@@ -1,0 +1,8 @@
+[package]
+name = "beta"
+version.workspace = true
+source = "src"
+entry = "src/lib.slp"
+
+[dependencies]
+foundation = { workspace = true }

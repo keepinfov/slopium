@@ -1,0 +1,7 @@
+(export doubled)
+
+(fn doubled () -> i64
+  (+ (foundation:numbers:forty) (foundation:numbers:forty)))
+
+(test "a library member has its own tests"
+  (= (doubled) 80))

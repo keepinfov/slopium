@@ -12,10 +12,11 @@
 //! every requirement on a name and reporting who disagreed when none is
 //! satisfied.
 
-use crate::manifest::{load_project, validate_package_name, Project, MANIFEST_FILE};
+use crate::manifest::{validate_package_name, Project, MANIFEST_FILE};
 use crate::source::{SourceId, SourceSpec};
 use crate::std_library::{std_language_items, STD_PACKAGE};
 use crate::version::{Version, VersionReq};
+use crate::workspace::{load_project, Workspace};
 use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 
@@ -72,6 +73,60 @@ impl Resolution {
     }
 }
 
+/// Every member of a workspace resolved, and the one graph they agree on.
+///
+/// Members are resolved separately because each one compiles against its own
+/// dependencies, but they share a lockfile — so the union has to be a function,
+/// not a relation: one name, one version, whichever member reached it.
+#[derive(Clone, Debug)]
+pub struct WorkspaceResolution {
+    pub members: BTreeMap<String, Resolution>,
+    /// Every package any member reaches, unique by name. This is what the lock
+    /// records and what "the shared dependency appears once" means.
+    pub packages: BTreeMap<String, ResolvedPackage>,
+}
+
+impl WorkspaceResolution {
+    pub fn member(&self, name: &str) -> Result<&Resolution, String> {
+        self.members
+            .get(name)
+            .ok_or_else(|| format!("package `{name}` was not resolved"))
+    }
+}
+
+/// Resolve every member of a workspace.
+pub fn resolve_workspace(
+    workspace: &Workspace,
+    toolchain_version: &Version,
+) -> Result<WorkspaceResolution, String> {
+    let mut members = BTreeMap::new();
+    let mut packages: BTreeMap<String, ResolvedPackage> = BTreeMap::new();
+    let mut reached_by: BTreeMap<String, String> = BTreeMap::new();
+
+    for (name, project) in &workspace.members {
+        let resolution = resolve(project, workspace, toolchain_version)?;
+        for package in resolution.packages.values() {
+            match packages.get(&package.id.name) {
+                Some(existing) if existing.id == package.id => {}
+                Some(existing) => {
+                    let first = &reached_by[&package.id.name];
+                    return Err(format!(
+                        "`{}` is required at two versions in one workspace: {} through `{first}` and {} through `{name}`. One lockfile cannot record both",
+                        package.id.name, existing.id.version, package.id.version
+                    ));
+                }
+                None => {
+                    reached_by.insert(package.id.name.clone(), name.clone());
+                    packages.insert(package.id.name.clone(), package.clone());
+                }
+            }
+        }
+        members.insert(name.clone(), resolution);
+    }
+
+    Ok(WorkspaceResolution { members, packages })
+}
+
 /// Who asked for what, kept so a conflict can name both sides.
 #[derive(Clone, Debug)]
 struct Requirement {
@@ -83,15 +138,19 @@ struct Requirement {
 ///
 /// `toolchain_version` is the compiler's own version, which is what the bundled
 /// library is versioned as — it ships with the compiler and cannot skew from it.
-pub fn resolve(root: &Project, toolchain_version: &Version) -> Result<Resolution, String> {
+pub fn resolve(
+    root: &Project,
+    workspace: &Workspace,
+    toolchain_version: &Version,
+) -> Result<Resolution, String> {
     let mut packages: BTreeMap<String, ResolvedPackage> = BTreeMap::new();
     let mut requirements: BTreeMap<String, Vec<Requirement>> = BTreeMap::new();
     let mut language_items: Vec<(String, String)> = Vec::new();
     let mut language_item_source: Option<String> = None;
 
     let root_id = PackageId {
-        name: root.name().to_owned(),
-        version: root.version().clone(),
+        name: root.name.clone(),
+        version: root.version.clone(),
         source: SourceId::Path(root.root.clone()),
     };
     packages.insert(
@@ -99,7 +158,7 @@ pub fn resolve(root: &Project, toolchain_version: &Version) -> Result<Resolution
         ResolvedPackage {
             id: root_id.clone(),
             project: Some(root.clone()),
-            dependencies: root.manifest.dependencies.keys().cloned().collect(),
+            dependencies: root.dependencies.keys().cloned().collect(),
         },
     );
 
@@ -108,8 +167,8 @@ pub fn resolve(root: &Project, toolchain_version: &Version) -> Result<Resolution
     let mut is_root = true;
 
     while let Some(project) = queue.pop_front() {
-        let dependent = project.name().to_owned();
-        for (declared, spec) in &project.manifest.dependencies {
+        let dependent = project.name.clone();
+        for (declared, spec) in &project.dependencies {
             validate_package_name(declared)?;
             requirements
                 .entry(declared.clone())
@@ -136,22 +195,22 @@ pub fn resolve(root: &Project, toolchain_version: &Version) -> Result<Resolution
                     )
                 }
                 SourceSpec::Path(relative) => {
-                    let dependency = load_path_dependency(&project, &relative)?;
+                    let dependency = load_path_dependency(&project, workspace, &relative)?;
                     // `D-035`: the key in `[dependencies]` *is* the package
                     // name, because the name is what the namespace and the lock
                     // are built from. An alias that differed from it would give
                     // one package two names.
-                    if dependency.name() != declared {
+                    if dependency.name != *declared {
                         return Err(format!(
                             "`{dependent}` declares dependency `{declared}`, but the package at `{}` is named `{}`; the key in `[dependencies]` must be the package name",
                             dependency.root.display(),
-                            dependency.name()
+                            dependency.name
                         ));
                     }
                     (
                         PackageId {
-                            name: dependency.name().to_owned(),
-                            version: dependency.version().clone(),
+                            name: dependency.name.clone(),
+                            version: dependency.version.clone(),
                             source: SourceId::Path(dependency.root.clone()),
                         },
                         Some(dependency),
@@ -185,7 +244,7 @@ pub fn resolve(root: &Project, toolchain_version: &Version) -> Result<Resolution
                     id,
                     dependencies: dependency
                         .as_ref()
-                        .map(|project| project.manifest.dependencies.keys().cloned().collect())
+                        .map(|project| project.dependencies.keys().cloned().collect())
                         .unwrap_or_default(),
                     project: dependency.clone(),
                 },
@@ -207,8 +266,23 @@ pub fn resolve(root: &Project, toolchain_version: &Version) -> Result<Resolution
     })
 }
 
-fn load_path_dependency(dependent: &Project, relative: &PathBuf) -> Result<Project, String> {
+/// Load a `path` dependency.
+///
+/// A path that lands on a workspace member resolves to that member rather than
+/// being read again as a stranger: a member's manifest may inherit fields from
+/// the workspace, and re-reading it from here would either miss them or have to
+/// rediscover the workspace to find them.
+fn load_path_dependency(
+    dependent: &Project,
+    workspace: &Workspace,
+    relative: &PathBuf,
+) -> Result<Project, String> {
     let root = dependent.root.join(relative);
+    if let Ok(canonical) = root.canonicalize() {
+        if let Some(member) = workspace.member_at(&canonical) {
+            return Ok(member.clone());
+        }
+    }
     let manifest = if root.is_dir() {
         root.join(MANIFEST_FILE)
     } else {
@@ -236,7 +310,7 @@ fn collect_language_items(
             .language_items
             .entries()
             .into_iter()
-            .map(|(name, path)| (name, format!("{}:{path}", project.name())))
+            .map(|(name, path)| (name, format!("{}:{path}", project.name)))
             .collect(),
         Some(_) => return Ok(()),
     };
@@ -374,8 +448,16 @@ mod tests {
         }
 
         fn resolve(&self, package: &str) -> Result<Resolution, String> {
-            let project = load_project(Some(self.root.join(package).join(MANIFEST_FILE)))?;
-            super::resolve(&project, &Version::new(0, 3, 7))
+            let manifest = self.root.join(package).join(MANIFEST_FILE);
+            let workspace = crate::workspace::load_workspace(Some(manifest))?;
+            let project = workspace.select(None, false)?[0].clone();
+            super::resolve(&project, &workspace, &Version::new(0, 3, 7))
+        }
+
+        fn write_manifest(&self, relative: &str, contents: &str) {
+            let path = self.root.join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, contents).unwrap();
         }
     }
 
@@ -585,6 +667,42 @@ mod tests {
             assert_eq!(names(&workspace.resolve("application").unwrap()), first);
         }
         assert_eq!(first, vec!["left", "right", "shared"]);
+    }
+
+    /// A member reached as a path dependency is the member, not a second
+    /// reading of it — which is what lets a member inherit its version.
+    #[test]
+    fn a_path_dependency_on_a_member_resolves_to_the_member() {
+        let workspace = Workspace::new("members");
+        workspace.write_manifest(
+            MANIFEST_FILE,
+            "[workspace]\nmembers = [\"application\", \"helper\"]\n\n[workspace.package]\nversion = \"3.1.4\"\n",
+        );
+        workspace.package("helper", "1.0.0", "");
+        workspace.write_manifest(
+            "helper/Slopium.toml",
+            "[package]\nname = \"helper\"\nversion.workspace = true\nsource = \"src\"\nentry = \"src/lib.slp\"\n",
+        );
+        workspace.package(
+            "application",
+            "1.0.0",
+            "helper = { path = \"../helper\" }\n",
+        );
+
+        let loaded =
+            crate::workspace::load_workspace(Some(workspace.root.join(MANIFEST_FILE))).unwrap();
+        let resolved = resolve_workspace(&loaded, &Version::new(0, 3, 7)).unwrap();
+        assert_eq!(
+            resolved.packages["helper"].id.version,
+            Version::new(3, 1, 4)
+        );
+        // Two members, one of them a dependency of the other: three entries
+        // would mean the member was read twice.
+        assert_eq!(resolved.packages.len(), 2);
+        assert_eq!(
+            names(resolved.member("application").unwrap()),
+            vec!["helper"]
+        );
     }
 
     #[test]
