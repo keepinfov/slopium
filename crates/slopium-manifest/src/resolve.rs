@@ -12,9 +12,12 @@
 //! every requirement on a name and reporting who disagreed when none is
 //! satisfied.
 
+use crate::archive::prefix_for;
 use crate::manifest::{validate_package_name, Project, MANIFEST_FILE};
+use crate::sha256::Digest;
 use crate::source::{SourceId, SourceSpec};
-use crate::std_library::{std_language_items, STD_PACKAGE};
+use crate::std_library::{std_archive, std_language_items, STD_PACKAGE};
+use crate::store::verify_tree;
 use crate::version::{Version, VersionReq};
 use crate::workspace::{load_project, Workspace};
 use std::collections::{BTreeMap, VecDeque};
@@ -38,10 +41,15 @@ impl std::fmt::Display for PackageId {
 #[derive(Clone, Debug)]
 pub struct ResolvedPackage {
     pub id: PackageId,
-    /// Absent for the bundled library, which has no manifest on disk.
+    /// Absent for the bundled library, unless a vendored copy of it replaced
+    /// the bundled one — then this is the copy on disk.
     pub project: Option<Project>,
     /// Names of this package's direct dependencies, sorted.
     pub dependencies: Vec<String>,
+    /// What this package's archive hashes to, for a source whose bytes cannot
+    /// change underneath the lock. A path dependency is a working tree and has
+    /// none: hashing one would rewrite the lock on every keystroke.
+    pub checksum: Option<Digest>,
 }
 
 impl ResolvedPackage {
@@ -159,6 +167,7 @@ pub fn resolve(
             id: root_id.clone(),
             project: Some(root.clone()),
             dependencies: root.dependencies.keys().cloned().collect(),
+            checksum: None,
         },
     );
 
@@ -178,21 +187,21 @@ pub fn resolve(
                     request: spec.requirement(),
                 });
 
-            let (id, dependency) = match spec.source(declared)? {
+            let (id, dependency, checksum) = match spec.source(declared)? {
                 SourceSpec::Toolchain => {
                     if declared != STD_PACKAGE {
                         return Err(format!(
                             "dependency `{declared}` cannot use the toolchain source; the bundled package is named `{STD_PACKAGE}`"
                         ));
                     }
-                    (
-                        PackageId {
-                            name: STD_PACKAGE.to_owned(),
-                            version: toolchain_version.clone(),
-                            source: SourceId::Toolchain,
-                        },
-                        None,
-                    )
+                    let (_, digest) = std_archive(toolchain_version)?;
+                    let id = PackageId {
+                        name: STD_PACKAGE.to_owned(),
+                        version: toolchain_version.clone(),
+                        source: SourceId::Toolchain,
+                    };
+                    let vendored = replacement(workspace, &id, &digest)?;
+                    (id, vendored, Some(digest))
                 }
                 SourceSpec::Path(relative) => {
                     let dependency = load_path_dependency(&project, workspace, &relative)?;
@@ -214,6 +223,7 @@ pub fn resolve(
                             source: SourceId::Path(dependency.root.clone()),
                         },
                         Some(dependency),
+                        None,
                     )
                 }
             };
@@ -247,6 +257,7 @@ pub fn resolve(
                         .map(|project| project.dependencies.keys().cloned().collect())
                         .unwrap_or_default(),
                     project: dependency.clone(),
+                    checksum,
                 },
             );
             if let Some(dependency) = dependency {
@@ -264,6 +275,48 @@ pub fn resolve(
         packages,
         language_items,
     })
+}
+
+/// A vendored copy standing in for a package, if one is configured.
+///
+/// Replacement is a property of the checkout, not of the graph: the package
+/// keeps its identity, its source and its lock entry, and only the bytes the
+/// compiler is handed come from somewhere else (`D-047`). That is what makes
+/// `slopium vendor` safe to run — it cannot change what a build resolves to,
+/// only where the same thing is read from.
+fn replacement(
+    workspace: &Workspace,
+    id: &PackageId,
+    checksum: &Digest,
+) -> Result<Option<Project>, String> {
+    let source = id.source.config_name();
+    let Some(directory) = workspace.config.replacement(source, &workspace.root)? else {
+        return Ok(None);
+    };
+    let root = directory.join(&id.name);
+    if !root.is_dir() {
+        return Err(format!(
+            "`{source}` is replaced by the vendored packages in `{}`, but `{}` is not there; run `slopium vendor`",
+            directory.display(),
+            id.name
+        ));
+    }
+    verify_tree(
+        &root,
+        &prefix_for(&id.name, &id.version),
+        checksum,
+        &id.to_string(),
+    )?;
+    let project = load_project(Some(root.join(MANIFEST_FILE)))?;
+    if project.name != id.name || project.version != id.version {
+        return Err(format!(
+            "the vendored copy at `{}` is `{} v{}`, but it stands in for `{id}`",
+            root.display(),
+            project.name,
+            project.version
+        ));
+    }
+    Ok(Some(project))
 }
 
 /// Load a `path` dependency.
@@ -473,6 +526,58 @@ mod tests {
             .into_iter()
             .map(|package| package.namespace().to_owned())
             .collect()
+    }
+
+    /// The toolchain's bytes do not change under the lock, so they are the
+    /// first thing a lockfile has a checksum for.
+    #[test]
+    fn the_bundled_library_is_locked_by_its_digest() {
+        let workspace = Workspace::new("toolchain-checksum");
+        workspace.package("application", "1.0.0", "std = { toolchain = true }\n");
+        let resolution = workspace.resolve("application").unwrap();
+        let (_, digest) = std_archive(&Version::new(0, 3, 7)).unwrap();
+        assert_eq!(resolution.packages["std"].checksum, Some(digest));
+        assert_eq!(resolution.packages["application"].checksum, None);
+    }
+
+    /// Vendoring may change where bytes are read from and nothing else: the
+    /// package keeps its source, its identity and its lock entry (`D-047`).
+    #[test]
+    fn a_replaced_source_is_read_from_the_vendor_directory() {
+        let workspace = Workspace::new("replacement");
+        workspace.package("application", "1.0.0", "std = { toolchain = true }\n");
+        let version = Version::new(0, 3, 7);
+        let entries = crate::std_library::std_entries(&version);
+        crate::store::unpack(&entries, &workspace.root.join("application/vendor/std")).unwrap();
+        workspace.write_manifest(
+            "application/.slopium/config.toml",
+            "[source.toolchain]\nreplace-with = \"vendored\"\n\n[source.vendored]\ndirectory = \"vendor\"\n",
+        );
+
+        let resolution = workspace.resolve("application").unwrap();
+        let standard = &resolution.packages["std"];
+        assert_eq!(standard.id.source, SourceId::Toolchain);
+        assert_eq!(standard.checksum, Some(std_archive(&version).unwrap().1));
+        assert_eq!(
+            standard
+                .project
+                .as_ref()
+                .map(|project| project.root.clone()),
+            Some(workspace.root.join("application/vendor/std"))
+        );
+        assert_eq!(
+            resolution.language_items,
+            crate::std_library::std_language_items()
+        );
+
+        // The whole point of the checksum: an edited copy is not the package.
+        fs::write(
+            workspace.root.join("application/vendor/std/src/option.slp"),
+            "(export Option)\n",
+        )
+        .unwrap();
+        let error = workspace.resolve("application").unwrap_err();
+        assert!(error.contains("SL1012"), "{error}");
     }
 
     /// The defect that motivated `D-035`, from the other direction: a package

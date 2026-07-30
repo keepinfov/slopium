@@ -5,13 +5,14 @@
 //! no table reordering when a dependency is added. It records paths relative to
 //! itself, so a checkout at a different absolute path locks identically.
 //!
-//! There is no `checksum` field yet. A path dependency is a working tree and
-//! hashing one would rewrite the lock on every keystroke; the bundled library is
-//! pinned by the compiler version it ships with. Checksums arrive in v0.4.2 with
-//! the content-addressed store, which is the first source that has immutable
-//! bytes to address.
+//! A package whose bytes cannot change under the lock records a `checksum` —
+//! the digest of its archive (`D-039`), which is what a vendored or stored copy
+//! is checked against before anything reads it. A path dependency records none:
+//! it is a working tree, and hashing one would rewrite the lock on every
+//! keystroke.
 
 use crate::resolve::ResolvedPackage;
+use crate::sha256::Digest;
 use crate::source::SourceId;
 use crate::version::Version;
 use std::fmt::Write as _;
@@ -21,7 +22,8 @@ use std::path::{Component, Path, PathBuf};
 pub const LOCK_FILE: &str = "Slopium.lock";
 
 /// The lockfile format version, bumped when the shape of the file changes.
-pub const LOCK_FORMAT: u32 = 1;
+/// Version 2 added `checksum`.
+pub const LOCK_FORMAT: u32 = 2;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LockedPackage {
@@ -29,6 +31,8 @@ pub struct LockedPackage {
     pub version: Version,
     pub source: String,
     pub dependencies: Vec<String>,
+    /// Absent for a working tree, which has no bytes to pin.
+    pub checksum: Option<Digest>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -64,6 +68,7 @@ impl Lockfile {
                     names.dedup();
                     names
                 },
+                checksum: package.checksum,
             })
             .collect::<Vec<_>>();
         packages.sort_by(|left, right| left.name.cmp(&right.name));
@@ -88,6 +93,9 @@ impl Lockfile {
                 quote(&package.version.to_string()),
                 quote(&package.source),
             );
+            if let Some(checksum) = &package.checksum {
+                let _ = writeln!(output, "checksum = {}", quote(&checksum.to_string()));
+            }
             if package.dependencies.is_empty() {
                 let _ = writeln!(output, "dependencies = []");
             } else {
@@ -113,7 +121,7 @@ impl Lockfile {
             .ok_or_else(|| format!("`{LOCK_FILE}` has no `version` field"))?;
         if format != i64::from(LOCK_FORMAT) {
             return Err(format!(
-                "`{LOCK_FILE}` is version {format}; this slopium writes version {LOCK_FORMAT}. Delete it to regenerate"
+                "`{LOCK_FILE}` is version {format} and this slopium writes version {LOCK_FORMAT}"
             ));
         }
 
@@ -147,11 +155,27 @@ impl Lockfile {
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
+            let checksum = match entry.get("checksum") {
+                Some(value) => Some(
+                    value
+                        .as_str()
+                        .ok_or_else(|| {
+                            format!("`{LOCK_FILE}`: package `{name}` has a non-string `checksum`")
+                        })
+                        .and_then(|text| {
+                            Digest::parse(text).map_err(|error| {
+                                format!("`{LOCK_FILE}`: package `{name}`: {error}")
+                            })
+                        })?,
+                ),
+                None => None,
+            };
             packages.push(LockedPackage {
                 name,
                 version,
                 source,
                 dependencies,
+                checksum,
             });
         }
         packages.sort_by(|left, right| left.name.cmp(&right.name));
@@ -224,6 +248,7 @@ mod tests {
             version: Version::parse(version).unwrap(),
             source: source.to_owned(),
             dependencies: dependencies.iter().map(|name| (*name).to_owned()).collect(),
+            checksum: (source == "toolchain").then(|| crate::sha256::sha256(name.as_bytes())),
         }
     }
 
@@ -262,7 +287,7 @@ mod tests {
         };
         assert_eq!(
             lock.render(),
-            "# Written by slopium. Do not edit by hand.\nversion = 1\n\n[[package]]\nname = \"std\"\nversion = \"0.3.7\"\nsource = \"toolchain\"\ndependencies = []\n"
+            "# Written by slopium. Do not edit by hand.\nversion = 2\n\n[[package]]\nname = \"std\"\nversion = \"0.3.7\"\nsource = \"toolchain\"\nchecksum = \"a7f5397443359ea76c50be82c77f1f893a060925b51a332cc5da906f83d3344e\"\ndependencies = []\n"
         );
     }
 
@@ -285,7 +310,7 @@ mod tests {
     #[test]
     fn an_unknown_source_is_refused() {
         let error = Lockfile::parse(
-            "version = 1\n\n[[package]]\nname = \"x\"\nversion = \"1.0.0\"\nsource = \"registry+https://example\"\ndependencies = []\n",
+            "version = 2\n\n[[package]]\nname = \"x\"\nversion = \"1.0.0\"\nsource = \"registry+https://example\"\ndependencies = []\n",
         )
         .unwrap_err();
         assert!(error.contains("unknown package source"), "{error}");

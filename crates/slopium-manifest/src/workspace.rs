@@ -8,8 +8,8 @@
 //! written once rather than twice with a branch between them.
 
 use crate::manifest::{
-    find_manifest, read_manifest, starting_manifest, Inheritance, Project, RawManifest,
-    WorkspaceSection, MANIFEST_FILE,
+    find_manifest, load_local_config, read_manifest, starting_manifest, Inheritance, LocalConfig,
+    Project, RawManifest, WorkspaceSection, MANIFEST_FILE,
 };
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -28,6 +28,9 @@ pub struct Workspace {
     pub members: BTreeMap<String, Project>,
     /// The member the command was invoked in, when it was invoked in one.
     pub current: Option<String>,
+    /// `.slopium/config.toml` at the root. It belongs to the checkout rather
+    /// than to a package, so in a workspace there is one of it, at the top.
+    pub config: LocalConfig,
 }
 
 impl Workspace {
@@ -196,6 +199,7 @@ pub fn load_workspace(manifest_path: Option<PathBuf>) -> Result<Workspace, Strin
         }
     }
 
+    let config = load_local_config(&root.root)?;
     Ok(Workspace {
         root: root.root,
         manifest_path: root.manifest_path,
@@ -203,6 +207,7 @@ pub fn load_workspace(manifest_path: Option<PathBuf>) -> Result<Workspace, Strin
         section,
         members,
         current,
+        config,
     })
 }
 

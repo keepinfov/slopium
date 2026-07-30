@@ -42,8 +42,18 @@ pub struct Manifest {
 pub struct Package {
     pub name: String,
     pub version: Inheritable<Version>,
-    pub entry: PathBuf,
+    /// The module a build starts from. A library has no such module — it is
+    /// entered through whichever of its modules a dependent takes from — so the
+    /// key may be omitted, and omitting it is how a package says it is one.
+    pub entry: Option<PathBuf>,
     pub source: Option<PathBuf>,
+    /// Everything the package archive holds, when the default is wrong.
+    /// Present, it is the whole answer; the manifest is always packaged.
+    #[serde(default)]
+    pub include: Vec<String>,
+    /// What the archive leaves out, on top of what it never carries.
+    #[serde(default)]
+    pub exclude: Vec<String>,
 }
 
 /// `[workspace]`: the packages that share one lock, one `target/`, and one
@@ -283,6 +293,45 @@ pub struct LocalConfig {
     pub toolchain: Toolchain,
     #[serde(default)]
     pub target: BTreeMap<String, Toolchain>,
+    /// Where a source's packages are taken from instead, keyed by the source's
+    /// name in the lockfile. Written by `slopium vendor`, and read by nobody
+    /// else — replacement is invisible to resolution on purpose (`D-047`).
+    #[serde(default)]
+    pub source: BTreeMap<String, SourceConfig>,
+}
+
+/// One `[source.<name>]` table: either a redirection or a place to redirect to.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceConfig {
+    #[serde(rename = "replace-with")]
+    pub replace_with: Option<String>,
+    /// A directory of vendored packages, one per subdirectory, named by package.
+    pub directory: Option<PathBuf>,
+}
+
+impl LocalConfig {
+    /// The directory a source's packages are vendored in, if it is replaced.
+    ///
+    /// `root` is what a relative `directory` is written against — the workspace
+    /// root, since the configuration belongs to the checkout rather than to any
+    /// one package in it.
+    pub fn replacement(&self, source: &str, root: &Path) -> Result<Option<PathBuf>, String> {
+        let Some(replacement) = self
+            .source
+            .get(source)
+            .and_then(|entry| entry.replace_with.as_deref())
+        else {
+            return Ok(None);
+        };
+        let target = self.source.get(replacement).ok_or_else(|| {
+            format!("`[source.{source}]` is replaced with `{replacement}`, which is not configured")
+        })?;
+        let directory = target.directory.as_ref().ok_or_else(|| {
+            format!("`[source.{replacement}]` names no `directory` to take packages from")
+        })?;
+        Ok(Some(root.join(directory)))
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -362,7 +411,7 @@ pub struct Project {
     pub config: LocalConfig,
     pub name: String,
     pub version: Version,
-    pub entry: PathBuf,
+    pub entry: Option<PathBuf>,
     pub source: Option<PathBuf>,
     /// `[dependencies]` with workspace inheritance applied.
     pub dependencies: BTreeMap<String, DependencySpec>,
@@ -374,21 +423,40 @@ impl Project {
         let relative = self
             .source
             .clone()
-            .or_else(|| self.entry.parent().map(std::path::Path::to_path_buf))
+            .or_else(|| {
+                self.entry
+                    .as_deref()
+                    .and_then(Path::parent)
+                    .map(std::path::Path::to_path_buf)
+            })
             .unwrap_or_else(|| PathBuf::from("src"));
         let root = self.root.join(relative);
         root.canonicalize()
             .map_err(|error| format!("cannot read source root `{}`: {error}", root.display()))
     }
 
-    pub fn entry_path(&self) -> PathBuf {
-        self.root.join(&self.entry)
+    /// The module a build of this package starts from.
+    ///
+    /// A library has none, and asking for one is a question about a package
+    /// that cannot be answered rather than a path that happens not to exist.
+    pub fn entry_path(&self) -> Result<PathBuf, String> {
+        let entry = self.entry.as_ref().ok_or_else(|| {
+            format!(
+                "`{}` declares no `entry`; it is a library and has no module to start from",
+                self.name
+            )
+        })?;
+        Ok(self.root.join(entry))
     }
 
     /// `D-015`: a package entered through `lib.slp` is a library, and a library
-    /// has no `main` to validate and no executable to link.
+    /// has no `main` to validate and no executable to link. A package that
+    /// declares no `entry` at all is the same thing said more directly.
     pub fn is_library(&self) -> bool {
-        self.entry.file_name().and_then(|name| name.to_str()) == Some("lib.slp")
+        match &self.entry {
+            None => true,
+            Some(entry) => entry.file_name().and_then(|name| name.to_str()) == Some("lib.slp"),
+        }
     }
 }
 
@@ -460,7 +528,8 @@ pub fn read_manifest(manifest_path: &Path) -> Result<RawManifest, String> {
     })
 }
 
-fn load_local_config(root: &Path) -> Result<LocalConfig, String> {
+/// Read `.slopium/config.toml` from a directory, or the defaults.
+pub fn load_local_config(root: &Path) -> Result<LocalConfig, String> {
     let config_path = root.join(".slopium/config.toml");
     if !config_path.is_file() {
         return Ok(LocalConfig::default());

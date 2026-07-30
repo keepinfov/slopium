@@ -3,11 +3,16 @@ use clap_complete::{generate, Shell};
 use serde::Deserialize;
 use slopic_core::codegen::{DEFAULT_TARGET, TARGETS};
 use slopic_core::syntax::{format_source, FormatOptions};
+use slopium_manifest::archive::{package_archive, ARCHIVE_EXTENSION};
 use slopium_manifest::lock::{Lockfile, LOCK_FILE};
-use slopium_manifest::manifest::{validate_package_name, Profile, Project};
-use slopium_manifest::resolve::{resolve_workspace, Resolution, WorkspaceResolution};
+use slopium_manifest::manifest::{load_local_config, validate_package_name, Profile, Project};
+use slopium_manifest::resolve::{
+    resolve_workspace, Resolution, ResolvedPackage, WorkspaceResolution,
+};
+use slopium_manifest::sha256::Digest;
 use slopium_manifest::source::SourceId;
-use slopium_manifest::std_library::{std_module_path, STD_MODULES};
+use slopium_manifest::std_library::{std_archive, std_module_path, STD_MODULES};
+use slopium_manifest::store::{remove_tree, Access, Store};
 use slopium_manifest::version::Version;
 use slopium_manifest::workspace::{load_workspace, Workspace};
 use std::collections::HashSet;
@@ -56,6 +61,22 @@ enum Commands {
         select: SelectArgs,
     },
     Clean(SelectArgs),
+    /// Write a package archive under `target/package` and print its digest.
+    Package {
+        #[command(flatten)]
+        resolve: ResolveArgs,
+        #[command(flatten)]
+        select: SelectArgs,
+    },
+    /// Copy every dependency that is not a directory on this machine into a
+    /// vendor directory, and redirect builds to read it from there.
+    Vendor {
+        /// Where the copies go, relative to the workspace root.
+        #[arg(long, value_name = "DIR", default_value = "vendor")]
+        dir: PathBuf,
+        #[command(flatten)]
+        resolve: ResolveArgs,
+    },
     /// Print the resolved package graph.
     Tree {
         #[command(flatten)]
@@ -145,12 +166,12 @@ impl ResolveArgs {
         self.locked || self.frozen
     }
 
-    #[allow(
-        dead_code,
-        reason = "honoured by the git and registry sources in v0.4.3 and v0.4.4"
-    )]
     fn offline(self) -> bool {
         self.offline || self.frozen
+    }
+
+    fn access(self) -> Access {
+        Access::new(self.offline())
     }
 }
 
@@ -230,6 +251,17 @@ fn main() {
         }
         Commands::Clean(select) => {
             load_workspace(cli.manifest_path).and_then(|workspace| clean(&workspace, &select))
+        }
+        Commands::Package { resolve, select } => Session::open(cli.manifest_path, resolve)
+            .and_then(|session| {
+                for project in select.all(&session.workspace)? {
+                    package(&session.workspace, project)?;
+                }
+                Ok(())
+            }),
+        Commands::Vendor { dir, resolve } => {
+            Session::open_ignoring_replacements(cli.manifest_path, resolve)
+                .and_then(|session| vendor(&session, &dir, resolve.access()))
         }
         Commands::Tree { resolve, select } => {
             Session::open(cli.manifest_path, resolve).and_then(|session| {
@@ -399,7 +431,32 @@ struct Session {
 
 impl Session {
     fn open(manifest_path: Option<PathBuf>, args: ResolveArgs) -> Result<Self, String> {
-        let workspace = load_workspace(manifest_path)?;
+        Self::load(manifest_path, args, true)
+    }
+
+    /// The workspace resolved as if nothing had been vendored.
+    ///
+    /// `vendor` is what produces the vendored copies, so it cannot insist they
+    /// are already present and intact before it will run: an edited copy would
+    /// then be unrepairable by the only command able to repair it. Replacement
+    /// changes no resolved package (`D-047`), so this reaches the same graph
+    /// and writes the same lock — only the bytes it reads differ.
+    fn open_ignoring_replacements(
+        manifest_path: Option<PathBuf>,
+        args: ResolveArgs,
+    ) -> Result<Self, String> {
+        Self::load(manifest_path, args, false)
+    }
+
+    fn load(
+        manifest_path: Option<PathBuf>,
+        args: ResolveArgs,
+        replacements: bool,
+    ) -> Result<Self, String> {
+        let mut workspace = load_workspace(manifest_path)?;
+        if !replacements {
+            workspace.config.source.clear();
+        }
         let toolchain_version = Version::parse(slopic_core::STANDARD_LIBRARY_VERSION)?;
         let resolution = resolve_workspace(&workspace, &toolchain_version)?;
         synchronize_lock(&workspace, &resolution, args)?;
@@ -957,7 +1014,7 @@ fn materialize_runtime(out_dir: &Path) -> Result<PathBuf, String> {
 }
 
 fn source_path(project: &Project) -> Result<PathBuf, String> {
-    let source = project.entry_path();
+    let source = project.entry_path()?;
     if !source.is_file() {
         return Err(format!(
             "entry source `{}` does not exist",
@@ -1008,7 +1065,14 @@ fn dependencies_of(project: &Project, resolution: &Resolution) -> Result<Depende
     let mut packages = Vec::new();
     for package in resolution.dependencies() {
         let source = match (&package.id.source, &package.project) {
-            (SourceId::Toolchain, _) => ResolvedDependencySource::Toolchain,
+            // A vendored copy of the bundled library is an ordinary directory
+            // of sources, and the compiler is handed it as one. What makes it
+            // the standard library is the language items it declares, not where
+            // the bytes came from (`D-011`).
+            (SourceId::Toolchain, Some(project)) => {
+                ResolvedDependencySource::Path(project.source_root()?)
+            }
+            (SourceId::Toolchain, None) => ResolvedDependencySource::Toolchain,
             (SourceId::Path(_), Some(project)) => {
                 ResolvedDependencySource::Path(project.source_root()?)
             }
@@ -1033,6 +1097,186 @@ fn dependencies_of(project: &Project, resolution: &Resolution) -> Result<Depende
         packages,
         language_items: resolution.language_items.clone(),
     })
+}
+
+/// The name `slopium vendor` gives the replacement source it writes.
+const VENDOR_SOURCE: &str = "vendored";
+
+/// Write a package archive and say what it hashes to.
+///
+/// The digest is the package's name for every purpose that matters — the lock
+/// records it, the store files the bytes under it, and a vendored copy is
+/// checked against it — so it is printed in `sha256sum` order, digest first, to
+/// be compared against that tool directly.
+fn package(workspace: &Workspace, project: &Project) -> Result<PathBuf, String> {
+    let (bytes, digest) = package_archive(project)?;
+    let directory = workspace.target_dir().join("package");
+    fs::create_dir_all(&directory)
+        .map_err(|error| format!("cannot create `{}`: {error}", directory.display()))?;
+    let path = directory.join(format!(
+        "{}-{}.{ARCHIVE_EXTENSION}",
+        project.name, project.version
+    ));
+    fs::write(&path, &bytes)
+        .map_err(|error| format!("cannot write `{}`: {error}", path.display()))?;
+    println!("Packaged {} v{}", project.name, project.version);
+    println!("{digest}  {}", path.display());
+    Ok(path)
+}
+
+/// Copy every dependency that is not a directory on this machine into the
+/// vendor directory, and point builds at it.
+///
+/// Only packages with immutable bytes are vendored, which is what having a
+/// checksum means: a path dependency is already a directory on this machine and
+/// copying it would only make a second one that can drift from the first.
+fn vendor(session: &Session, directory: &Path, access: Access) -> Result<(), String> {
+    let workspace = &session.workspace;
+    let root = workspace.root.join(directory);
+    let store = Store::open()?;
+    let mut vendored = Vec::new();
+
+    for package in session.resolution.packages.values() {
+        let Some(checksum) = package.checksum else {
+            continue;
+        };
+        let described = package.id.to_string();
+        if !store.holds(&checksum) {
+            let (bytes, digest) = archive_of(package)?;
+            if digest != checksum {
+                return Err(format!(
+                    "`{described}` archives to {digest}, but the resolved graph expects {checksum}"
+                ));
+            }
+            store.insert(&bytes)?;
+        }
+        // Through the store rather than around it: the copy that lands in the
+        // vendor directory is one that has already been verified against its
+        // digest and unpacked by code that refuses to write outside itself.
+        let checkout = store.checkout(&checksum, &described, access)?;
+        let destination = root.join(&package.id.name);
+        remove_tree(&destination)?;
+        copy_tree(&checkout, &destination)?;
+        println!("Vendored {described} ({checksum})");
+        vendored.push(package.id.source.config_name());
+    }
+
+    if vendored.is_empty() {
+        println!("Nothing to vendor: every dependency is already a directory on this machine.");
+        return Ok(());
+    }
+    vendored.sort_unstable();
+    vendored.dedup();
+    let name = directory
+        .to_str()
+        .ok_or_else(|| "the vendor directory is not a portable path".to_owned())?;
+    redirect_sources(workspace, &vendored, name)
+}
+
+/// Point `.slopium/config.toml` at the vendor directory.
+///
+/// The file belongs to the checkout and may already say things about the C
+/// compiler, so this appends rather than replaces — and refuses outright if
+/// sources are already configured, because guessing which half of a hand-written
+/// redirection to keep is not something to do to somebody's configuration.
+fn redirect_sources(
+    workspace: &Workspace,
+    sources: &[&str],
+    directory: &str,
+) -> Result<(), String> {
+    // Read from disk rather than from the workspace: `vendor` deliberately
+    // resolves with replacements ignored, so the copy it holds says nothing
+    // about what the file on disk contains.
+    let config = load_local_config(&workspace.root)?;
+    let configured = config.source.keys().cloned().collect::<Vec<_>>();
+    let mut wanted = sources.to_vec();
+    wanted.push(VENDOR_SOURCE);
+    wanted.sort_unstable();
+    if configured == wanted
+        && config
+            .replacement(sources[0], &workspace.root)
+            .ok()
+            .flatten()
+            .as_deref()
+            == Some(&*workspace.root.join(directory))
+    {
+        return Ok(());
+    }
+    if !configured.is_empty() {
+        return Err(format!(
+            "`.slopium/config.toml` already configures {}; edit it by hand or remove the `[source]` tables and vendor again",
+            configured
+                .iter()
+                .map(|name| format!("`[source.{name}]`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+
+    let mut text = format!(
+        "\n# Written by `slopium vendor`. Builds read these packages from `{directory}`\n\
+         # instead of the source named; delete these tables to go back.\n"
+    );
+    for source in sources {
+        text.push_str(&format!(
+            "\n[source.{source}]\nreplace-with = \"{VENDOR_SOURCE}\"\n"
+        ));
+    }
+    text.push_str(&format!(
+        "\n[source.{VENDOR_SOURCE}]\ndirectory = \"{directory}\"\n"
+    ));
+
+    let path = workspace.root.join(".slopium/config.toml");
+    let parent = path.parent().expect("a config path has a parent");
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("cannot create `{}`: {error}", parent.display()))?;
+    let existing = match fs::read_to_string(&path) {
+        Ok(existing) => existing,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(format!("cannot read `{}`: {error}", path.display())),
+    };
+    fs::write(&path, format!("{existing}{text}"))
+        .map_err(|error| format!("cannot write `{}`: {error}", path.display()))?;
+    println!("Wrote {}", path.display());
+    Ok(())
+}
+
+/// The archive of a resolved package, from wherever its bytes come from.
+fn archive_of(package: &ResolvedPackage) -> Result<(Vec<u8>, Digest), String> {
+    match &package.id.source {
+        SourceId::Toolchain => std_archive(&package.id.version),
+        SourceId::Path(path) => Err(format!(
+            "`{}` is the directory `{}`; there is nothing to fetch and nothing to pin",
+            package.id,
+            path.display()
+        )),
+    }
+}
+
+/// Copy a checked-out tree into the vendor directory, writable.
+///
+/// The store keeps its files read-only so nobody edits a package by accident;
+/// a vendored copy is part of the checkout and is left as ordinary files, which
+/// is why it is verified against its checksum on every build rather than
+/// protected by its permissions.
+fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
+    fs::create_dir_all(to).map_err(|error| format!("cannot create `{}`: {error}", to.display()))?;
+    for child in
+        fs::read_dir(from).map_err(|error| format!("cannot read `{}`: {error}", from.display()))?
+    {
+        let child = child.map_err(|error| format!("cannot read `{}`: {error}", from.display()))?;
+        let source = child.path();
+        let destination = to.join(child.file_name());
+        if source.is_dir() {
+            copy_tree(&source, &destination)?;
+            continue;
+        }
+        let bytes = fs::read(&source)
+            .map_err(|error| format!("cannot read `{}`: {error}", source.display()))?;
+        fs::write(&destination, bytes)
+            .map_err(|error| format!("cannot write `{}`: {error}", destination.display()))?;
+    }
+    Ok(())
 }
 
 /// A dependency namespace and a local module namespace cannot both be spelled
@@ -1078,7 +1322,18 @@ fn synchronize_lock(
     let path = workspace.lock_path();
     let resolved = Lockfile::from_packages(&resolution.packages, &workspace.root);
     let existing = match fs::read_to_string(&path) {
-        Ok(text) => Some(Lockfile::parse(&text)?),
+        // A lock this toolchain cannot read is still only a build product, and
+        // resolution can write a new one from the manifests alone. Saying so
+        // and carrying on beats making somebody delete a file by hand — but
+        // `--locked` asked for exactly the opposite, so there it is an error.
+        Ok(text) => match Lockfile::parse(&text) {
+            Ok(lock) => Some(lock),
+            Err(error) if args.locked() => return Err(error),
+            Err(error) => {
+                println!("Replacing {LOCK_FILE}: {error}");
+                None
+            }
+        },
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(format!("cannot read `{}`: {error}", path.display())),
     };
@@ -1554,7 +1809,13 @@ mod tests {
         };
         Session::open(Some(manifest.clone()), locked).unwrap();
 
-        fs::write(&lock, "version = 1\n").unwrap();
+        // A lock this toolchain understands and that records nothing: out of
+        // date, rather than unreadable.
+        fs::write(
+            &lock,
+            format!("version = {}\n", slopium_manifest::lock::LOCK_FORMAT),
+        )
+        .unwrap();
         let error = Session::open(Some(manifest), locked).unwrap_err();
         assert!(error.contains("out of date"), "{error}");
 

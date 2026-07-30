@@ -37,6 +37,16 @@ impl SourceId {
         matches!(self, Self::Path(_))
     }
 
+    /// How `.slopium/config.toml` names this source in a `[source.<name>]`
+    /// table. Every path package is its own directory and there is nothing to
+    /// redirect, so only the sources with fetchable bytes have a name here.
+    pub fn config_name(&self) -> &'static str {
+        match self {
+            Self::Path(_) => "path",
+            Self::Toolchain => "toolchain",
+        }
+    }
+
     /// The `source` field written to and read from the lockfile.
     pub fn to_lock_field(&self) -> String {
         match self {

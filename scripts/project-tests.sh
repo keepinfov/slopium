@@ -160,8 +160,10 @@ if [[ "$lock_first" != "$lock_second" ]]; then
   echo "project-tests: resolution rewrote an up-to-date lock" >&2
   exit 1
 fi
-# --locked refuses to update a stale lock.
-printf 'version = 1\n' >"$lock_project/Slopium.lock"
+# --locked refuses to update a stale lock. Renaming a package keeps the file
+# readable and makes it disagree with what resolution found, which is the
+# situation --locked exists for.
+sed -i 's/name = "foundation"/name = "phantom"/' "$lock_project/Slopium.lock"
 if run_manager "$lock_project/Slopium.toml" check --locked \
   >"$result_dir/locked.stdout" 2>"$result_dir/locked.stderr"; then
   echo "project-tests: --locked accepted a stale lock" >&2

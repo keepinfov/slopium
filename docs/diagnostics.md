@@ -20,6 +20,18 @@ Code families are stable:
 - `SL06xx`: compiler I/O and external toolchain;
 - `SL07xx`: internal compiler errors.
 
+`SL10xx` belongs to the project manager rather than the compiler, and is plain
+text rather than JSON — `slopium` reports one error and exits. Packaging is the
+only part of it with codes so far (`D-048`):
+
+- `SL1001`: an archive entry names a path outside the package;
+- `SL1002`: an archive entry is not a file or a directory;
+- `SL1003`: an archive holds more than one package;
+- `SL1004`: an archive is malformed;
+- `SL1010`: a stored archive does not match the digest it is filed under;
+- `SL1011`: a package is not in the store and cannot be fetched;
+- `SL1012`: a vendored copy does not match its checksum.
+
 The v0.2 package and language-core diagnostics reserve:
 
 - `SL0450`: module resolution and visibility;

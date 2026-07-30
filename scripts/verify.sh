@@ -8,6 +8,7 @@ cargo fmt --all -- --check
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 "$workspace_dir/scripts/project-tests.sh"
+"$workspace_dir/scripts/package-check.sh"
 "$workspace_dir/scripts/runtime-check.sh"
 "$workspace_dir/scripts/debug-check.sh"
 "$workspace_dir/scripts/cross-check.sh"

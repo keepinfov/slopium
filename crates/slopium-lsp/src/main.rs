@@ -670,7 +670,7 @@ fn build_workspace(
     let project = loaded.select(None, false)?[0].clone();
     let source_root = project.source_root()?;
     let entry = project
-        .entry_path()
+        .entry_path()?
         .canonicalize()
         .map_err(|error| format!("cannot resolve package entry: {error}"))?;
     let entry_module = module_from_source_path(&source_root, &entry)?;
@@ -1237,7 +1237,9 @@ fn document_requires_entry_point(uri: &str) -> bool {
     if !validates_entry_point(&project) {
         return false;
     }
-    let entry = project.entry_path();
+    let Ok(entry) = project.entry_path() else {
+        return false;
+    };
     match (path.canonicalize(), entry.canonicalize()) {
         (Ok(path), Ok(entry)) => path == entry,
         _ => path == entry,

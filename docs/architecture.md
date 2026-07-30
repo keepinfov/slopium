@@ -237,6 +237,16 @@ tests belong to the dependency: codegen emits a test body only in the object
 that owns it, so collecting a dependency's tests would leave the harness calling
 functions no object defines.
 
+A package with immutable bytes records a `checksum` in the lock — the digest of
+its archive, a ustar tar with timestamps, owners and entry order removed so that
+the same tree always hashes the same (`docs/packaging.md`). `slopium package`
+writes one; `slopium vendor` copies such packages into a vendor directory
+through the content-addressed store in `$SLOPIUM_HOME`, where an archive is
+verified before it is unpacked. A vendored copy is checked on every build by
+re-archiving it. Replacement is invisible to resolution: a replaced package
+keeps its identity, its source and its lock entry, so vendoring cannot change
+what a project resolves to.
+
 ## Runtime boundary
 
 Generated programs link a small C runtime through the stable `sl_rt_*` ABI.
