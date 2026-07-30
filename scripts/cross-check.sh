@@ -68,10 +68,15 @@ compare_program() {
   shift 3
   local -a compile=("$@")
 
-  "${compile[@]}" --profile "$profile" --output "$prefix.native" \
+  # `slopic` knows no profiles; the manager's release policy is just
+  # optimization here, and neither backend's output depends on stripping.
+  local -a opt=()
+  [ "$profile" = release ] && opt=(--optimize)
+
+  "${compile[@]}" "${opt[@]}" --output "$prefix.native" \
     >"$prefix.native.build" 2>&1 ||
     fail "$label ($profile) failed to build for the host"
-  "${compile[@]}" --profile "$profile" --target "$cross_target" --cc "$cross_cc" \
+  "${compile[@]}" "${opt[@]}" --target "$cross_target" --cc "$cross_cc" \
     --output "$prefix.cross" >"$prefix.cross.build" 2>&1 ||
     fail "$label ($profile) failed to build for $cross_target"
 

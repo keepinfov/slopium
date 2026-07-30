@@ -126,6 +126,10 @@ struct Profile {
     #[serde(rename = "opt-level")]
     opt_level: Option<u8>,
     debug: Option<bool>,
+    /// Whether to strip the linked binary. Absent means the conventional
+    /// default: off for a debug build, on otherwise — a stripped binary and a
+    /// debuggable one are opposite intents.
+    strip: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -293,8 +297,8 @@ fn create_project(name: &str, path: Option<PathBuf>) -> Result<(), String> {
     let manifest = format!(
         "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nsource = \"src\"\nentry = \"src/main.slp\"\n\n\
          [build]\ntarget = \"{DEFAULT_TARGET}\"\n\n\
-         [profile.dev]\nopt-level = 0\ndebug = true\n\n\
-         [profile.release]\nopt-level = 1\ndebug = false\n"
+         [profile.dev]\nopt-level = 0\ndebug = true\nstrip = false\n\n\
+         [profile.release]\nopt-level = 1\ndebug = false\nstrip = true\n"
     );
     let source = format!(
         "(fn main () -> i32\n  (let message \"hello from {name}\")\n  (println (& message))\n  0)\n\n\
@@ -371,7 +375,7 @@ fn check(
     command.arg(&source).arg("--source-root").arg(&source_root);
     add_dependency_args(&mut command, &dependencies);
     let status = command
-        .args(["--emit", "check", "--target", &target, "--profile", "dev"])
+        .args(["--emit", "check", "--target", &target])
         .status()
         .map_err(|error| format!("cannot start slopic: {error}"))?;
     status_result(status, "check")?;
@@ -455,8 +459,6 @@ fn build(project: &Project, args: &BuildArgs, test: bool) -> Result<PathBuf, Str
                     &target,
                     "--cc",
                     &cc,
-                    "--profile",
-                    profile_name,
                     "--codegen-module",
                     &module.name,
                 ])
@@ -464,6 +466,9 @@ fn build(project: &Project, args: &BuildArgs, test: bool) -> Result<PathBuf, Str
                 .arg(&object);
             if test {
                 command.arg("--test");
+            }
+            if optimizes(profile, profile_name) {
+                command.arg("--optimize");
             }
             if debug_info(profile, profile_name) {
                 command.arg("--debug");
@@ -480,6 +485,12 @@ fn build(project: &Project, args: &BuildArgs, test: bool) -> Result<PathBuf, Str
     let status = Command::new(&cc)
         .arg("-o")
         .arg(&artifact)
+        // The same size flags `slopic` uses for a single-file link, so a
+        // package binary and a standalone one are shrunk and stripped alike.
+        .args(slopic_core::linker_flags(strip_symbols(
+            profile,
+            profile_name,
+        )))
         .args(&objects)
         .arg(&runtime)
         .status()
@@ -977,6 +988,27 @@ fn debug_info(profile: Option<&Profile>, profile_name: &str) -> bool {
         .unwrap_or(profile_name == "dev")
 }
 
+/// Whether a profile optimizes. Any `opt-level` above zero does; the
+/// conventional default is `release` only.
+fn optimizes(profile: Option<&Profile>, profile_name: &str) -> bool {
+    profile
+        .and_then(|profile| profile.opt_level)
+        .map(|level| level > 0)
+        .unwrap_or(profile_name == "release")
+}
+
+/// Whether a profile strips the binary.
+///
+/// The default is the opposite of `debug`: a build you can debug keeps its
+/// symbols, a build you ship does not. Stripping a debug build would remove
+/// the line tables it exists to provide, so an explicit `strip = true` there
+/// is honoured but defeats `debug`.
+fn strip_symbols(profile: Option<&Profile>, profile_name: &str) -> bool {
+    profile
+        .and_then(|profile| profile.strip)
+        .unwrap_or(!debug_info(profile, profile_name))
+}
+
 fn cc_for(project: &Project, target: &str, override_cc: Option<String>) -> String {
     let normalized = target.replace('-', "_").to_ascii_uppercase();
     override_cc
@@ -1058,6 +1090,7 @@ fn cache_key(input: CacheInputs<'_>) -> Result<String, String> {
         hasher.write(&[profile.opt_level.unwrap_or_default()]);
     }
     hasher.write(&[u8::from(debug_info(input.profile, input.profile_name))]);
+    hasher.write(&[u8::from(strip_symbols(input.profile, input.profile_name))]);
     let metadata = fs::metadata(input.compiler)
         .map_err(|error| format!("cannot inspect `{}`: {error}", input.compiler.display()))?;
     hasher.write(&metadata.len().to_le_bytes());
@@ -1089,6 +1122,7 @@ fn module_cache_key(
         hasher.write(&[profile.opt_level.unwrap_or_default()]);
     }
     hasher.write(&[u8::from(debug_info(input.profile, input.profile_name))]);
+    hasher.write(&[u8::from(strip_symbols(input.profile, input.profile_name))]);
     let metadata = fs::metadata(input.compiler)
         .map_err(|error| format!("cannot inspect `{}`: {error}", input.compiler.display()))?;
     hasher.write(&metadata.len().to_le_bytes());

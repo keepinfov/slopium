@@ -140,6 +140,27 @@ Linking is still the system linker's. It is what knows where the C runtime
 lives, which dynamic loader to name, and how the platform starts a process —
 none of which is a code generation question.
 
+The link is asked to keep only what a program uses. The runtime is one C file
+of every helper the language might call, so it is compiled with a section per
+function and linked with `--gc-sections`: a program that never touches a slice
+does not carry `sl_rt_slice_*`. That only ever removes unreferenced code, so it
+is unconditional. Stripping the symbol table is a choice, because it removes
+the mangled `sl_fn_*` and runtime names a debugger needs — so it is a flag
+(`slopic --strip`), not something the compiler decides. A test body is code
+only the harness reaches, so a build without `--test` does not emit it at all,
+which is also why `sl_rt_test_result` is absent from an ordinary binary.
+`slopic` and `slopium` link through the same flag list
+(`slopic_core::linker_flags`), so a package binary and a standalone one shrink
+alike. Together these take a small program from roughly 22 KB to 14 KB on disk.
+
+`slopic` is mechanism, not policy: it has `--optimize`, `--debug`, and
+`--strip`, and no notion of a "release" — it does not decide when to optimize
+or strip, only how. The manager holds the policy. A `Slopium.toml` profile sets
+`opt-level`, `debug`, and `strip`, and `slopium` resolves each into the flag it
+passes; `strip` defaults to the opposite of `debug`, because a binary you can
+debug and one you ship are opposite intents. The build cache hashes the
+resolved answers, so flipping `strip` in the manifest rebuilds.
+
 Two things send a build back to the platform assembler. Debug information is
 one: line tables are built from the `.file` and `.loc` directives, and the
 object writer emits no DWARF. The other is `SLOPIUM_OBJECT_WRITER=external`,

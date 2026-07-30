@@ -29,7 +29,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub const COMPILER_PROTOCOL: u32 = 3;
+pub const COMPILER_PROTOCOL: u32 = 4;
 pub const RUNTIME_SOURCE: &[u8] = include_bytes!("../../../runtime/slop_rt.c");
 pub const STANDARD_LIBRARY_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -44,6 +44,10 @@ pub struct CompileOptions {
     /// Emit DWARF line tables, so a debugger can map an address back to the
     /// expression it came from.
     pub debug: bool,
+    /// Remove the symbol table from a linked executable. A mechanism, not a
+    /// policy: the compiler strips when asked and does not decide when to ask.
+    /// The manager does, from the profile — see `slopium`'s `strip_symbols`.
+    pub strip: bool,
 }
 
 impl Default for CompileOptions {
@@ -56,6 +60,7 @@ impl Default for CompileOptions {
             language_items: LanguageItems::default(),
             validate_entry_point: true,
             debug: false,
+            strip: false,
         }
     }
 }
@@ -106,6 +111,29 @@ pub struct CompilerInfo {
     pub protocol: u32,
     pub targets: &'static [&'static str],
     pub standard_library: &'static str,
+}
+
+/// The linker flags that shrink an executable, shared by `slopic`'s own link
+/// and `slopium`'s.
+///
+/// `slopium` links the package objects itself rather than through `slopic`, so
+/// the two would otherwise each carry their own copy of this list and be free
+/// to drift. One function means a program built either way is the same size.
+///
+/// `--gc-sections`, paired with the per-function sections the runtime is
+/// compiled with, drops every helper nothing reaches — it only ever removes
+/// unreferenced code, so it is unconditional. Stripping is a choice, because it
+/// removes the symbol table a debugger needs, so it is the caller's to make.
+pub fn linker_flags(strip: bool) -> Vec<&'static str> {
+    let mut flags = vec![
+        "-ffunction-sections",
+        "-fdata-sections",
+        "-Wl,--gc-sections",
+    ];
+    if strip {
+        flags.push("-Wl,--strip-all");
+    }
+    flags
 }
 
 pub fn compiler_info() -> CompilerInfo {
@@ -704,6 +732,11 @@ fn native_artifact(
             write_new(file, &generated, RUNTIME_SOURCE)?;
             &generated
         };
+        // The runtime is one C file of every helper the language might call,
+        // and most programs call a handful. The shared flags put each function
+        // in its own section and let the linker drop what nothing reaches, then
+        // strip the symbol table when the caller asked for it.
+        command.args(linker_flags(request.options.strip));
         command.arg(&input_path).arg(runtime);
     }
     let result = command.output().map_err(|error| {

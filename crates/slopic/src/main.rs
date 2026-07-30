@@ -38,12 +38,19 @@ struct Cli {
     #[arg(long)]
     codegen_module: Option<String>,
 
-    #[arg(long, value_enum, default_value = "dev")]
-    profile: Profile,
+    /// Run the optimization pipeline. `slopic` knows nothing about "profiles":
+    /// the manager decides that a release build optimizes and passes this.
+    #[arg(long)]
+    optimize: bool,
 
     /// Emit DWARF line tables so a debugger can map addresses to source.
     #[arg(long)]
     debug: bool,
+
+    /// Strip the symbol table from a linked executable. Mutually exclusive in
+    /// practice with `--debug`, which needs the symbols it would remove.
+    #[arg(long)]
+    strip: bool,
 
     #[arg(long)]
     runtime: Option<PathBuf>,
@@ -73,12 +80,6 @@ enum Emit {
 enum DiagnosticFormat {
     Human,
     Json,
-}
-
-#[derive(Clone, Copy, ValueEnum)]
-enum Profile {
-    Dev,
-    Release,
 }
 
 fn main() {
@@ -175,11 +176,12 @@ fn main() {
         options: CompileOptions {
             target: cli.target,
             test_harness: cli.test,
-            optimize: matches!(cli.profile, Profile::Release),
+            optimize: cli.optimize,
             codegen_module: cli.codegen_module,
             language_items,
             validate_entry_point: true,
             debug: cli.debug,
+            strip: cli.strip,
         },
         runtime: cli.runtime,
         cc: cli.cc,

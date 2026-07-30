@@ -259,8 +259,12 @@ impl<'a> Generator<'a> {
         {
             self.function(function, false);
         }
-        for test in self.module.tests.iter().filter(|test| test.emit) {
-            self.function(&test.function, true);
+        // Tests belong to the harness build only; see the note in the x86-64
+        // backend. Without one, a test body is a function nothing calls.
+        if self.options.test_harness {
+            for test in self.module.tests.iter().filter(|test| test.emit) {
+                self.function(&test.function, true);
+            }
         }
         // Generated glue from here on. It writes no location and inherits the
         // last row, for the reason recorded in `D-023`.
@@ -302,7 +306,7 @@ impl<'a> Generator<'a> {
                 self.module
                     .tests
                     .iter()
-                    .filter(|test| test.emit)
+                    .filter(|test| test.emit && self.options.test_harness)
                     .map(|test| &test.function),
             )
         {
@@ -316,8 +320,10 @@ impl<'a> Generator<'a> {
                 }
             }
         }
-        for test in &self.module.tests {
-            self.intern(&test.name);
+        if self.options.test_harness {
+            for test in &self.module.tests {
+                self.intern(&test.name);
+            }
         }
     }
 

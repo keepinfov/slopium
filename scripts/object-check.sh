@@ -86,12 +86,14 @@ check_target() {
 
   for source in "${programs[@]}"; do
     for profile in dev release; do
-      local stem
+      local stem opt
       stem="$scratch/$(echo "$source" | tr '/' '_').$target.$profile"
+      opt=()
+      [ "$profile" = release ] && opt=(--optimize)
 
-      "$slopic" --emit asm --target "$target" --profile "$profile" \
+      "$slopic" --emit asm --target "$target" "${opt[@]}" \
         -o "$stem.s" "$source" >/dev/null
-      "$slopic" --emit obj --target "$target" --profile "$profile" \
+      "$slopic" --emit obj --target "$target" "${opt[@]}" \
         -o "$stem.ours.o" "$source" >/dev/null
       "$assembler" -o "$stem.gas.o" "$stem.s"
 

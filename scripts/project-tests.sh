@@ -107,7 +107,7 @@ assert_patterns \
   <(printf '%s\n' "$host_target (installed, default)" "$cross_target (installed)") \
   "$result_dir/targets.stdout"
 env SLOPIC="$compiler" "$manager" compiler >"$result_dir/compiler.stdout"
-assert_patterns <(printf '%s\n' '"protocol": 3') "$result_dir/compiler.stdout"
+assert_patterns <(printf '%s\n' '"protocol": 4') "$result_dir/compiler.stdout"
 
 generated_project="$result_dir/generated-project"
 env SLOPIC="$compiler" "$manager" new generated-project --path "$generated_project" \
@@ -149,7 +149,7 @@ mkdir -p "$emit_dir"
 "$compiler" "$basic_source" --source-root "$basic_project/src" \
   --emit obj --output "$emit_dir/basics-object.o"
 "$compiler" "$basic_source" --source-root "$basic_project/src" \
-  --emit exe --profile release --output "$emit_dir/basics"
+  --emit exe --optimize --strip --output "$emit_dir/basics"
 "$emit_dir/basics" >"$emit_dir/basics.stdout"
 if ! cmp --silent "$basic_project/expected.stdout" "$emit_dir/basics.stdout"; then
   echo "project-tests: direct slopic executable output mismatch" >&2
@@ -192,6 +192,29 @@ if command -v readelf >/dev/null 2>&1; then
     exit 1
   fi
   echo "project-tests: dev builds are debuggable and release builds are not ... ok"
+
+  # A release build keeps no symbol table: the mangled `sl_fn_*` and runtime
+  # names are stripped, both for size and so the binary is not trivially read.
+  # A dev build keeps them, because a debugger needs them and stripping would
+  # take the line table with it.
+  if readelf -sW "$basic_project/target/$host_target/release/basics" 2>/dev/null |
+    grep -qE 'sl_(fn|rt|test|drop|clone)_'; then
+    echo "project-tests: a release build still carries its internal symbols" >&2
+    exit 1
+  fi
+  if ! readelf -sW "$basic_project/target/$host_target/dev/basics" 2>/dev/null |
+    grep -qE 'sl_fn_'; then
+    echo "project-tests: a dev build lost the symbols a debugger needs" >&2
+    exit 1
+  fi
+  # And nothing a program never calls is dragged along: `basics` touches no
+  # list, so the linker must have dropped the list runtime.
+  if readelf -sW "$basic_project/target/$host_target/dev/basics" 2>/dev/null |
+    grep -q 'sl_rt_list_'; then
+    echo "project-tests: an unused runtime helper survived --gc-sections" >&2
+    exit 1
+  fi
+  echo "project-tests: release binaries are stripped and unused helpers dropped ... ok"
 else
   echo "project-tests: readelf not found; debug-section check skipped" >&2
 fi

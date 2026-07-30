@@ -330,8 +330,14 @@ impl<'a> Generator<'a> {
         {
             self.function(function, false);
         }
-        for test in self.module.tests.iter().filter(|test| test.emit) {
-            self.function(&test.function, true);
+        // A test is code only the harness calls, so a build without one has no
+        // reason to carry it. Emitting the bodies anyway left every `sl_test_*`
+        // function — and, through it, `sl_rt_test_result` — sitting dead in an
+        // ordinary release binary.
+        if self.options.test_harness {
+            for test in self.module.tests.iter().filter(|test| test.emit) {
+                self.function(&test.function, true);
+            }
         }
         // Everything past this point is generated glue — clone/drop helpers,
         // the entry wrapper, the panic trampolines — and emits no location of
@@ -375,7 +381,7 @@ impl<'a> Generator<'a> {
                 self.module
                     .tests
                     .iter()
-                    .filter(|test| test.emit)
+                    .filter(|test| test.emit && self.options.test_harness)
                     .map(|test| &test.function),
             )
         {
@@ -389,8 +395,12 @@ impl<'a> Generator<'a> {
                 }
             }
         }
-        for test in &self.module.tests {
-            self.intern(&test.name);
+        // The test name is what the harness prints; without a harness there is
+        // nothing to print it, so the string need not exist either.
+        if self.options.test_harness {
+            for test in &self.module.tests {
+                self.intern(&test.name);
+            }
         }
     }
 
@@ -2198,6 +2208,44 @@ mod tests {
         assert!(
             assembly.contains(".loc 2 3 "),
             "`main` is attributed to main.slp line 3:\n{assembly}"
+        );
+    }
+
+    /// A test body is code only the harness reaches, so a build without one
+    /// must not carry it — nor the runtime entry it calls, which the linker
+    /// then drops because nothing else refers to it.
+    #[test]
+    fn a_test_reaches_the_binary_only_through_the_harness() {
+        let source = "\
+(fn double ((n i64)) -> i64 (* n 2))
+
+(test \"doubling\"
+  (= (double 3) 6))
+
+(fn main () -> i32 0)";
+
+        let plain = compile_to_assembly("t.slp", source, &CompileOptions::default()).unwrap();
+        assert!(
+            !plain.contains("sl_test_"),
+            "an ordinary build emitted a test body:\n{plain}"
+        );
+        assert!(
+            !plain.contains("sl_rt_test_result"),
+            "an ordinary build kept the test-reporting entry:\n{plain}"
+        );
+
+        let harness = compile_to_assembly(
+            "t.slp",
+            source,
+            &CompileOptions {
+                test_harness: true,
+                ..CompileOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            harness.contains("sl_test_") && harness.contains("sl_rt_test_result"),
+            "a --test build lost its test:\n{harness}"
         );
     }
 }
