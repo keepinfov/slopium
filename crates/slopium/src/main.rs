@@ -130,6 +130,9 @@ struct Profile {
     /// default: off for a debug build, on otherwise — a stripped binary and a
     /// debuggable one are opposite intents.
     strip: Option<bool>,
+    /// `"message"` (default) prints the reason a trap aborted; `"abort"` exits
+    /// silently and leaves no error strings in the binary.
+    panic: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -297,8 +300,8 @@ fn create_project(name: &str, path: Option<PathBuf>) -> Result<(), String> {
     let manifest = format!(
         "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nsource = \"src\"\nentry = \"src/main.slp\"\n\n\
          [build]\ntarget = \"{DEFAULT_TARGET}\"\n\n\
-         [profile.dev]\nopt-level = 0\ndebug = true\nstrip = false\n\n\
-         [profile.release]\nopt-level = 1\ndebug = false\nstrip = true\n"
+         [profile.dev]\nopt-level = 0\ndebug = true\nstrip = false\npanic = \"message\"\n\n\
+         [profile.release]\nopt-level = 1\ndebug = false\nstrip = true\npanic = \"message\"\n"
     );
     let source = format!(
         "(fn main () -> i32\n  (let message \"hello from {name}\")\n  (println (& message))\n  0)\n\n\
@@ -473,6 +476,9 @@ fn build(project: &Project, args: &BuildArgs, test: bool) -> Result<PathBuf, Str
             if debug_info(profile, profile_name) {
                 command.arg("--debug");
             }
+            if panic_abort(profile) {
+                command.arg("--panic-abort");
+            }
             let status = command
                 .status()
                 .map_err(|error| format!("cannot start slopic: {error}"))?;
@@ -487,10 +493,10 @@ fn build(project: &Project, args: &BuildArgs, test: bool) -> Result<PathBuf, Str
         .arg(&artifact)
         // The same size flags `slopic` uses for a single-file link, so a
         // package binary and a standalone one are shrunk and stripped alike.
-        .args(slopic_core::linker_flags(strip_symbols(
-            profile,
-            profile_name,
-        )))
+        .args(slopic_core::cc_flags(
+            strip_symbols(profile, profile_name),
+            panic_abort(profile),
+        ))
         .args(&objects)
         .arg(&runtime)
         .status()
@@ -1009,6 +1015,15 @@ fn strip_symbols(profile: Option<&Profile>, profile_name: &str) -> bool {
         .unwrap_or(!debug_info(profile, profile_name))
 }
 
+/// Whether a profile aborts on a trap without a message. The default is to keep
+/// the message: a silent crash is a worse default than a few bytes of string.
+fn panic_abort(profile: Option<&Profile>) -> bool {
+    profile
+        .and_then(|profile| profile.panic.as_deref())
+        .map(|mode| mode == "abort")
+        .unwrap_or(false)
+}
+
 fn cc_for(project: &Project, target: &str, override_cc: Option<String>) -> String {
     let normalized = target.replace('-', "_").to_ascii_uppercase();
     override_cc
@@ -1091,6 +1106,7 @@ fn cache_key(input: CacheInputs<'_>) -> Result<String, String> {
     }
     hasher.write(&[u8::from(debug_info(input.profile, input.profile_name))]);
     hasher.write(&[u8::from(strip_symbols(input.profile, input.profile_name))]);
+    hasher.write(&[u8::from(panic_abort(input.profile))]);
     let metadata = fs::metadata(input.compiler)
         .map_err(|error| format!("cannot inspect `{}`: {error}", input.compiler.display()))?;
     hasher.write(&metadata.len().to_le_bytes());
@@ -1123,6 +1139,7 @@ fn module_cache_key(
     }
     hasher.write(&[u8::from(debug_info(input.profile, input.profile_name))]);
     hasher.write(&[u8::from(strip_symbols(input.profile, input.profile_name))]);
+    hasher.write(&[u8::from(panic_abort(input.profile))]);
     let metadata = fs::metadata(input.compiler)
         .map_err(|error| format!("cannot inspect `{}`: {error}", input.compiler.display()))?;
     hasher.write(&metadata.len().to_le_bytes());

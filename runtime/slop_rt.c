@@ -29,15 +29,32 @@ typedef struct {
 static int32_t sl_argc = 0;
 static char **sl_argv = NULL;
 
+/* A message-less abort, for `panic = "abort"` builds. The generated
+ * trampolines call this instead of `sl_rt_panic`, and the runtime's own error
+ * paths route through it (see `RT_FAIL`), so a stripped-down binary carries no
+ * error strings and does not pull in `fprintf`. */
+_Noreturn void sl_rt_abort(void) {
+    exit(101);
+}
+
 _Noreturn void sl_rt_panic(const char *message) {
     fprintf(stderr, "slopium runtime error: %s\n", message);
     exit(101);
 }
 
+/* The runtime's internal failures. In the default build this is `sl_rt_panic`
+ * with a message; under `-DSLOPIUM_PANIC_ABORT` it drops the message at the
+ * call site, so the literal never reaches the binary. */
+#ifdef SLOPIUM_PANIC_ABORT
+#define RT_FAIL(message) sl_rt_abort()
+#else
+#define RT_FAIL(message) sl_rt_panic(message)
+#endif
+
 static void *sl_checked_alloc(uint64_t size) {
     void *memory = malloc((size_t)size);
     if (memory == NULL && size != 0) {
-        sl_rt_panic("allocation failed");
+        RT_FAIL("allocation failed");
     }
     return memory;
 }
@@ -52,7 +69,7 @@ void sl_rt_free(void *memory) {
 
 SlString *sl_rt_string_new(const char *bytes, uint64_t len) {
     if (len == UINT64_MAX || len + 1 > (uint64_t)SIZE_MAX) {
-        sl_rt_panic("string length overflow");
+        RT_FAIL("string length overflow");
     }
     SlString *string = sl_checked_alloc(sizeof(SlString));
     string->ptr = sl_checked_alloc(len + 1);
@@ -90,15 +107,15 @@ SlList *sl_rt_list_new(uint64_t elem_size,
 void sl_rt_list_push(SlList *list, const void *element) {
     if (list->len == list->cap) {
         if (list->cap > UINT64_MAX / 2) {
-            sl_rt_panic("list capacity overflow");
+            RT_FAIL("list capacity overflow");
         }
         uint64_t next_cap = list->cap == 0 ? 4 : list->cap * 2;
         if (list->elem_size != 0 && next_cap > (uint64_t)SIZE_MAX / list->elem_size) {
-            sl_rt_panic("list capacity overflow");
+            RT_FAIL("list capacity overflow");
         }
         void *next = realloc(list->ptr, (size_t)(next_cap * list->elem_size));
         if (next == NULL) {
-            sl_rt_panic("allocation failed");
+            RT_FAIL("allocation failed");
         }
         list->ptr = next;
         list->cap = next_cap;
@@ -113,14 +130,14 @@ uint64_t sl_rt_list_len(const SlList *list) {
 
 void *sl_rt_list_get(const SlList *list, uint64_t index) {
     if (index >= list->len) {
-        sl_rt_panic("list index out of bounds");
+        RT_FAIL("list index out of bounds");
     }
     return list->ptr + index * list->elem_size;
 }
 
 uint64_t sl_rt_list_pop(SlList *list) {
     if (list->len == 0) {
-        sl_rt_panic("pop from empty list");
+        RT_FAIL("pop from empty list");
     }
     list->len -= 1;
     uint64_t value = 0;
@@ -138,7 +155,7 @@ uint64_t sl_rt_list_try_pop(SlList *list, uint64_t *output) {
 
 uint64_t sl_rt_list_remove(SlList *list, uint64_t index) {
     if (index >= list->len) {
-        sl_rt_panic("list index out of bounds");
+        RT_FAIL("list index out of bounds");
     }
     uint64_t value = 0;
     unsigned char *element = list->ptr + index * list->elem_size;
@@ -170,7 +187,7 @@ SlList *sl_rt_list_clone(const SlList *source) {
 
 SlSlice *sl_rt_slice_new(const SlList *source, uint64_t start, uint64_t end) {
     if (start > end || end > source->len) {
-        sl_rt_panic("slice range out of bounds");
+        RT_FAIL("slice range out of bounds");
     }
     SlSlice *slice = sl_checked_alloc(sizeof(SlSlice));
     slice->len = end - start;
@@ -191,7 +208,7 @@ uint64_t sl_rt_slice_len(const SlSlice *slice) {
 
 void *sl_rt_slice_get(const SlSlice *slice, uint64_t index) {
     if (index >= slice->len) {
-        sl_rt_panic("slice index out of bounds");
+        RT_FAIL("slice index out of bounds");
     }
     return slice->ptr + index * slice->elem_size;
 }
@@ -236,20 +253,20 @@ void sl_rt_print_i64(int64_t value) {
 int64_t sl_rt_read_i64(void) {
     char buffer[256];
     if (fgets(buffer, sizeof(buffer), stdin) == NULL) {
-        sl_rt_panic("expected an integer on stdin");
+        RT_FAIL("expected an integer on stdin");
     }
 
     errno = 0;
     char *end = NULL;
     long long value = strtoll(buffer, &end, 10);
     if (errno != 0 || end == buffer) {
-        sl_rt_panic("invalid i64 on stdin");
+        RT_FAIL("invalid i64 on stdin");
     }
     while (*end != '\0' && isspace((unsigned char)*end)) {
         end += 1;
     }
     if (*end != '\0') {
-        sl_rt_panic("invalid trailing data after i64");
+        RT_FAIL("invalid trailing data after i64");
     }
     return (int64_t)value;
 }
@@ -263,13 +280,13 @@ SlString *sl_rt_read_line(void) {
         if (length + 1 >= capacity) {
             if (capacity > (uint64_t)SIZE_MAX / 2) {
                 free(buffer);
-                sl_rt_panic("line is too long");
+                RT_FAIL("line is too long");
             }
             capacity *= 2;
             void *next = realloc(buffer, (size_t)capacity);
             if (next == NULL) {
                 free(buffer);
-                sl_rt_panic("allocation failed");
+                RT_FAIL("allocation failed");
             }
             buffer = next;
         }
@@ -277,7 +294,7 @@ SlString *sl_rt_read_line(void) {
     }
     if (value == EOF && length == 0) {
         free(buffer);
-        sl_rt_panic("expected a line on stdin");
+        RT_FAIL("expected a line on stdin");
     }
     if (length > 0 && buffer[length - 1] == '\r') {
         length -= 1;
@@ -297,13 +314,13 @@ int64_t sl_rt_parse_i64(const SlString *text) {
     char *end = NULL;
     long long value = strtoll(cursor, &end, 10);
     if (errno == ERANGE || end == cursor) {
-        sl_rt_panic("invalid i64");
+        RT_FAIL("invalid i64");
     }
     while (end < limit && isspace((unsigned char)*end)) {
         end += 1;
     }
     if (end != limit) {
-        sl_rt_panic("invalid trailing data after i64");
+        RT_FAIL("invalid trailing data after i64");
     }
     return (int64_t)value;
 }
@@ -312,11 +329,11 @@ SlString *sl_rt_env(const SlString *name) {
     // Every other string operation is length-based, but getenv stops at the
     // first NUL. Reject the mismatch instead of silently looking up a prefix.
     if (memchr(name->ptr, '\0', (size_t)name->len) != NULL) {
-        sl_rt_panic("environment variable name contains a NUL byte");
+        RT_FAIL("environment variable name contains a NUL byte");
     }
     const char *value = getenv(name->ptr);
     if (value == NULL) {
-        sl_rt_panic("required environment variable is not set");
+        RT_FAIL("required environment variable is not set");
     }
     return sl_rt_string_new(value, (uint64_t)strlen(value));
 }
@@ -332,7 +349,7 @@ int64_t sl_rt_args_len(void) {
 
 SlString *sl_rt_arg(int64_t index) {
     if (index < 0 || index >= sl_rt_args_len()) {
-        sl_rt_panic("process argument index out of bounds");
+        RT_FAIL("process argument index out of bounds");
     }
     const char *value = sl_argv[index + 1];
     return sl_rt_string_new(value, (uint64_t)strlen(value));

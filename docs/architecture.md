@@ -148,18 +148,34 @@ is unconditional. Stripping the symbol table is a choice, because it removes
 the mangled `sl_fn_*` and runtime names a debugger needs — so it is a flag
 (`slopic --strip`), not something the compiler decides. A test body is code
 only the harness reaches, so a build without `--test` does not emit it at all,
-which is also why `sl_rt_test_result` is absent from an ordinary binary.
-`slopic` and `slopium` link through the same flag list
-(`slopic_core::linker_flags`), so a package binary and a standalone one shrink
-alike. Together these take a small program from roughly 22 KB to 14 KB on disk.
+which is also why `sl_rt_test_result` is absent from an ordinary binary. The two
+trap messages are emitted the same way: `"division by zero"` and `"integer
+overflow"` are written only when a check can actually reach them, so a program
+with no division carries neither string nor trampoline. Which trap a function's
+arithmetic can reach is decided once, in `lowering::trap_usage`, so the two
+backends cannot disagree about it (`D-025`). `slopic` and `slopium` link through
+the same flag list (`slopic_core::cc_flags`), so a package binary and a
+standalone one shrink alike. Together these take a small program from roughly
+22 KB to 14 KB on disk.
 
-`slopic` is mechanism, not policy: it has `--optimize`, `--debug`, and
-`--strip`, and no notion of a "release" — it does not decide when to optimize
-or strip, only how. The manager holds the policy. A `Slopium.toml` profile sets
-`opt-level`, `debug`, and `strip`, and `slopium` resolves each into the flag it
-passes; `strip` defaults to the opposite of `debug`, because a binary you can
-debug and one you ship are opposite intents. The build cache hashes the
-resolved answers, so flipping `strip` in the manifest rebuilds.
+`slopic` is mechanism, not policy: it has `--optimize`, `--debug`, `--strip`,
+and `--panic-abort`, and no notion of a "release" — it does not decide when to
+optimize, strip, or drop panic messages, only how. The manager holds the policy.
+A `Slopium.toml` profile sets `opt-level`, `debug`, `strip`, and `panic`, and
+`slopium` resolves each into the flag it passes; `strip` defaults to the
+opposite of `debug`, because a binary you can debug and one you ship are opposite
+intents. The build cache hashes the resolved answers, so flipping any of them in
+the manifest rebuilds.
+
+`panic = "abort"` is the one that removes checks' *messages* without removing
+the checks. A trap still fires — the bounds, the overflow, the zero divisor are
+all still tested — but the trampoline calls a message-less `sl_rt_abort` and the
+runtime is compiled with `-DSLOPIUM_PANIC_ABORT`, which routes its own failures
+through the same bare exit. The result carries no error strings and does not
+pull in `fprintf`; it also says nothing when it dies, which is why the default
+is `"message"`. Removing a *check* is never on the table: a skipped bounds or
+allocation test trades a few bytes for undefined behaviour, which no build
+profile is allowed to ask for.
 
 Two things send a build back to the platform assembler. Debug information is
 one: line tables are built from the `.file` and `.loc` directives, and the

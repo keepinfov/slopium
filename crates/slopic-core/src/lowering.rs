@@ -134,6 +134,55 @@ pub fn is_pointer_like(ty: &Type) -> bool {
     )
 }
 
+/// Which panic trampolines the trapping arithmetic in a set of functions can
+/// actually reach.
+///
+/// The two trap messages and their trampolines used to be emitted by every
+/// program, whether or not it could trap. A program with no division carried a
+/// `"division by zero"` string it could never reach. This says what is really
+/// used, so a backend emits only that. It lives here because both backends must
+/// answer it identically — a string one emits and the other omits would be a
+/// difference the cross-backend suite has to chase (`D-025`).
+///
+/// Integer add, subtract and multiply check for overflow; integer division
+/// checks for a zero divisor *and* for the most-negative-over-`-1` overflow, so
+/// it reaches both. Float arithmetic and comparisons trap on nothing.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TrapUsage {
+    pub overflow: bool,
+    pub div_zero: bool,
+}
+
+pub fn trap_usage<'a>(functions: impl Iterator<Item = &'a MirFunction>) -> TrapUsage {
+    use crate::mir::BinaryOp;
+    let mut usage = TrapUsage::default();
+    for function in functions {
+        for instruction in function
+            .blocks
+            .iter()
+            .flat_map(|block| block.instructions())
+        {
+            if let Instruction::Binary { op, ty, .. } = instruction {
+                if !ty.is_integer() {
+                    continue;
+                }
+                match op {
+                    BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul => usage.overflow = true,
+                    BinaryOp::Div => {
+                        usage.overflow = true;
+                        usage.div_zero = true;
+                    }
+                    BinaryOp::Less | BinaryOp::Greater | BinaryOp::Equal => {}
+                }
+            }
+        }
+        if usage.overflow && usage.div_zero {
+            break;
+        }
+    }
+    usage
+}
+
 /// Locals whose frame address is handed to something else, and which therefore
 /// cannot live in a register (`D-022`).
 ///

@@ -606,6 +606,7 @@ fn c_caller_agrees_with_slopium_stack_parameter_layout() {
             test_harness: false,
             emit_entrypoint: false,
             debug: None,
+            panic_abort: false,
         },
     )
     .unwrap();

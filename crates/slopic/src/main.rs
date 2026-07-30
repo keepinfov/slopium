@@ -47,6 +47,10 @@ struct Cli {
     #[arg(long)]
     debug: bool,
 
+    /// Abort on a trap without printing a message, and emit no panic strings.
+    #[arg(long)]
+    panic_abort: bool,
+
     /// Strip the symbol table from a linked executable. Mutually exclusive in
     /// practice with `--debug`, which needs the symbols it would remove.
     #[arg(long)]
@@ -181,6 +185,7 @@ fn main() {
             language_items,
             validate_entry_point: true,
             debug: cli.debug,
+            panic_abort: cli.panic_abort,
             strip: cli.strip,
         },
         runtime: cli.runtime,

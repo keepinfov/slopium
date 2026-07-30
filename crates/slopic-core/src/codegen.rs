@@ -5,7 +5,7 @@ use crate::diagnostic::{codes, CompileResult, Diagnostic, SourceMap, Span};
 use crate::lowering::{
     address_taken, clone_function, drop_function, enum_clone_size, enum_clone_symbol,
     enum_drop_symbol, enum_size, function_symbol, is_pointer_like, struct_clone_symbol,
-    struct_drop_symbol, struct_size, Argument, Step, Tail,
+    struct_drop_symbol, struct_size, trap_usage, Argument, Step, Tail, TrapUsage,
 };
 use crate::mir::{BasicBlock, BinaryOp, Instruction, LocalId, MirFunction, MirModule, Terminator};
 use crate::regalloc::{allocate, Allocation, Location};
@@ -209,6 +209,9 @@ pub struct CodegenOptions {
     /// emits no `.file` or `.loc` at all, so assembly is exactly what it was
     /// before debug information existed.
     pub debug: Option<SourceMap>,
+    /// Whether a trap aborts without a message. The trampolines then call
+    /// `sl_rt_abort` and carry no string, so nothing names the panic messages.
+    pub panic_abort: bool,
 }
 
 impl Default for CodegenOptions {
@@ -217,6 +220,7 @@ impl Default for CodegenOptions {
             target: DEFAULT_TARGET.into(),
             test_harness: false,
             emit_entrypoint: true,
+            panic_abort: false,
             debug: None,
         }
     }
@@ -315,8 +319,18 @@ impl<'a> Generator<'a> {
         self.asm.push(Item::Syntax(".intel_syntax noprefix"));
         self.file_table();
         self.asm.push(Item::Section(Section::RoData));
-        self.byte_string(".Lsl_panic_div_zero", b"division by zero");
-        self.byte_string(".Lsl_panic_overflow", b"integer overflow");
+        let traps = self.trap_usage();
+        // Only the messages a check can actually reach: a program with no
+        // division carries no "division by zero". `panic = "abort"` reaches
+        // none of them, because the trampolines then carry no message.
+        if !self.options.panic_abort {
+            if traps.div_zero {
+                self.byte_string(".Lsl_panic_div_zero", b"division by zero");
+            }
+            if traps.overflow {
+                self.byte_string(".Lsl_panic_overflow", b"integer overflow");
+            }
+        }
         for (label, value) in self.strings.clone() {
             self.byte_string(&label, value.as_bytes());
         }
@@ -360,7 +374,7 @@ impl<'a> Generator<'a> {
         } else if self.options.emit_entrypoint {
             self.program_entrypoint();
         }
-        self.runtime_panic_trampolines();
+        self.runtime_panic_trampolines(traps);
         self.asm.push(Item::Section(Section::GnuStack));
 
         if self.diagnostics.is_empty() {
@@ -1425,23 +1439,50 @@ impl<'a> Generator<'a> {
         self.asm.push(Item::Size("main".into()));
     }
 
-    fn runtime_panic_trampolines(&mut self) {
-        self.asm
-            .push(Item::Label(".Lsl_panic_div_zero_trampoline".into()));
-        self.inst(Inst::Lea(
-            Reg("rdi"),
-            Operand::Rip(".Lsl_panic_div_zero".into()),
-        ));
-        self.inst(Inst::Call("sl_rt_panic".into()));
-        self.inst(Inst::Ud2);
-        self.asm
-            .push(Item::Label(".Lsl_panic_overflow_trampoline".into()));
-        self.inst(Inst::Lea(
-            Reg("rdi"),
-            Operand::Rip(".Lsl_panic_overflow".into()),
-        ));
-        self.inst(Inst::Call("sl_rt_panic".into()));
-        self.inst(Inst::Ud2);
+    fn runtime_panic_trampolines(&mut self, traps: TrapUsage) {
+        for (used, trampoline, message) in [
+            (
+                traps.div_zero,
+                ".Lsl_panic_div_zero_trampoline",
+                ".Lsl_panic_div_zero",
+            ),
+            (
+                traps.overflow,
+                ".Lsl_panic_overflow_trampoline",
+                ".Lsl_panic_overflow",
+            ),
+        ] {
+            if !used {
+                continue;
+            }
+            self.asm.push(Item::Label(trampoline.into()));
+            if self.options.panic_abort {
+                // No message to load, and a distinct entry that just exits, so
+                // the message strings can be absent from the binary entirely.
+                self.inst(Inst::Call("sl_rt_abort".into()));
+            } else {
+                self.inst(Inst::Lea(Reg("rdi"), Operand::Rip(message.into())));
+                self.inst(Inst::Call("sl_rt_panic".into()));
+            }
+            self.inst(Inst::Ud2);
+        }
+    }
+
+    /// The panic trampolines this program's arithmetic can reach.
+    fn trap_usage(&self) -> TrapUsage {
+        trap_usage(
+            self.module
+                .functions
+                .iter()
+                .filter(|function| function.emit)
+                .chain(
+                    self.module
+                        .tests
+                        .iter()
+                        .filter(|test| test.emit && self.options.test_harness)
+                        .map(|test| &test.function),
+                ),
+        )
     }
 
     fn struct_clone_helper(&mut self, name: &str, fields: &[(String, Type)]) {
@@ -2246,6 +2287,57 @@ mod tests {
         assert!(
             harness.contains("sl_test_") && harness.contains("sl_rt_test_result"),
             "a --test build lost its test:\n{harness}"
+        );
+    }
+
+    /// A program carries a trap message only when a check can reach it.
+    #[test]
+    fn a_program_carries_only_the_trap_messages_it_can_reach() {
+        let assembly = |source: &str| {
+            compile_to_assembly("t.slp", source, &CompileOptions::default()).unwrap()
+        };
+
+        // No arithmetic at all: neither trap. The parameters keep the operands
+        // out of the constant folder, which would otherwise answer at compile
+        // time and emit no check.
+        let none = assembly("(fn main () -> i32 0)");
+        assert!(!none.contains(".Lsl_panic_overflow:"), "{none}");
+        assert!(!none.contains(".Lsl_panic_div_zero:"), "{none}");
+
+        // Addition overflows but never divides: overflow only.
+        let adds = assembly("(fn add ((a i64) (b i64)) -> i64 (+ a b))\n(fn main () -> i32 0)");
+        assert!(adds.contains(".Lsl_panic_overflow:"), "{adds}");
+        assert!(adds.contains(".Lsl_panic_overflow_trampoline:"), "{adds}");
+        assert!(!adds.contains(".Lsl_panic_div_zero:"), "{adds}");
+        assert!(!adds.contains(".Lsl_panic_div_zero_trampoline:"), "{adds}");
+
+        // Division reaches both — the zero divisor and the INT_MIN/-1 overflow.
+        let divides = assembly("(fn div ((a i64) (b i64)) -> i64 (/ a b))\n(fn main () -> i32 0)");
+        assert!(divides.contains(".Lsl_panic_div_zero:"), "{divides}");
+        assert!(divides.contains(".Lsl_panic_overflow:"), "{divides}");
+    }
+
+    /// `panic = "abort"` emits no message and calls the message-less entry.
+    #[test]
+    fn an_aborting_build_carries_no_trap_message() {
+        let source = "(fn div ((a i64) (b i64)) -> i64 (/ a b))\n(fn main () -> i32 0)";
+        let aborting = compile_to_assembly(
+            "t.slp",
+            source,
+            &CompileOptions {
+                panic_abort: true,
+                ..CompileOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(!aborting.contains(".Lsl_panic_div_zero:"), "{aborting}");
+        assert!(!aborting.contains(".Lsl_panic_overflow:"), "{aborting}");
+        assert!(aborting.contains("call sl_rt_abort"), "{aborting}");
+        assert!(!aborting.contains("call sl_rt_panic"), "{aborting}");
+        // The trampolines still exist and still trap — only the message is gone.
+        assert!(
+            aborting.contains(".Lsl_panic_div_zero_trampoline:"),
+            "{aborting}"
         );
     }
 }

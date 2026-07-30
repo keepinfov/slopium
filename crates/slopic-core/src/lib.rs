@@ -44,6 +44,10 @@ pub struct CompileOptions {
     /// Emit DWARF line tables, so a debugger can map an address back to the
     /// expression it came from.
     pub debug: bool,
+    /// Make a trap abort without a message. A mechanism: the compiler emits
+    /// the message-less path when asked; the manager decides when, from the
+    /// profile's `panic` setting.
+    pub panic_abort: bool,
     /// Remove the symbol table from a linked executable. A mechanism, not a
     /// policy: the compiler strips when asked and does not decide when to ask.
     /// The manager does, from the profile — see `slopium`'s `strip_symbols`.
@@ -60,6 +64,7 @@ impl Default for CompileOptions {
             language_items: LanguageItems::default(),
             validate_entry_point: true,
             debug: false,
+            panic_abort: false,
             strip: false,
         }
     }
@@ -113,18 +118,21 @@ pub struct CompilerInfo {
     pub standard_library: &'static str,
 }
 
-/// The linker flags that shrink an executable, shared by `slopic`'s own link
-/// and `slopium`'s.
+/// The extra `cc` arguments for a final link, shared by `slopic`'s own link and
+/// `slopium`'s.
 ///
 /// `slopium` links the package objects itself rather than through `slopic`, so
 /// the two would otherwise each carry their own copy of this list and be free
-/// to drift. One function means a program built either way is the same size.
+/// to drift. One function means a program built either way comes out the same.
 ///
 /// `--gc-sections`, paired with the per-function sections the runtime is
 /// compiled with, drops every helper nothing reaches — it only ever removes
-/// unreferenced code, so it is unconditional. Stripping is a choice, because it
-/// removes the symbol table a debugger needs, so it is the caller's to make.
-pub fn linker_flags(strip: bool) -> Vec<&'static str> {
+/// unreferenced code, so it is unconditional. Stripping removes the symbol
+/// table a debugger needs, so it is a choice. `-DSLOPIUM_PANIC_ABORT` compiles
+/// the runtime's error paths down to a bare exit, matching the message-less
+/// trampolines the compiler emits under the same option, so a `panic = "abort"`
+/// binary carries no error strings at all.
+pub fn cc_flags(strip: bool, panic_abort: bool) -> Vec<&'static str> {
     let mut flags = vec![
         "-ffunction-sections",
         "-fdata-sections",
@@ -132,6 +140,9 @@ pub fn linker_flags(strip: bool) -> Vec<&'static str> {
     ];
     if strip {
         flags.push("-Wl,--strip-all");
+    }
+    if panic_abort {
+        flags.push("-DSLOPIUM_PANIC_ABORT");
     }
     flags
 }
@@ -205,6 +216,7 @@ pub fn compile_to_assembly(
             test_harness: options.test_harness,
             emit_entrypoint: true,
             debug: options.debug.then(|| SourceMap::single(file)),
+            panic_abort: options.panic_abort,
         },
     )
 }
@@ -223,6 +235,7 @@ pub fn compile_to_object(
             test_harness: options.test_harness,
             emit_entrypoint: true,
             debug: None,
+            panic_abort: options.panic_abort,
         },
     )
 }
@@ -244,6 +257,7 @@ pub fn compile_package_to_assembly(
             test_harness: options.test_harness && emits_entrypoint,
             emit_entrypoint: emits_entrypoint,
             debug: options.debug.then(|| package::source_map(input)),
+            panic_abort: options.panic_abort,
         },
     )
 }
@@ -267,6 +281,7 @@ pub fn compile_package_to_object(
             // The object writer builds no line tables (`D-028`), so a debug
             // build never reaches it; the caller checks this first.
             debug: None,
+            panic_abort: options.panic_abort,
         },
     )
 }
@@ -736,7 +751,7 @@ fn native_artifact(
         // and most programs call a handful. The shared flags put each function
         // in its own section and let the linker drop what nothing reaches, then
         // strip the symbol table when the caller asked for it.
-        command.args(linker_flags(request.options.strip));
+        command.args(cc_flags(request.options.strip, request.options.panic_abort));
         command.arg(&input_path).arg(runtime);
     }
     let result = command.output().map_err(|error| {

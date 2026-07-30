@@ -22,7 +22,7 @@ use crate::diagnostic::{codes, CompileResult, Diagnostic, Span};
 use crate::lowering::{
     address_taken, clone_function, drop_function, enum_clone_size, enum_clone_symbol,
     enum_drop_symbol, enum_size, function_symbol, is_pointer_like, struct_clone_symbol,
-    struct_drop_symbol, struct_size, Argument, Step, Tail,
+    struct_drop_symbol, struct_size, trap_usage, Argument, Step, Tail, TrapUsage,
 };
 use crate::mir::{BasicBlock, BinaryOp, Instruction, LocalId, MirFunction, MirModule, Terminator};
 use crate::regalloc::{allocate, Allocation, Location};
@@ -244,8 +244,17 @@ impl<'a> Generator<'a> {
         self.collect_strings();
         self.file_table();
         self.asm.push(Item::Section(Section::RoData));
-        self.byte_string(".Lsl_panic_div_zero", b"division by zero");
-        self.byte_string(".Lsl_panic_overflow", b"integer overflow");
+        let traps = self.trap_usage();
+        // Only the messages a check can reach, and none at all under
+        // `panic = "abort"`. Shared with the other backend (`D-025`).
+        if !self.options.panic_abort {
+            if traps.div_zero {
+                self.byte_string(".Lsl_panic_div_zero", b"division by zero");
+            }
+            if traps.overflow {
+                self.byte_string(".Lsl_panic_overflow", b"integer overflow");
+            }
+        }
         for (label, value) in self.strings.clone() {
             self.byte_string(&label, value.as_bytes());
         }
@@ -283,7 +292,7 @@ impl<'a> Generator<'a> {
         } else if self.options.emit_entrypoint {
             self.program_entrypoint();
         }
-        self.runtime_panic_trampolines();
+        self.runtime_panic_trampolines(traps);
         self.asm.push(Item::Section(Section::GnuStack));
 
         if self.diagnostics.is_empty() {
@@ -1331,17 +1340,38 @@ impl<'a> Generator<'a> {
         self.close_helper("main");
     }
 
-    fn runtime_panic_trampolines(&mut self) {
-        for (label, message) in [
-            (".Lsl_panic_div_zero", "div_zero"),
-            (".Lsl_panic_overflow", "overflow"),
-        ] {
+    fn runtime_panic_trampolines(&mut self, traps: TrapUsage) {
+        for (used, message) in [(traps.div_zero, "div_zero"), (traps.overflow, "overflow")] {
+            if !used {
+                continue;
+            }
             self.asm
                 .push(Item::Label(format!(".Lsl_panic_{message}_trampoline")));
-            self.address_of_label(X0, label);
-            self.inst(Inst::Bl("sl_rt_panic".into()));
+            if self.options.panic_abort {
+                self.inst(Inst::Bl("sl_rt_abort".into()));
+            } else {
+                self.address_of_label(X0, &format!(".Lsl_panic_{message}"));
+                self.inst(Inst::Bl("sl_rt_panic".into()));
+            }
             self.inst(Inst::Brk(1));
         }
+    }
+
+    /// The panic trampolines this program's arithmetic can reach.
+    fn trap_usage(&self) -> TrapUsage {
+        trap_usage(
+            self.module
+                .functions
+                .iter()
+                .filter(|function| function.emit)
+                .chain(
+                    self.module
+                        .tests
+                        .iter()
+                        .filter(|test| test.emit && self.options.test_harness)
+                        .map(|test| &test.function),
+                ),
+        )
     }
 
     fn struct_clone_helper(&mut self, name: &str, fields: &[(String, Type)]) {
