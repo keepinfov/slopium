@@ -18,6 +18,7 @@ use crate::manifest::{Manifest, MANIFEST_FILE};
 use crate::registry::{IndexEntry, Registries};
 use crate::resolve::PackageId;
 use crate::sha256::Digest;
+use crate::signature::Trust;
 use crate::source::{GitReference, SourceId};
 use crate::std_library::std_archive;
 use crate::store::{Access, Store};
@@ -334,7 +335,74 @@ impl Sources {
             }
             self.store.insert(&bytes)?;
         }
+        self.verify_signature(id, checksum)?;
         self.store.checkout(checksum, &described, self.access)
+    }
+
+    /// Require a package to be signed by somebody this checkout listed.
+    ///
+    /// It runs on every checkout and not only on the download that filled the
+    /// store, because one `$SLOPIUM_HOME` is shared by every project on a
+    /// machine: a project that trusts nobody would otherwise leave bytes behind
+    /// that a project which does trust somebody then builds without ever
+    /// checking them (`D-058`).
+    fn verify_signature(&self, id: &PackageId, checksum: &Digest) -> Result<(), String> {
+        let SourceId::Registry { index } = &id.source else {
+            return Ok(());
+        };
+        // A registry nobody configured lists nobody, which is the same state as
+        // one configured without keys. Refusing here would report a missing
+        // index for a build that never reads one; the branch that does reach for
+        // an index reports it there, where it is true.
+        let Ok(registry) = self.registries.at_index(index) else {
+            return Ok(());
+        };
+        // No configured keys is a decision, not an oversight, and nothing is
+        // remembered from a first download to fill the gap (`D-057`).
+        if registry.trusted_keys().is_empty() {
+            return Ok(());
+        }
+        let described = id.to_string();
+        let unsigned = |what: &str| {
+            format!(
+                "SL1040: `{described}` {what}, and `[registry.{}] trusted-keys` says packages from `{index}` must be signed",
+                registry.name()
+            )
+        };
+        let signature = match self.store.signature(checksum)? {
+            Some(signature) => signature,
+            None if self.access == Access::Offline => {
+                return Err(format!(
+                    "{}; the copy in the package store was fetched before this checkout asked for signatures, and `--offline` forbids going back for it",
+                    unsigned("carries no signature here")
+                ))
+            }
+            None => {
+                let signature = registry
+                    .signature(&id.name, &id.version)?
+                    .ok_or_else(|| unsigned("is published unsigned"))?;
+                self.store.insert_signature(checksum, &signature)?;
+                signature
+            }
+        };
+        match crate::signature::trust(
+            registry.trusted_keys(),
+            &signature,
+            &id.name,
+            &id.version,
+            checksum,
+        ) {
+            Trust::Signed => Ok(()),
+            Trust::UnknownKey => Err(format!(
+                "SL1042: `{described}` is signed by `{}`, which is not in `[registry.{}] trusted-keys`. If that key is the publisher's new one, add it; if it is not, this is not their package",
+                signature.claimed_key(),
+                registry.name()
+            )),
+            Trust::Forged => Err(format!(
+                "SL1041: `{described}` carries a signature by `{}` that does not verify. The key is trusted and the bytes hash to {checksum}, so what is wrong is the signature itself",
+                signature.claimed_key()
+            )),
+        }
     }
 
     /// A git commit's tree as a package archive, and the version it declares.

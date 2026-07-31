@@ -95,6 +95,7 @@ fn an_index_and_an_archive_are_read_over_http() {
         }],
         checksum: sha256(&archive),
         yanked: false,
+        signature: None,
     };
     let index = root.join("index/ge/om/geometry.json");
     fs::create_dir_all(index.parent().unwrap()).unwrap();

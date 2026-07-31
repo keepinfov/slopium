@@ -1,0 +1,5 @@
+(take geometry:lib area)
+
+(fn main () -> i32
+  (println (area))
+  0)

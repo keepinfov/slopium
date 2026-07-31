@@ -186,7 +186,7 @@ cannot be read is an error naming the file (`SL1036`); an unknown field is
 ignored, so a later format can add one without older clients refusing the index.
 
 ```json
-{"name":"geometry","version":"1.4.0","dependencies":[{"name":"units","requirement":"^2"},{"name":"std","requirement":"^0.4","source":"toolchain"}],"checksum":"9b3f…","yanked":false}
+{"name":"geometry","version":"1.4.0","dependencies":[{"name":"units","requirement":"^2"},{"name":"std","requirement":"^0.4","source":"toolchain"}],"checksum":"9b3f…","yanked":false,"signature":"ed25519:1a2b…:0b4c…"}
 ```
 
 A dependency naming no `source` means **the registry the entry came from**
@@ -297,6 +297,125 @@ proof of what moved.
 which is what putting a package into a static tree takes. It is also where
 `D-054` is enforced from the writing side: a manifest that depends on a
 directory or a repository cannot become an index entry.
+
+## Signing and publishing
+
+```sh
+slopium key new ~/.slopium/signing-key   # prints the public half to paste
+slopium key public ~/.slopium/signing-key
+slopium publish --key ~/.slopium/signing-key
+slopium publish --key ~/.slopium/signing-key --registry internal --dry-run
+```
+
+`publish` is `package`, plus a signature, plus three files written into a
+directory: the archive, a detached `<name>-<version>.sl.tar.sig` beside it, and
+one appended index line. Only a directory can be published to. There is no
+upload protocol because there is no server (`D-059`) — an `https://` index is
+published to by whatever puts files where it serves them.
+
+Before it signs, `publish` unpacks the archive and packs it again and requires
+identical bytes. That is what the format was specified for (`D-039`), and the
+moment before a signature asserts that these bytes *are* the package is the
+moment to find out.
+
+A version already in the index is refused (`SL1043`). An index line is
+append-only: somebody's lock may already name that version and that digest, and
+a republished version is the one change no lockfile can notice. Yanking is what
+exists for taking a version back.
+
+### What a signature says
+
+Ed25519 over a statement, not over the digest alone:
+
+```
+slopium-package-v1\n<name>\n<version>\n<digest>\n
+```
+
+Signing a bare hash makes a signature transplantable — an attacker chooses the
+contents of the package they publish, so two archives can be made identical, and
+a signature lifted onto another name or another version would still verify.
+Naming the package inside the signed message costs a newline and stops that
+(`D-056`).
+
+Keys and signatures are written `<what>:<hex>`: `ed25519:<key>` is a public key,
+`ed25519-private:<seed>` is the whole of a key file, and
+`ed25519:<key>:<signature>` is a signature. A signature carries the key that
+claims to have made it, because 64 opaque bytes cannot say who produced them and
+"somebody you have not listed signed this" is a different thing to be told from
+"this does not verify". That key is a claim: it is checked against the trusted
+list *before* it verifies anything, so a signature can never introduce the key
+that makes it acceptable.
+
+A key file is mode 0600 and `publish` refuses one that is not (`D-060`). Key
+material is never an argument — `/proc/<pid>/cmdline` is world-readable — and
+never an environment variable, which every subprocess a build runs would
+inherit.
+
+### Trusting a key
+
+```toml
+# .slopium/config.toml
+[registry.default]
+index = "https://packages.example.com"
+trusted-keys = ["ed25519:1a2b…", "ed25519:3c4d…"]
+```
+
+A registry with `trusted-keys` admits only archives signed by one of them: no
+signature is `SL1040`, a signature that does not verify is `SL1041`, and a
+signature by an unlisted key is `SL1042`. A registry with no `trusted-keys` does
+not check signatures at all.
+
+There is no third state, and in particular **no trust on first use** (`D-057`).
+Remembering whichever key signed the first download would make the first fetch
+the trust decision, and the first fetch is exactly the one an attacker who can
+answer for an index gets to choose. Rotating a key is adding the new one to the
+list, which is why it is a list.
+
+The check runs at every checkout, not only at the download that filled the
+store: one `$SLOPIUM_HOME` is shared by every project on a machine, so checking
+only on arrival would let a project that trusts nobody leave bytes behind that a
+project which does trust somebody then builds unverified (`D-058`). It costs
+nothing measurable, works with `--offline`, and means adding a key takes effect
+on the next build rather than on the next cache eviction.
+
+```sh
+slopium verify          # re-check every locked package: digest, then signature
+```
+
+`verify` goes through the same checkout a build does, so what it checks is what
+a build would use — and on a machine whose store is empty it fills it, which
+makes it the command to run first in a fresh checkout.
+
+## Building from a lock with Nix
+
+`lib.buildSlopiumPackage` reads `Slopium.lock` and builds `--offline --locked`.
+Nix does no version selection at all (`D-061`): every registry entry becomes a
+fixed-output derivation whose hash is the checksum the lock already records,
+those fill a package store, and the build reads it.
+
+```nix
+slopium.lib.${system}.buildSlopiumPackage {
+  pname = "consumer";
+  version = "0.1.0";
+  src = ./.;
+  # A lock records the index string a manifest was configured with, which may be
+  # a relative path; this says where that is.
+  registries."../registry" = ./registry;
+}
+```
+
+That is what makes "Cargo and Nix resolve identical locked graphs" true by
+construction rather than by comparison: there is one resolver, it ran once, and
+both builds read what it wrote.
+
+Two limits. A git entry is refused by name (`SL1044`) — its checksum is the
+digest of an archive the toolchain normalizes out of an exported tree, which Nix
+cannot reproduce without running the toolchain, so no fixed-output derivation
+can be written for it; `slopium vendor` turns such a graph into one the bridge
+builds. And a signature has no hash in the lock, so it is copied out of a
+registry directory rather than fetched: a registry reachable only over `https://`
+arrives unsigned under Nix, and a build that requires signatures needs a local
+copy of it.
 
 ## Checksums in the lock
 

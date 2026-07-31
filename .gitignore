@@ -1,6 +1,10 @@
 /target/
 **/target/
 **/.slopium/
+# The fixture the Nix bridge builds is not somebody's local configuration: its
+# index path and trusted key are what `checks.lock-build` resolves against, so a
+# clone without them cannot run the check.
+!/tests/consumer/.slopium/
 /.notes/
 *.o
 *.s

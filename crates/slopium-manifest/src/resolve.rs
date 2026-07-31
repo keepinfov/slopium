@@ -1033,6 +1033,9 @@ mod tests {
 
     struct Workspace {
         root: PathBuf,
+        /// What `[registry.default] trusted-keys` says here. Empty is the
+        /// v0.4.4 behaviour and is what every test that predates signing gets.
+        trusted: std::cell::RefCell<Vec<String>>,
     }
 
     impl Workspace {
@@ -1046,7 +1049,15 @@ mod tests {
                 fs::remove_dir_all(&root).unwrap();
             }
             fs::create_dir_all(&root).unwrap();
-            Self { root }
+            Self {
+                root,
+                trusted: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+
+        /// Configure a key this checkout accepts packages from.
+        fn trust(&self, key: &crate::signature::PublicKey) {
+            self.trusted.borrow_mut().push(key.to_string());
         }
 
         fn package(&self, name: &str, version: &str, dependencies: &str) -> PathBuf {
@@ -1084,6 +1095,7 @@ mod tests {
                 "default".to_owned(),
                 crate::manifest::RegistryConfig {
                     index: Some(self.root.join("registry").display().to_string()),
+                    trusted_keys: self.trusted.borrow().clone(),
                 },
             );
             Sources::new(
@@ -1097,6 +1109,18 @@ mod tests {
         /// Publish a package into that registry: an archive under `packages/`
         /// and a line under `index/`, exactly as `docs/packaging.md` says.
         fn publish(&self, name: &str, version: &str, dependencies: &[(&str, &str)]) -> Digest {
+            self.publish_signed(name, version, dependencies, None)
+        }
+
+        /// The same, signed by a key — or, given `None`, published unsigned,
+        /// which is what a registry nobody has configured keys for looks like.
+        fn publish_signed(
+            &self,
+            name: &str,
+            version: &str,
+            dependencies: &[(&str, &str)],
+            key: Option<&crate::signature::PrivateKey>,
+        ) -> Digest {
             let version = Version::parse(version).unwrap();
             let table = dependencies
                 .iter()
@@ -1118,6 +1142,7 @@ mod tests {
 
             let (bytes, checksum) =
                 crate::archive::directory_archive(&root, &prefix_for(name, &version)).unwrap();
+            let signature = key.map(|key| key.sign(name, &version, &checksum));
             self.serve(
                 name,
                 crate::registry::IndexEntry {
@@ -1133,6 +1158,7 @@ mod tests {
                         .collect(),
                     checksum,
                     yanked: false,
+                    signature,
                 },
                 &bytes,
             );
@@ -1154,6 +1180,13 @@ mod tests {
             let archive_path = registry.join(crate::registry::archive_path(name, &entry.version));
             fs::create_dir_all(archive_path.parent().unwrap()).unwrap();
             fs::write(archive_path, archive).unwrap();
+            if let Some(signature) = entry.signature {
+                fs::write(
+                    registry.join(crate::registry::signature_path(name, &entry.version)),
+                    format!("{signature}\n"),
+                )
+                .unwrap();
+            }
         }
 
         fn write_manifest(&self, relative: &str, contents: &str) {
@@ -1686,6 +1719,7 @@ mod tests {
                 dependencies: Vec::new(),
                 checksum,
                 yanked: true,
+                signature: None,
             },
             &bytes,
         );
@@ -1719,6 +1753,7 @@ mod tests {
                 dependencies: Vec::new(),
                 checksum,
                 yanked: false,
+                signature: None,
             },
             &bytes,
         );
@@ -1748,6 +1783,7 @@ mod tests {
                 dependencies: Vec::new(),
                 checksum,
                 yanked: false,
+                signature: None,
             },
             &bytes,
         );
@@ -1785,6 +1821,90 @@ mod tests {
             "{error}"
         );
         assert!(error.contains("offers no"), "{error}");
+    }
+
+    /// `D-057`: keys configured, key used, package built. The signature is
+    /// checked at checkout, so reaching a resolved graph is passing it.
+    #[test]
+    fn a_package_signed_by_a_trusted_key_resolves() {
+        let key = crate::signature::PrivateKey::generate().unwrap();
+        let workspace = Workspace::new("signed");
+        workspace.trust(&key.public());
+        workspace.publish_signed("geometry", "1.0.0", &[], Some(&key));
+        workspace.package("application", "1.0.0", "geometry = \"^1\"\n");
+        let resolution = workspace.resolve("application").unwrap();
+        assert_eq!(
+            resolution.packages["geometry"].id.version,
+            Version::new(1, 0, 0)
+        );
+    }
+
+    /// The ordinary case of a publisher rotating a key, and the reason a
+    /// signature carries the key that made it (`D-056`): the message can name
+    /// the key to add.
+    #[test]
+    fn a_package_signed_by_an_unlisted_key_is_refused() {
+        let publisher = crate::signature::PrivateKey::generate().unwrap();
+        let expected = crate::signature::PrivateKey::generate().unwrap();
+        let workspace = Workspace::new("unlisted");
+        workspace.trust(&expected.public());
+        workspace.publish_signed("geometry", "1.0.0", &[], Some(&publisher));
+        workspace.package("application", "1.0.0", "geometry = \"^1\"\n");
+        let error = workspace.resolve("application").unwrap_err();
+        assert!(error.contains("SL1042"), "{error}");
+        assert!(
+            error.contains(&publisher.public().to_string()),
+            "the key to add is named: {error}"
+        );
+    }
+
+    /// A trusted key's signature over some other package does not become this
+    /// one's by being filed next to it.
+    #[test]
+    fn a_signature_for_another_package_does_not_verify() {
+        let key = crate::signature::PrivateKey::generate().unwrap();
+        let workspace = Workspace::new("forged");
+        workspace.trust(&key.public());
+        let (bytes, checksum) = published_bytes(&workspace, "geometry", "1.0.0");
+        workspace.serve(
+            "geometry",
+            crate::registry::IndexEntry {
+                name: "geometry".to_owned(),
+                version: Version::new(1, 0, 0),
+                dependencies: Vec::new(),
+                checksum,
+                yanked: false,
+                signature: Some(key.sign("units", &Version::new(1, 0, 0), &checksum)),
+            },
+            &bytes,
+        );
+        workspace.package("application", "1.0.0", "geometry = \"^1\"\n");
+        let error = workspace.resolve("application").unwrap_err();
+        assert!(error.contains("SL1041"), "{error}");
+    }
+
+    /// Configuring keys is what turns signing on. An unsigned package from a
+    /// registry that has them is refused rather than quietly accepted.
+    #[test]
+    fn an_unsigned_package_is_refused_where_keys_are_configured() {
+        let key = crate::signature::PrivateKey::generate().unwrap();
+        let workspace = Workspace::new("unsigned");
+        workspace.trust(&key.public());
+        workspace.publish("geometry", "1.0.0", &[]);
+        workspace.package("application", "1.0.0", "geometry = \"^1\"\n");
+        let error = workspace.resolve("application").unwrap_err();
+        assert!(error.contains("SL1040"), "{error}");
+        assert!(error.contains("published unsigned"), "{error}");
+    }
+
+    /// `D-057`: no keys is a state somebody chose, and it is the one every
+    /// registry written before this release is in.
+    #[test]
+    fn an_unsigned_package_is_taken_where_no_keys_are_configured() {
+        let workspace = Workspace::new("untrusting");
+        workspace.publish("geometry", "1.0.0", &[]);
+        workspace.package("application", "1.0.0", "geometry = \"^1\"\n");
+        assert!(workspace.resolve("application").is_ok());
     }
 
     /// The bytes and digest of a package as a registry would hold it.

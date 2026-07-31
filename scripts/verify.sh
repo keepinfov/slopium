@@ -11,6 +11,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 "$workspace_dir/scripts/package-check.sh"
 "$workspace_dir/scripts/git-check.sh"
 "$workspace_dir/scripts/registry-check.sh"
+"$workspace_dir/scripts/publish-check.sh"
 "$workspace_dir/scripts/runtime-check.sh"
 "$workspace_dir/scripts/debug-check.sh"
 "$workspace_dir/scripts/cross-check.sh"

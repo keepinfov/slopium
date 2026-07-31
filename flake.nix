@@ -83,6 +83,118 @@
         };
       };
 
+      # Build a Slopium package from its own `Slopium.lock` (`D-061`).
+      #
+      # Nix does no version selection. The lock is the plan: every registry
+      # entry becomes a fixed-output derivation keyed by the checksum the lock
+      # already records, those fill a package store, and the build runs
+      # `--offline --locked`. That is what makes "Cargo and Nix resolve
+      # identical locked graphs" true by construction — there is one resolver,
+      # it ran once, and both builds read what it wrote.
+      #
+      # `registries` maps the index string a lock records to the directory it
+      # is, because a relative path in a lockfile means nothing to Nix.
+      mkLib = pkgs:
+        let
+          toolchain = mkToolchain pkgs;
+          inherit (pkgs) lib;
+        in
+        {
+          buildSlopiumPackage =
+            { pname
+            , version
+            , src
+            , registries ? { }
+            , profile ? "release"
+            , ...
+            }@arguments:
+            let
+              lock = builtins.fromTOML (builtins.readFile "${src}/Slopium.lock");
+
+              # A path package is already inside `src`, and the bundled library
+              # is inside the compiler. Neither is anything to fetch, which is
+              # the same rule resolution itself follows.
+              fetched = builtins.filter (package: package ? checksum) lock.package;
+
+              archiveOf = package:
+                let
+                  index = lib.removePrefix "registry+" package.source;
+                  base = registries.${index} or (throw ''
+                    `${pname}` locks `${package.name}` to the registry `${index}`,
+                    which is not in `registries`. Pass `registries."${index}" = <path>;`
+                    so the bridge knows where that index is on this machine.
+                  '');
+                  file = "packages/${package.name}/${package.name}-${package.version}.sl.tar";
+                in
+                if lib.hasPrefix "registry+" package.source then {
+                  inherit (package) name checksum;
+                  # A genuine fixed-output derivation, and its hash is the
+                  # lock's own checksum rather than one kept in step by hand.
+                  archive = pkgs.fetchurl {
+                    name = "${package.name}-${package.version}.sl.tar";
+                    url = "file://${base}/${file}";
+                    sha256 = package.checksum;
+                  };
+                  # The signature is read straight out of the registry
+                  # directory: it has no hash in the lock, so there is nothing
+                  # to key a fixed-output derivation on. A registry reachable
+                  # only over `https://` therefore arrives unsigned here, and a
+                  # build that requires signatures needs a local copy of it.
+                  signature = "${base}/${file}.sig";
+                }
+                else throw ''
+                  SL1044: `${pname}` locks `${package.name}` to `${package.source}`,
+                  which this bridge cannot fetch. A git package's checksum is the digest
+                  of an archive the toolchain normalizes out of an exported tree, so no
+                  fixed-output derivation can reproduce it. Run `slopium vendor` and build
+                  the vendored graph instead.
+                '';
+
+              archives = map archiveOf fetched;
+
+              fill = builtins.concatStringsSep "\n" (map
+                (entry: ''
+                  cp "${entry.archive}" "$SLOPIUM_HOME/archives/${entry.checksum}.sl.tar"
+                  if [ -f "${entry.signature}" ]; then
+                    cp "${entry.signature}" "$SLOPIUM_HOME/archives/${entry.checksum}.sl.tar.sig"
+                  fi
+                '')
+                archives);
+
+              triple = pkgs.stdenv.hostPlatform.rust.rustcTarget;
+            in
+            pkgs.stdenv.mkDerivation (builtins.removeAttrs arguments [ "registries" "profile" ] // {
+              inherit pname version src;
+
+              nativeBuildInputs = (arguments.nativeBuildInputs or [ ])
+                ++ [ toolchain pkgs.stdenv.cc ];
+
+              configurePhase = ''
+                runHook preConfigure
+                export SLOPIUM_HOME="$NIX_BUILD_TOP/slopium-home"
+                export SLOPIC="${toolchain}/bin/slopic"
+                mkdir -p "$SLOPIUM_HOME/archives"
+                chmod -R u+w "$SLOPIUM_HOME"
+                ${fill}
+                chmod -R u+w "$SLOPIUM_HOME"
+                runHook postConfigure
+              '';
+
+              buildPhase = arguments.buildPhase or ''
+                runHook preBuild
+                slopium build --offline --locked ${lib.optionalString (profile == "release") "--release"}
+                runHook postBuild
+              '';
+
+              installPhase = arguments.installPhase or ''
+                runHook preInstall
+                mkdir -p "$out/bin"
+                cp "target/${triple}/${profile}/${pname}" "$out/bin/"
+                runHook postInstall
+              '';
+            });
+        };
+
       mkNeovimPlugin = pkgs: pkgs.vimUtils.buildVimPlugin {
         pname = "slopium.nvim";
         inherit version;
@@ -271,9 +383,39 @@
         let pkgs = import nixpkgs { inherit system; };
         in pkgs.nixfmt);
 
-      checks = forAllSystems (system: {
-        package = self.packages.${system}.default;
-        neovim-plugin = self.packages.${system}.slopium-nvim;
-      });
+      # `nixpkgs.lib` is system-independent; this one is not, because building a
+      # package needs a toolchain built for a system.
+      lib = forAllSystems (system: mkLib (import nixpkgs { inherit system; }));
+
+      checks = forAllSystems (system:
+        let pkgs = import nixpkgs { inherit system; };
+        in {
+          package = self.packages.${system}.default;
+          neovim-plugin = self.packages.${system}.slopium-nvim;
+
+          # The milestone's exit condition, as a build. The consumer's lock, its
+          # registry and the signature over the package it names are all
+          # committed, so this resolves nothing, fetches every archive as a
+          # fixed-output derivation keyed by the lock's checksum, verifies the
+          # signature against the key in the consumer's own configuration, and
+          # runs what comes out.
+          lock-build = (self.lib.${system}.buildSlopiumPackage {
+            pname = "consumer";
+            version = "0.1.0";
+            src = ./tests/consumer;
+            registries."../registry" = ./tests/registry;
+          }).overrideAttrs (previous: {
+            doCheck = true;
+            checkPhase = ''
+              runHook preCheck
+              actual="$(./target/${pkgs.stdenv.hostPlatform.rust.rustcTarget}/release/consumer)"
+              if [ "$actual" != "100" ]; then
+                echo "the package built from the lock printed '$actual', not 100" >&2
+                exit 1
+              fi
+              runHook postCheck
+            '';
+          });
+        });
     };
 }

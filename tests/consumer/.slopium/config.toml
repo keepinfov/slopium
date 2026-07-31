@@ -1,0 +1,3 @@
+[registry.default]
+index = "../registry"
+trusted-keys = ["ed25519:3ccd241cffc9b3618044b97d036d8614593d8b017c340f1dee8773385517654b"]

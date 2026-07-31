@@ -14,6 +14,7 @@
 
 use crate::manifest::{validate_package_name, LocalConfig};
 use crate::sha256::Digest;
+use crate::signature::{PublicKey, Signature, SIGNATURE_EXTENSION};
 use crate::version::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -58,6 +59,12 @@ pub struct IndexEntry {
     /// A yanked version is not selected, but is still built when a lock
     /// already names it (`D-055`).
     pub yanked: bool,
+    /// Who signed this version, if anybody did. The same line is written to
+    /// `<archive>.sig` beside the archive, so bytes on a disk carry their own
+    /// signature and an index alone is still a complete published record;
+    /// neither copy is trusted, because both are checked against the same
+    /// statement and the same key list (`D-056`).
+    pub signature: Option<Signature>,
 }
 
 /// The wire form. Unknown fields are ignored on purpose: an index that grows a
@@ -71,6 +78,8 @@ struct RawEntry {
     checksum: String,
     #[serde(default)]
     yanked: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    signature: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -101,6 +110,7 @@ impl IndexEntry {
                 .collect(),
             checksum: self.checksum.to_string(),
             yanked: self.yanked,
+            signature: self.signature.map(|signature| signature.to_string()),
         };
         serde_json::to_string(&raw)
             .map_err(|error| format!("cannot render an index entry: {error}"))
@@ -134,6 +144,12 @@ impl IndexEntry {
         Ok(Self {
             version: Version::parse(&raw.version).map_err(malformed)?,
             checksum: Digest::parse(&raw.checksum).map_err(malformed)?,
+            signature: raw
+                .signature
+                .as_deref()
+                .map(Signature::parse)
+                .transpose()
+                .map_err(malformed)?,
             name: raw.name,
             dependencies,
             yanked: raw.yanked,
@@ -163,6 +179,11 @@ pub fn archive_path(name: &str, version: &Version) -> String {
     )
 }
 
+/// The path of a package's detached signature, relative to the registry root.
+pub fn signature_path(name: &str, version: &Version) -> String {
+    format!("{}.{SIGNATURE_EXTENSION}", archive_path(name, version))
+}
+
 /// An index URL with the trailing slash that means nothing removed, so two
 /// spellings of one registry are one source id.
 fn normalize_index(index: &str) -> String {
@@ -176,6 +197,9 @@ pub struct Registry {
     name: String,
     /// The URL that identifies it in a lockfile (`D-052`).
     index: String,
+    /// Who this checkout will accept packages from here. Empty means signatures
+    /// are not checked (`D-057`).
+    trusted: Vec<PublicKey>,
     transport: Transport,
     /// Index files already read, so backtracking does not re-fetch. An empty
     /// entry is a package the registry does not have.
@@ -194,6 +218,16 @@ impl Registry {
     /// `root` is what a configured relative path is written against — the
     /// workspace root, since the configuration belongs to the checkout.
     pub fn new(name: &str, index: &str, root: &Path) -> Result<Self, String> {
+        Self::trusting(name, index, root, &[])
+    }
+
+    /// The same, with the keys `[registry.<name>] trusted-keys` listed.
+    pub fn trusting(
+        name: &str,
+        index: &str,
+        root: &Path,
+        trusted: &[String],
+    ) -> Result<Self, String> {
         let index = normalize_index(index);
         let transport = match index.split_once("://") {
             None => Transport::Directory(root.join(&index)),
@@ -215,9 +249,20 @@ impl Registry {
                 ))
             }
         };
+        let keys = trusted
+            .iter()
+            .map(|key| {
+                PublicKey::parse(key).map_err(|error| {
+                    format!(
+                        "`[registry.{name}] trusted-keys` holds something that is not one: {error}"
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
             name: name.to_owned(),
             index,
+            trusted: keys,
             transport,
             cached: Arc::new(Mutex::new(BTreeMap::new())),
         })
@@ -225,6 +270,24 @@ impl Registry {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Who this checkout accepts packages from here. Empty means it accepts
+    /// them unsigned, which is a state somebody chose by not choosing.
+    pub fn trusted_keys(&self) -> &[PublicKey] {
+        &self.trusted
+    }
+
+    /// The directory this registry is, if it is one.
+    ///
+    /// Only a directory can be published to. There is no upload protocol
+    /// because there is no server, and inventing one to reach an `https://`
+    /// index would be inventing the server too (`D-059`).
+    pub fn directory(&self) -> Option<&Path> {
+        match &self.transport {
+            Transport::Directory(root) => Some(root),
+            Transport::Url => None,
+        }
     }
 
     /// The URL this registry is identified by in a lockfile.
@@ -273,6 +336,28 @@ impl Registry {
                 self.name
             )
         })
+    }
+
+    /// Who signed a published version, if anybody did.
+    ///
+    /// The `.sig` beside the archive is asked first, because it is the copy an
+    /// archive carries with it and the one a store keeps. An index that
+    /// publishes the signature and no `.sig` still answers — the two hold the
+    /// same line, and neither is believed on its own (`D-056`).
+    pub fn signature(&self, name: &str, version: &Version) -> Result<Option<Signature>, String> {
+        let relative = signature_path(name, version);
+        if let Some(bytes) = self.read(&relative)? {
+            let text = String::from_utf8(bytes)
+                .map_err(|_| format!("`{relative}` is not text, so it is not a signature"))?;
+            return Signature::parse(text.trim())
+                .map(Some)
+                .map_err(|error| format!("SL1036: `{relative}`: {error}"));
+        }
+        Ok(self
+            .versions(name)?
+            .iter()
+            .find(|entry| entry.version == *version)
+            .and_then(|entry| entry.signature))
     }
 
     /// One file of this registry, or `None` if the registry does not have it.
@@ -411,7 +496,10 @@ impl Registries {
             let index = entry.index.as_deref().ok_or_else(|| {
                 format!("`[registry.{name}]` names no `index` to read packages from")
             })?;
-            by_name.insert(name.clone(), Registry::new(name, index, root)?);
+            by_name.insert(
+                name.clone(),
+                Registry::trusting(name, index, root, &entry.trusted_keys)?,
+            );
         }
         Ok(Self { by_name })
     }
@@ -472,6 +560,7 @@ mod tests {
             ],
             checksum: crate::sha256::sha256(b"geometry"),
             yanked: false,
+            signature: None,
         }
     }
 
@@ -491,15 +580,28 @@ mod tests {
         assert!(!parsed.yanked);
     }
 
-    /// An index may grow a field — `signature` is v0.4.5 — without this client
-    /// refusing to read it.
+    /// An index may grow a field without this client refusing to read it. That
+    /// tolerance is what let `signature` arrive in v0.4.5 without every v0.4.4
+    /// checkout breaking, and it is worth keeping for whatever is next.
     #[test]
     fn an_unknown_field_does_not_stop_the_index_being_read() {
-        let line = r#"{"name":"geometry","version":"1.0.0","checksum":"0000000000000000000000000000000000000000000000000000000000000000","signature":"..."}"#;
+        let line = r#"{"name":"geometry","version":"1.0.0","checksum":"0000000000000000000000000000000000000000000000000000000000000000","published":"2026-07-31"}"#;
         assert_eq!(
             IndexEntry::parse(line, "index").unwrap().version,
             Version::new(1, 0, 0)
         );
+    }
+
+    /// A signature survives the round trip, and an unsigned entry does not grow
+    /// a null field that an older reader would have to understand.
+    #[test]
+    fn a_signed_entry_round_trips_and_an_unsigned_one_says_nothing() {
+        let key = crate::signature::PrivateKey::generate().unwrap();
+        let mut signed = entry();
+        signed.signature = Some(key.sign(&signed.name, &signed.version, &signed.checksum));
+        let line = signed.render().unwrap();
+        assert_eq!(IndexEntry::parse(&line, "index").unwrap(), signed);
+        assert!(!entry().render().unwrap().contains("signature"));
     }
 
     #[test]

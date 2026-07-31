@@ -6,9 +6,14 @@ use slopic_core::syntax::{format_source, FormatOptions};
 use slopium_manifest::archive::{package_archive, ARCHIVE_EXTENSION};
 use slopium_manifest::lock::{Lockfile, LOCK_FILE};
 use slopium_manifest::manifest::{load_local_config, validate_package_name, Profile, Project};
-use slopium_manifest::registry::{IndexDependency, IndexEntry, IndexSource, Registries};
+use slopium_manifest::registry::{
+    archive_path as published_archive_path, index_path as published_index_path,
+    signature_path as published_signature_path, IndexDependency, IndexEntry, IndexSource,
+    Registries, INDEX_DIRECTORY,
+};
 use slopium_manifest::resolve::{resolve_workspace, Resolution, WorkspaceResolution};
 use slopium_manifest::sha256::Digest;
+use slopium_manifest::signature::PrivateKey;
 use slopium_manifest::source::{SourceId, SourceSpec, DEFAULT_REGISTRY};
 use slopium_manifest::sources::Sources;
 use slopium_manifest::std_library::{std_module_path, STD_MODULES};
@@ -124,6 +129,37 @@ enum Commands {
         #[command(flatten)]
         resolve: ResolveArgs,
     },
+    /// Sign a package archive and write it into a registry.
+    Publish {
+        /// The signing key, as `slopium key new` writes one. Key material is
+        /// never an argument: `/proc/<pid>/cmdline` is world-readable.
+        #[arg(long, value_name = "FILE")]
+        key: PathBuf,
+        /// Publish to this configured registry instead of `default`.
+        #[arg(long, value_name = "NAME")]
+        registry: Option<String>,
+        /// Do everything except write into the registry, and say what would
+        /// have been written.
+        #[arg(long)]
+        dry_run: bool,
+        #[command(flatten)]
+        resolve: ResolveArgs,
+        #[command(flatten)]
+        select: SelectArgs,
+    },
+    /// Re-check every dependency in the store against its checksum and, where
+    /// a registry has trusted keys, its signature.
+    ///
+    /// There is one lockfile per workspace, so this acts on all of it.
+    Verify {
+        #[command(flatten)]
+        resolve: ResolveArgs,
+    },
+    /// Make and inspect the keys packages are published under.
+    Key {
+        #[command(subcommand)]
+        command: KeyCommands,
+    },
     /// Print the resolved package graph.
     Tree {
         #[command(flatten)]
@@ -138,6 +174,18 @@ enum Commands {
         #[arg(value_enum)]
         shell: Shell,
     },
+}
+
+#[derive(Subcommand)]
+enum KeyCommands {
+    /// Write a new signing key, and print the public half to paste into
+    /// `[registry.<name>] trusted-keys`.
+    New {
+        /// Where the key goes. An existing file is never overwritten.
+        path: PathBuf,
+    },
+    /// Print the public half of a signing key.
+    Public { path: PathBuf },
 }
 
 #[derive(Args, Clone)]
@@ -347,6 +395,25 @@ fn main() {
             precise,
             resolve,
         } => update(cli.manifest_path, package, precise, resolve),
+        Commands::Publish {
+            key,
+            registry,
+            dry_run,
+            resolve,
+            select,
+        } => Session::open(cli.manifest_path, resolve).and_then(|session| {
+            let project = select.one(&session.workspace, "publish")?;
+            publish(&session, project, &key, registry.as_deref(), dry_run)
+        }),
+        Commands::Verify { resolve } => {
+            Session::open(cli.manifest_path, resolve).and_then(|session| verify(&session))
+        }
+        Commands::Key { command } => match command {
+            KeyCommands::New { path } => new_key(&path),
+            KeyCommands::Public { path } => {
+                PrivateKey::read(&path).map(|key| println!("{}", key.public()))
+            }
+        },
         Commands::Tree { resolve, select } => {
             Session::open(cli.manifest_path, resolve).and_then(|session| {
                 for project in select.all(&session.workspace)? {
@@ -1532,6 +1599,147 @@ fn package(workspace: &Workspace, project: &Project, index_entry: bool) -> Resul
     Ok(path)
 }
 
+/// Sign a package and put it in a registry (`D-059`).
+///
+/// This is `package` plus a signature plus three file writes, and deliberately
+/// nothing more. A registry is a directory somebody serves, so publishing is
+/// putting files in it; what an `https://` index needs instead is for its host
+/// to put the same files in the same places.
+fn publish(
+    session: &Session,
+    project: &Project,
+    key: &Path,
+    registry: Option<&str>,
+    dry_run: bool,
+) -> Result<(), String> {
+    let name = registry.unwrap_or(DEFAULT_REGISTRY);
+    let registry = session.sources.registries().named(name)?;
+    let root = registry.directory().ok_or_else(|| {
+        format!(
+            "registry `{name}` is the index `{}`, and only a directory can be published to; there is no upload protocol because there is no server (`D-059`). Put the files where that index serves them",
+            registry.index()
+        )
+    })?.to_owned();
+
+    let (bytes, digest) = package_archive(project)?;
+    round_trips(&bytes, &digest)?;
+    // Before the key is even read: a manifest that cannot become an index entry
+    // is one no signature would make publishable (`SL1032`).
+    let mut entry = published_entry(project, digest)?;
+    if registry
+        .versions(&project.name)?
+        .iter()
+        .any(|published| published.version == project.version)
+    {
+        return Err(format!(
+            "SL1043: `{}` already publishes {} v{}. An index line is append-only, because somebody's lock may already name that version and a republished one is the change no lock can notice; publish {} instead",
+            registry.index(),
+            project.name,
+            project.version,
+            next_version(&project.version)
+        ));
+    }
+    let signature = PrivateKey::read(key)?.sign(&project.name, &project.version, &digest);
+    entry.signature = Some(signature);
+    let line = entry.render()?;
+
+    let archive = root.join(published_archive_path(&project.name, &project.version));
+    let detached = root.join(published_signature_path(&project.name, &project.version));
+    let index = root
+        .join(INDEX_DIRECTORY)
+        .join(published_index_path(&project.name)?);
+    if dry_run {
+        println!("Would publish {} v{}", project.name, project.version);
+        println!("  {}  {digest}", archive.display());
+        println!("  {}  {signature}", detached.display());
+        println!("  {}", index.display());
+        println!("{line}");
+        return Ok(());
+    }
+
+    write_under(&archive, &bytes)?;
+    write_under(&detached, format!("{signature}\n").as_bytes())?;
+    fs::create_dir_all(index.parent().expect("an index file has a directory"))
+        .map_err(|error| format!("cannot create `{}`: {error}", index.display()))?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&index)
+        .map_err(|error| format!("cannot open `{}`: {error}", index.display()))?;
+    writeln!(file, "{line}")
+        .map_err(|error| format!("cannot write `{}`: {error}", index.display()))?;
+
+    println!("Published {} v{}", project.name, project.version);
+    println!("{digest}  {}", archive.display());
+    println!("Signed by {}", signature.claimed_key());
+    Ok(())
+}
+
+/// Require an archive to survive being unpacked and packed again.
+///
+/// The format was specified so that this holds (`D-039`), and the moment before
+/// a signature asserts that these bytes are the package is the moment to find
+/// out that it does.
+fn round_trips(bytes: &[u8], digest: &Digest) -> Result<(), String> {
+    let again = slopium_manifest::archive::write(&slopium_manifest::archive::read(bytes)?)?;
+    if again == bytes {
+        return Ok(());
+    }
+    Err(format!(
+        "SL1004: the archive of this package does not reproduce itself: unpacking {digest} and packing it again gives {}. It would be signed as one thing and arrive as another",
+        slopium_manifest::sha256::sha256(&again)
+    ))
+}
+
+fn write_under(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let directory = path.parent().expect("a published file has a directory");
+    fs::create_dir_all(directory)
+        .map_err(|error| format!("cannot create `{}`: {error}", directory.display()))?;
+    fs::write(path, bytes).map_err(|error| format!("cannot write `{}`: {error}", path.display()))
+}
+
+/// The next version to suggest when one is already published.
+fn next_version(version: &Version) -> Version {
+    Version::new(version.major, version.minor, version.patch + 1)
+}
+
+/// Re-check every dependency the store holds.
+///
+/// It goes through the same checkout every build goes through, so what it
+/// verifies is exactly what a build would use — and on a machine whose store is
+/// empty it fills it, which is what makes this the command to run first in a
+/// fresh checkout.
+fn verify(session: &Session) -> Result<(), String> {
+    let mut checked = 0;
+    for package in session.resolution.packages.values() {
+        // A path dependency is a working tree with no checksum to be against,
+        // and saying so once at the end beats a line per directory.
+        let Some(checksum) = package.checksum else {
+            continue;
+        };
+        session.sources.checkout(&package.id, &checksum)?;
+        let signed = match session.sources.store().signature(&checksum)? {
+            Some(signature) => format!("signed by {}", signature.claimed_key()),
+            None => "unsigned".to_owned(),
+        };
+        println!("{}  {checksum}  {signed}", package.id);
+        checked += 1;
+    }
+    println!("Verified {checked} package(s) against `{LOCK_FILE}`.");
+    Ok(())
+}
+
+/// Write a signing key and print the half that goes into a configuration file.
+fn new_key(path: &Path) -> Result<(), String> {
+    let key = PrivateKey::generate()?;
+    key.write(path)?;
+    println!("Wrote `{}` at mode 0600. Back it up: a package published under a key nobody has any more can never be published again under the same one.", path.display());
+    println!();
+    println!("[registry.default]");
+    println!("trusted-keys = [\"{}\"]", key.public());
+    Ok(())
+}
+
 /// The index line describing an archive of this package.
 ///
 /// This is where `D-054` is enforced from the writing side: what a published
@@ -1571,6 +1779,7 @@ fn published_entry(project: &Project, checksum: Digest) -> Result<IndexEntry, St
         dependencies,
         checksum,
         yanked: false,
+        signature: None,
     })
 }
 
@@ -2345,5 +2554,25 @@ mod tests {
         assert!(error.contains("out of date"), "{error}");
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// `D-059`: what is about to be signed has to survive being unpacked and
+    /// packed again, because a signature says these bytes *are* the package.
+    #[test]
+    fn only_an_archive_that_reproduces_itself_is_published() {
+        let entries = vec![slopium_manifest::archive::Entry::file(
+            "demo-0.1.0/Slopium.toml",
+            MANIFEST.as_bytes(),
+        )];
+        let bytes = slopium_manifest::archive::write(&entries).unwrap();
+        let digest = slopium_manifest::sha256::sha256(&bytes);
+        round_trips(&bytes, &digest).expect("what `package` writes round-trips");
+
+        // A tar whose header says one length and whose body is another is a
+        // tar that unpacks to something else than it was written from.
+        let mut damaged = bytes.clone();
+        let last = damaged.len() - 1;
+        damaged[last] ^= 0xff;
+        assert!(round_trips(&damaged, &digest).is_err());
     }
 }

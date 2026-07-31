@@ -45,7 +45,18 @@ fetching are the only parts of it with codes so far (`D-048`):
 - `SL1034`: a downloaded archive does not hash to what the index published;
 - `SL1035`: every version that would satisfy a requirement is yanked;
 - `SL1036`: an index file is malformed;
-- `SL1037`: an index or a package could not be fetched.
+- `SL1037`: an index or a package could not be fetched;
+- `SL1040`: a registry has `trusted-keys`, and a package from it is unsigned;
+- `SL1041`: a signature by a trusted key does not verify the package it is
+  filed with (`D-056`);
+- `SL1042`: a package is signed by a key that is not in `trusted-keys` — which
+  is also what a publisher's key rotation looks like, so the message names the
+  key to add;
+- `SL1043`: a version is already in the index, and an index line is append-only
+  (`D-059`);
+- `SL1044`: the Nix bridge cannot fetch a locked source. It is thrown during
+  evaluation rather than printed by `slopium`, because that is where the
+  refusal happens (`D-061`).
 
 The v0.2 package and language-core diagnostics reserve:
 

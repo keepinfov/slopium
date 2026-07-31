@@ -5,6 +5,7 @@ pub mod manifest;
 pub mod registry;
 pub mod resolve;
 pub mod sha256;
+pub mod signature;
 pub mod source;
 pub mod sources;
 pub mod std_library;

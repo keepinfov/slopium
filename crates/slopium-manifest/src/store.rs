@@ -17,6 +17,7 @@
 
 use crate::archive::{self, EntryKind};
 use crate::sha256::{sha256, Digest};
+use crate::signature::Signature;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -86,6 +87,46 @@ impl Store {
 
     pub fn checkout_path(&self, digest: &Digest) -> PathBuf {
         self.root.join("store").join(digest.to_string())
+    }
+
+    /// Where the signature of a stored archive lives, beside the archive.
+    ///
+    /// It follows the bytes into the store so that verification is a property
+    /// of the build rather than of whichever project happened to download the
+    /// package first (`D-058`).
+    pub fn signature_path(&self, digest: &Digest) -> PathBuf {
+        self.root.join("archives").join(format!(
+            "{digest}.{}.{}",
+            archive::ARCHIVE_EXTENSION,
+            crate::signature::SIGNATURE_EXTENSION
+        ))
+    }
+
+    /// The signature filed with an archive, if one was ever filed.
+    pub fn signature(&self, digest: &Digest) -> Result<Option<Signature>, String> {
+        let path = self.signature_path(digest);
+        match fs::read_to_string(&path) {
+            Ok(text) => Signature::parse(text.trim())
+                .map(Some)
+                .map_err(|error| format!("`{}`: {error}", path.display())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(format!("cannot read `{}`: {error}", path.display())),
+        }
+    }
+
+    /// File a signature with an archive already in the store.
+    pub fn insert_signature(&self, digest: &Digest, signature: &Signature) -> Result<(), String> {
+        let path = self.signature_path(digest);
+        let directory = path
+            .parent()
+            .expect("a signature path has a parent directory");
+        fs::create_dir_all(directory)
+            .map_err(|error| format!("cannot create `{}`: {error}", directory.display()))?;
+        let temporary = directory.join(format!(".{digest}.{}", scratch_suffix()));
+        fs::write(&temporary, format!("{signature}\n"))
+            .map_err(|error| format!("cannot write `{}`: {error}", temporary.display()))?;
+        fs::rename(&temporary, &path)
+            .map_err(|error| format!("cannot write `{}`: {error}", path.display()))
     }
 
     pub fn holds(&self, digest: &Digest) -> bool {

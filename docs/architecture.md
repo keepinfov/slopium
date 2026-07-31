@@ -268,6 +268,23 @@ that selected it and the digest it was published under. Again the compiler is
 handed a directory in the store, so the resolver is the only part of the system
 that knows registries exist at all.
 
+Signing sits at that same boundary, and at one point inside it. `slopium
+publish` writes an Ed25519 signature over a statement naming the package, its
+version and its digest — never over the digest alone, which would be
+transplantable — into the registry beside the archive and into the index line.
+Consumption is a policy of the consuming checkout: `[registry.<name>]
+trusted-keys` lists who may sign, an empty list checks nothing, and there is no
+trust on first use to make the first download a decision. The check happens in
+the one function that turns a resolved package into a directory, so it runs on
+every build rather than only on the download that filled the store, and adding a
+key takes effect immediately. Nothing about it reaches the compiler either.
+
+`lib.buildSlopiumPackage` inverts the direction: Nix reads a `Slopium.lock` this
+resolver wrote and turns it into fixed-output derivations keyed by the very
+checksums it recorded, then builds `--offline --locked`. There is one resolver
+and it runs once, which is why the two build paths cannot disagree about a
+graph.
+
 ## Runtime boundary
 
 Generated programs link a small C runtime through the stable `sl_rt_*` ABI.

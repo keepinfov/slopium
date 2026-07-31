@@ -1,0 +1,17 @@
+# Written by slopium. Do not edit by hand.
+version = 2
+
+[[package]]
+name = "consumer"
+version = "0.1.0"
+source = "path+."
+dependencies = [
+    "geometry",
+]
+
+[[package]]
+name = "geometry"
+version = "1.0.0"
+source = "registry+../registry"
+checksum = "a419142d87e361026c3519a6425b46c4823bbe527c8af5fd49c8c2c7db664aac"
+dependencies = []

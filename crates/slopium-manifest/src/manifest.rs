@@ -454,6 +454,11 @@ pub struct RegistryConfig {
     /// Where the index tree is: an `https://` URL, a `file://` one, or a path
     /// relative to the workspace root.
     pub index: Option<String>,
+    /// Who may sign packages taken from here, as `ed25519:<hex>`. An empty list
+    /// means signatures are not checked at all; there is no third state, and in
+    /// particular nothing is remembered from a first download (`D-057`).
+    #[serde(default, rename = "trusted-keys")]
+    pub trusted_keys: Vec<String>,
 }
 
 /// One `[source.<name>]` table: either a redirection or a place to redirect to.
