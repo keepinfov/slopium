@@ -33,6 +33,10 @@
           pkgs.makeWrapper
           pkgs.installShellFiles
           pkgs.stdenv.cc
+          # The git-dependency tests build a repository in a temporary
+          # directory and fetch from it, which needs `git` in the sandbox —
+          # and nothing else, because nothing there reaches the network.
+          pkgs.git
         ];
 
         cargoBuildFlags = [ "--workspace" ];
@@ -242,6 +246,7 @@
               clippy
               stdenv.cc
               binutils
+              git
               gdb
               valgrind
               crossCc

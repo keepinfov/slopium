@@ -5,7 +5,7 @@
 //! file and walked the dependency graph a second time. Anything both of them
 //! must agree about belongs outside both (`D-025`).
 
-use crate::source::SourceSpec;
+use crate::source::{GitReference, SourceSpec};
 use crate::version::{Version, VersionReq};
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
@@ -189,12 +189,60 @@ impl LanguageItemSection {
 pub struct DependencySpec {
     pub path: Option<PathBuf>,
     pub toolchain: Option<bool>,
+    /// A repository URL, in any form `git` itself accepts.
+    pub git: Option<String>,
+    /// Which commit of `git` to take. At most one of these, and none of them
+    /// without `git`; absent altogether means the repository's default branch.
+    pub branch: Option<String>,
+    pub tag: Option<String>,
+    pub rev: Option<String>,
     pub version: Option<VersionReq>,
     /// `workspace = true`: take this entry from `[workspace.dependencies]`.
     pub workspace: Option<bool>,
 }
 
 impl DependencySpec {
+    /// Every key that names where a dependency comes from, for the checks that
+    /// have to talk about "a source" without caring which one.
+    fn named_sources(&self) -> Vec<&'static str> {
+        [
+            ("path", self.path.is_some()),
+            ("toolchain", self.toolchain.is_some()),
+            ("git", self.git.is_some()),
+            ("branch", self.branch.is_some()),
+            ("tag", self.tag.is_some()),
+            ("rev", self.rev.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(name, given)| given.then_some(name))
+        .collect()
+    }
+
+    /// Which commit of a repository this entry names.
+    fn reference(&self, name: &str) -> Result<GitReference, String> {
+        let given: Vec<(&str, &String)> = [
+            ("branch", self.branch.as_ref()),
+            ("tag", self.tag.as_ref()),
+            ("rev", self.rev.as_ref()),
+        ]
+        .into_iter()
+        .filter_map(|(key, value)| value.map(|value| (key, value)))
+        .collect();
+        match given.as_slice() {
+            [] => Ok(GitReference::DefaultBranch),
+            [("branch", branch)] => Ok(GitReference::Branch((*branch).clone())),
+            [("tag", tag)] => Ok(GitReference::Tag((*tag).clone())),
+            [("rev", rev)] => Ok(GitReference::Rev((*rev).clone())),
+            _ => Err(format!(
+                "dependency `{name}` names {}; a git dependency takes one commit",
+                given
+                    .iter()
+                    .map(|(key, _)| format!("`{key}`"))
+                    .collect::<Vec<_>>()
+                    .join(" and ")
+            )),
+        }
+    }
     /// This entry with `workspace = true` replaced by what the workspace says.
     ///
     /// One member and one workspace must not each hold half an entry, so the
@@ -212,7 +260,7 @@ impl DependencySpec {
                 "dependency `{name}` has `workspace = false`; drop the key or name a source"
             )),
             Some(true) => {
-                if self.path.is_some() || self.toolchain.is_some() || self.version.is_some() {
+                if !self.named_sources().is_empty() || self.version.is_some() {
                     return Err(format!(
                         "dependency `{name}` says `workspace = true` and also names a source; the workspace entry is taken whole"
                     ));
@@ -237,24 +285,47 @@ impl DependencySpec {
     }
 
     /// Which source this entry names, rejecting the combinations that have no
-    /// meaning. The `Git` and `Registry` arms arrive in v0.4.3 and v0.4.4.
+    /// meaning. The `Registry` arm arrives in v0.4.4.
     pub fn source(&self, name: &str) -> Result<SourceSpec, String> {
         if self.workspace.is_some() {
             return Err(format!(
                 "dependency `{name}` still says `workspace = true` after inheritance"
             ));
         }
-        match (&self.path, self.toolchain) {
-            (Some(_), Some(_)) => Err(format!(
-                "dependency `{name}` names both `path` and `toolchain`; pick one"
+        // `branch`, `tag` and `rev` refine `git` rather than naming a source of
+        // their own, so they are reported as the mistake they are: a commit of
+        // no repository.
+        if self.git.is_none() {
+            if let Some(dangling) = ["branch", "tag", "rev"]
+                .into_iter()
+                .find(|key| self.named_sources().contains(key))
+            {
+                return Err(format!(
+                    "dependency `{name}` names `{dangling}` without `git`; there is no repository to take it from"
+                ));
+            }
+        }
+        match (&self.path, self.toolchain, &self.git) {
+            (None, None, None) => Err(format!(
+                "dependency `{name}` names no source; add `path`, `git`, or `toolchain = true`"
             )),
-            (Some(path), None) => Ok(SourceSpec::Path(path.clone())),
-            (None, Some(true)) => Ok(SourceSpec::Toolchain),
-            (None, Some(false)) => Err(format!(
-                "dependency `{name}` has `toolchain = false`; name a `path` instead"
+            (None, Some(false), None) => Err(format!(
+                "dependency `{name}` has `toolchain = false`; name a `path` or a `git` repository instead"
             )),
-            (None, None) => Err(format!(
-                "dependency `{name}` names no source; add `path` or `toolchain = true`"
+            (Some(path), None, None) => Ok(SourceSpec::Path(path.clone())),
+            (None, Some(true), None) => Ok(SourceSpec::Toolchain),
+            (None, None, Some(url)) => Ok(SourceSpec::Git {
+                url: url.clone(),
+                reference: self.reference(name)?,
+            }),
+            _ => Err(format!(
+                "dependency `{name}` names {}; pick one",
+                self.named_sources()
+                    .iter()
+                    .filter(|key| matches!(**key, "path" | "toolchain" | "git"))
+                    .map(|key| format!("`{key}`"))
+                    .collect::<Vec<_>>()
+                    .join(" and ")
             )),
         }
     }
@@ -670,6 +741,71 @@ mod tests {
             .source("x")
             .unwrap_err()
             .contains("toolchain = false"));
+    }
+
+    #[test]
+    fn a_git_dependency_names_one_commit() {
+        let url = "https://example.invalid/geometry.git";
+        let plain = DependencySpec {
+            git: Some(url.to_owned()),
+            ..DependencySpec::default()
+        };
+        assert_eq!(
+            plain.source("geometry").unwrap(),
+            SourceSpec::Git {
+                url: url.to_owned(),
+                reference: GitReference::DefaultBranch,
+            }
+        );
+
+        let tagged = DependencySpec {
+            git: Some(url.to_owned()),
+            tag: Some("v1.4.0".to_owned()),
+            ..DependencySpec::default()
+        };
+        assert_eq!(
+            tagged.source("geometry").unwrap(),
+            SourceSpec::Git {
+                url: url.to_owned(),
+                reference: GitReference::Tag("v1.4.0".to_owned()),
+            }
+        );
+
+        let two = DependencySpec {
+            git: Some(url.to_owned()),
+            branch: Some("main".to_owned()),
+            rev: Some("0123456".to_owned()),
+            ..DependencySpec::default()
+        };
+        let error = two.source("geometry").unwrap_err();
+        assert!(error.contains("one commit"), "{error}");
+        assert!(error.contains("`branch`"), "{error}");
+    }
+
+    /// A commit of no repository is a typo with a plausible-looking key, so it
+    /// says what is missing rather than "names no source".
+    #[test]
+    fn a_reference_without_a_repository_says_so() {
+        let error = DependencySpec {
+            branch: Some("main".to_owned()),
+            ..DependencySpec::default()
+        }
+        .source("geometry")
+        .unwrap_err();
+        assert!(error.contains("without `git`"), "{error}");
+    }
+
+    #[test]
+    fn a_git_dependency_that_is_also_a_path_is_refused() {
+        let error = DependencySpec {
+            git: Some("https://example.invalid/x.git".to_owned()),
+            path: Some(PathBuf::from("../x")),
+            ..DependencySpec::default()
+        }
+        .source("x")
+        .unwrap_err();
+        assert!(error.contains("pick one"), "{error}");
+        assert!(error.contains("`git`"), "{error}");
     }
 
     #[test]

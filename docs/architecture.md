@@ -247,6 +247,16 @@ re-archiving it. Replacement is invisible to resolution: a replaced package
 keeps its identity, its source and its lock entry, so vendoring cannot change
 what a project resolves to.
 
+A git dependency is fetched by running `git`, which the manager treats the way
+it treats `cc`: an external program that already knows about transports and
+credentials. What comes back is `git archive` of the resolved commit, normalized
+into that same archive format and stored under its digest — so a fetched package
+is the same kind of object as a published one, and the lock records the commit
+*and* the digest. Resolution pins a full commit and never asks again: a
+dependency the lock names is not re-resolved, which is what makes a moved branch
+unable to move a build. The compiler is still handed a directory, so nothing
+below the manager knows a repository was involved.
+
 ## Runtime boundary
 
 Generated programs link a small C runtime through the stable `sl_rt_*` ABI.

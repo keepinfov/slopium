@@ -21,8 +21,8 @@ Code families are stable:
 - `SL07xx`: internal compiler errors.
 
 `SL10xx` belongs to the project manager rather than the compiler, and is plain
-text rather than JSON — `slopium` reports one error and exits. Packaging is the
-only part of it with codes so far (`D-048`):
+text rather than JSON — `slopium` reports one error and exits. Packaging and
+fetching are the only parts of it with codes so far (`D-048`):
 
 - `SL1001`: an archive entry names a path outside the package;
 - `SL1002`: an archive entry is not a file or a directory;
@@ -30,7 +30,11 @@ only part of it with codes so far (`D-048`):
 - `SL1004`: an archive is malformed;
 - `SL1010`: a stored archive does not match the digest it is filed under;
 - `SL1011`: a package is not in the store and cannot be fetched;
-- `SL1012`: a vendored copy does not match its checksum.
+- `SL1012`: a vendored copy does not match its checksum;
+- `SL1020`: a `git` command could not be run, or failed;
+- `SL1021`: a fetched package uses submodules, which v0.4 does not fetch;
+- `SL1022`: a pinned commit no longer archives to the digest the lock records;
+- `SL1023`: a git reference names no commit in the repository.
 
 The v0.2 package and language-core diagnostics reserve:
 

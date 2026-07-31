@@ -13,12 +13,15 @@ use slopic_core::package::{
 };
 use slopic_core::syntax::SyntaxKind;
 use slopic_core::CompileOptions;
+use slopium_manifest::lock::Lockfile;
 use slopium_manifest::manifest::Project;
 use slopium_manifest::resolve::{resolve, Resolution};
 use slopium_manifest::source::SourceId;
+use slopium_manifest::sources::Sources;
 use slopium_manifest::std_library::{std_module_path, STD_MODULES};
+use slopium_manifest::store::{Access, Store};
 use slopium_manifest::version::Version;
-use slopium_manifest::workspace::{load_project, load_workspace};
+use slopium_manifest::workspace::{load_project, load_workspace, Workspace as PackageWorkspace};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fs;
@@ -641,6 +644,31 @@ fn workspace_span_for_uri(symbol: &WorkspaceSymbol, uri: &str) -> Option<Span> {
         .or_else(|| (symbol.definition.uri == uri).then_some(symbol.definition.span))
 }
 
+/// How the language server is allowed to reach a dependency's bytes.
+///
+/// Offline, always. Typing in an editor must not start a fetch: the analysis
+/// runs on every keystroke, and a language server that clones a repository
+/// because a manifest changed under the cursor is a language server nobody can
+/// predict. What it can use is what a build already put in the store, pinned by
+/// the lock — so a dependency the project has never built is reported as one,
+/// which is the honest answer.
+fn editor_sources(workspace: &PackageWorkspace) -> Sources {
+    let lock = fs::read_to_string(workspace.lock_path())
+        .ok()
+        .and_then(|text| Lockfile::parse(&text).ok());
+    match Store::open() {
+        Ok(store) => Sources::new(store, Access::Offline, false).with_lock(lock.as_ref()),
+        // No store to read is the same situation as an empty one, and it is not
+        // a reason to stop reporting diagnostics for the file being edited.
+        Err(_) => Sources::new(
+            Store::at(workspace.target_dir().join("store")),
+            Access::Offline,
+            false,
+        )
+        .with_lock(lock.as_ref()),
+    }
+}
+
 /// Whether this package's entry module must define `main`.
 ///
 /// `D-015`: a `lib.slp` entry and a manifest defining `[language-items]` are
@@ -699,7 +727,12 @@ fn build_workspace(
         });
     }
     let toolchain_version = Version::parse(slopic_core::STANDARD_LIBRARY_VERSION)?;
-    let resolution = resolve(&project, &loaded, &toolchain_version)?;
+    let resolution = resolve(
+        &project,
+        &loaded,
+        &toolchain_version,
+        &editor_sources(&loaded),
+    )?;
     let language_items = language_items_from(&resolution);
     add_resolved_dependencies(&resolution, open_documents, &mut files, &mut sources)?;
     let input = PackageInput {
@@ -787,7 +820,9 @@ fn add_resolved_dependencies(
                     });
                 }
             }
-            (SourceId::Path(_), Some(project)) => {
+            // A fetched package has been unpacked into the store by the time
+            // resolution returns, so it is read like any other directory.
+            (SourceId::Path(_) | SourceId::Git { .. }, Some(project)) => {
                 let source_root = project.source_root()?;
                 let mut paths = Vec::new();
                 collect_workspace_sources(&source_root, &mut paths)?;
@@ -811,11 +846,10 @@ fn add_resolved_dependencies(
                     });
                 }
             }
-            (SourceId::Path(path), None) => {
+            (source, None) => {
                 return Err(format!(
-                    "package `{}` at `{}` was resolved without a manifest",
-                    package.id.name,
-                    path.display()
+                    "package `{}` from `{source}` was resolved without a manifest",
+                    package.id.name
                 ))
             }
         }

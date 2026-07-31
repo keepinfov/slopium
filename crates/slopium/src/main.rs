@@ -6,12 +6,10 @@ use slopic_core::syntax::{format_source, FormatOptions};
 use slopium_manifest::archive::{package_archive, ARCHIVE_EXTENSION};
 use slopium_manifest::lock::{Lockfile, LOCK_FILE};
 use slopium_manifest::manifest::{load_local_config, validate_package_name, Profile, Project};
-use slopium_manifest::resolve::{
-    resolve_workspace, Resolution, ResolvedPackage, WorkspaceResolution,
-};
-use slopium_manifest::sha256::Digest;
+use slopium_manifest::resolve::{resolve_workspace, Resolution, WorkspaceResolution};
 use slopium_manifest::source::SourceId;
-use slopium_manifest::std_library::{std_archive, std_module_path, STD_MODULES};
+use slopium_manifest::sources::Sources;
+use slopium_manifest::std_library::{std_module_path, STD_MODULES};
 use slopium_manifest::store::{remove_tree, Access, Store};
 use slopium_manifest::version::Version;
 use slopium_manifest::workspace::{load_workspace, Workspace};
@@ -136,8 +134,8 @@ struct ResolveArgs {
     /// Fail instead of writing `Slopium.lock`.
     #[arg(long)]
     locked: bool,
-    /// Never reach the network. Every source in v0.4.0 is already local, so
-    /// this forbids nothing yet; git and registry sources honour it.
+    /// Never reach the network: build from the lock, the package store and any
+    /// vendored copies, and fail naming what is missing.
     #[arg(long)]
     offline: bool,
     /// `--locked` and `--offline` together.
@@ -261,7 +259,7 @@ fn main() {
             }),
         Commands::Vendor { dir, resolve } => {
             Session::open_ignoring_replacements(cli.manifest_path, resolve)
-                .and_then(|session| vendor(&session, &dir, resolve.access()))
+                .and_then(|session| vendor(&session, &dir))
         }
         Commands::Tree { resolve, select } => {
             Session::open(cli.manifest_path, resolve).and_then(|session| {
@@ -427,6 +425,9 @@ fn create_project(name: &str, path: Option<PathBuf>, library: bool) -> Result<()
 struct Session {
     workspace: Workspace,
     resolution: WorkspaceResolution,
+    /// Kept so that commands acting on the resolved graph — `vendor` — reach
+    /// the store through the same policy resolution did.
+    sources: Sources,
 }
 
 impl Session {
@@ -457,12 +458,19 @@ impl Session {
         if !replacements {
             workspace.config.source.clear();
         }
+        // The lock is read before resolution rather than after it: what it
+        // pinned is an input to resolving a source that moves, and reading it
+        // twice would mean reporting an unreadable one twice.
+        let existing = read_lock(&workspace, args)?;
+        let sources =
+            Sources::new(Store::open()?, args.access(), args.locked()).with_lock(existing.as_ref());
         let toolchain_version = Version::parse(slopic_core::STANDARD_LIBRARY_VERSION)?;
-        let resolution = resolve_workspace(&workspace, &toolchain_version)?;
-        synchronize_lock(&workspace, &resolution, args)?;
+        let resolution = resolve_workspace(&workspace, &toolchain_version, &sources)?;
+        synchronize_lock(&workspace, &resolution, existing, args)?;
         Ok(Self {
             workspace,
             resolution,
+            sources,
         })
     }
 
@@ -1073,14 +1081,16 @@ fn dependencies_of(project: &Project, resolution: &Resolution) -> Result<Depende
                 ResolvedDependencySource::Path(project.source_root()?)
             }
             (SourceId::Toolchain, None) => ResolvedDependencySource::Toolchain,
-            (SourceId::Path(_), Some(project)) => {
+            // A git package has been unpacked into the store or copied into the
+            // vendor directory by the time a build reads it, so like every
+            // other fetched package it is a directory of sources.
+            (SourceId::Path(_) | SourceId::Git { .. }, Some(project)) => {
                 ResolvedDependencySource::Path(project.source_root()?)
             }
-            (SourceId::Path(path), None) => {
+            (source, None) => {
                 return Err(format!(
-                    "package `{}` at `{}` was resolved without a manifest",
-                    package.id.name,
-                    path.display()
+                    "package `{}` from `{source}` was resolved without a manifest",
+                    package.id.name
                 ))
             }
         };
@@ -1130,10 +1140,9 @@ fn package(workspace: &Workspace, project: &Project) -> Result<PathBuf, String> 
 /// Only packages with immutable bytes are vendored, which is what having a
 /// checksum means: a path dependency is already a directory on this machine and
 /// copying it would only make a second one that can drift from the first.
-fn vendor(session: &Session, directory: &Path, access: Access) -> Result<(), String> {
+fn vendor(session: &Session, directory: &Path) -> Result<(), String> {
     let workspace = &session.workspace;
     let root = workspace.root.join(directory);
-    let store = Store::open()?;
     let mut vendored = Vec::new();
 
     for package in session.resolution.packages.values() {
@@ -1141,19 +1150,10 @@ fn vendor(session: &Session, directory: &Path, access: Access) -> Result<(), Str
             continue;
         };
         let described = package.id.to_string();
-        if !store.holds(&checksum) {
-            let (bytes, digest) = archive_of(package)?;
-            if digest != checksum {
-                return Err(format!(
-                    "`{described}` archives to {digest}, but the resolved graph expects {checksum}"
-                ));
-            }
-            store.insert(&bytes)?;
-        }
         // Through the store rather than around it: the copy that lands in the
         // vendor directory is one that has already been verified against its
         // digest and unpacked by code that refuses to write outside itself.
-        let checkout = store.checkout(&checksum, &described, access)?;
+        let checkout = session.sources.checkout(&package.id, &checksum)?;
         let destination = root.join(&package.id.name);
         remove_tree(&destination)?;
         copy_tree(&checkout, &destination)?;
@@ -1241,18 +1241,6 @@ fn redirect_sources(
     Ok(())
 }
 
-/// The archive of a resolved package, from wherever its bytes come from.
-fn archive_of(package: &ResolvedPackage) -> Result<(Vec<u8>, Digest), String> {
-    match &package.id.source {
-        SourceId::Toolchain => std_archive(&package.id.version),
-        SourceId::Path(path) => Err(format!(
-            "`{}` is the directory `{}`; there is nothing to fetch and nothing to pin",
-            package.id,
-            path.display()
-        )),
-    }
-}
-
 /// Copy a checked-out tree into the vendor directory, writable.
 ///
 /// The store keeps its files read-only so nobody edits a package by accident;
@@ -1313,30 +1301,36 @@ fn reject_namespace_collisions(project: &Project, resolution: &Resolution) -> Re
     Ok(())
 }
 
-/// Write the workspace's lockfile, or refuse to under `--locked`.
-fn synchronize_lock(
-    workspace: &Workspace,
-    resolution: &WorkspaceResolution,
-    args: ResolveArgs,
-) -> Result<(), String> {
+/// Read the lockfile, which is what pins a source that would otherwise move.
+fn read_lock(workspace: &Workspace, args: ResolveArgs) -> Result<Option<Lockfile>, String> {
     let path = workspace.lock_path();
-    let resolved = Lockfile::from_packages(&resolution.packages, &workspace.root);
-    let existing = match fs::read_to_string(&path) {
+    match fs::read_to_string(&path) {
         // A lock this toolchain cannot read is still only a build product, and
         // resolution can write a new one from the manifests alone. Saying so
         // and carrying on beats making somebody delete a file by hand — but
         // `--locked` asked for exactly the opposite, so there it is an error.
         Ok(text) => match Lockfile::parse(&text) {
-            Ok(lock) => Some(lock),
-            Err(error) if args.locked() => return Err(error),
+            Ok(lock) => Ok(Some(lock)),
+            Err(error) if args.locked() => Err(error),
             Err(error) => {
                 println!("Replacing {LOCK_FILE}: {error}");
-                None
+                Ok(None)
             }
         },
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(format!("cannot read `{}`: {error}", path.display())),
-    };
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("cannot read `{}`: {error}", path.display())),
+    }
+}
+
+/// Write the workspace's lockfile, or refuse to under `--locked`.
+fn synchronize_lock(
+    workspace: &Workspace,
+    resolution: &WorkspaceResolution,
+    existing: Option<Lockfile>,
+    args: ResolveArgs,
+) -> Result<(), String> {
+    let path = workspace.lock_path();
+    let resolved = Lockfile::from_packages(&resolution.packages, &workspace.root);
     if existing.as_ref() == Some(&resolved) {
         return Ok(());
     }

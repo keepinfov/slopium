@@ -224,6 +224,140 @@ pub fn read(bytes: &[u8]) -> Result<Vec<Entry>, String> {
     Ok(entries)
 }
 
+/// Parse a tar written by something other than this toolchain.
+///
+/// `git archive` is the one that matters (`D-050`), and its output is a package
+/// only in the sense that the files are right: entries carry the commit's
+/// timestamp, the umask's modes and pax headers, and they sit at the top level
+/// rather than under a prefix. So this takes the two things the package format
+/// can hold — a path and the bytes at it — and throws the rest away. What comes
+/// back goes through [`under_prefix`] and [`write`], which is where a package's
+/// canonical form is decided; nothing here decides anything.
+///
+/// It is no less suspicious of its input than [`read`] is. A link, a device, a
+/// path with `..` in it and a truncated block are each refused by name.
+pub fn read_exported(bytes: &[u8]) -> Result<Vec<Entry>, String> {
+    if !bytes.len().is_multiple_of(BLOCK) || bytes.is_empty() {
+        return Err(format!(
+            "SL1004: an archive is a whole number of {BLOCK}-byte blocks, and this one is {} bytes",
+            bytes.len()
+        ));
+    }
+    let mut entries = Vec::new();
+    let mut offset = 0;
+    // A pax extended header describes the entry after it, and long paths are
+    // the reason git emits one.
+    let mut extended_path: Option<String> = None;
+    while offset + BLOCK <= bytes.len() {
+        let block = &bytes[offset..offset + BLOCK];
+        offset += BLOCK;
+        if block.iter().all(|byte| *byte == 0) {
+            break;
+        }
+        if &block[257..262] != b"ustar" {
+            return Err("SL1004: not a ustar archive".to_owned());
+        }
+        verify_checksum(block)?;
+
+        let size = octal(block, 124, 12)? as usize;
+        let end = offset
+            .checked_add(size)
+            .filter(|end| *end <= bytes.len())
+            .ok_or_else(|| "SL1004: an archive entry runs past the end".to_owned())?;
+        let content = &bytes[offset..end];
+        offset += size.div_ceil(BLOCK) * BLOCK;
+
+        let flag = block[156];
+        // A global header applies to the whole archive and says nothing this
+        // format can carry; git writes one holding the commit hash.
+        if flag == b'g' {
+            continue;
+        }
+        if flag == b'x' {
+            extended_path = pax_path(content)?;
+            continue;
+        }
+
+        let stored_prefix = field(block, 345, 155)?;
+        let name = field(block, 0, 100)?;
+        let joined = match extended_path.take() {
+            Some(path) => path,
+            None if stored_prefix.is_empty() => name,
+            None => format!("{stored_prefix}/{name}"),
+        };
+        let kind = match flag {
+            b'0' | 0 => EntryKind::File,
+            b'5' => EntryKind::Directory,
+            other => {
+                let described = match other {
+                    b'1' => "a hard link",
+                    b'2' => "a symbolic link",
+                    b'3' | b'4' => "a device node",
+                    b'6' => "a fifo",
+                    _ => "an entry this format cannot hold",
+                };
+                return Err(format!(
+                    "SL1002: `{joined}` is {described}; a package holds files and directories only"
+                ));
+            }
+        };
+        let path = check_portable_path(joined.trim_end_matches('/'))?;
+        entries.push(Entry {
+            path: path.to_owned(),
+            kind,
+            bytes: if kind == EntryKind::File {
+                content.to_vec()
+            } else {
+                Vec::new()
+            },
+        });
+    }
+    if entries.is_empty() {
+        return Err("SL1004: the archive holds no entries".to_owned());
+    }
+    Ok(entries)
+}
+
+/// The `path=` record of a pax extended header, if it has one.
+///
+/// The format is a sequence of `<length> <key>=<value>\n` records, where the
+/// length counts its own digits. Only `path` is understood here; anything else
+/// describes a property a package archive does not have.
+fn pax_path(content: &[u8]) -> Result<Option<String>, String> {
+    let text = std::str::from_utf8(content)
+        .map_err(|_| "SL1004: an extended archive header is not text".to_owned())?;
+    let mut rest = text;
+    while !rest.is_empty() {
+        let (length, tail) = rest
+            .split_once(' ')
+            .ok_or_else(|| "SL1004: a malformed extended archive header".to_owned())?;
+        let length: usize = length
+            .parse()
+            .map_err(|_| "SL1004: a malformed extended archive header".to_owned())?;
+        let consumed = rest.len() - tail.len();
+        let record = rest
+            .get(consumed..length)
+            .ok_or_else(|| "SL1004: a malformed extended archive header".to_owned())?;
+        if let Some(path) = record.trim_end_matches('\n').strip_prefix("path=") {
+            return Ok(Some(path.to_owned()));
+        }
+        rest = &rest[length..];
+    }
+    Ok(None)
+}
+
+/// Re-root exported entries under a package's `<name>-<version>/` directory.
+pub fn under_prefix(entries: &[Entry], prefix: &str) -> Vec<Entry> {
+    entries
+        .iter()
+        .map(|entry| Entry {
+            path: format!("{prefix}/{}", entry.path),
+            kind: entry.kind,
+            bytes: entry.bytes.clone(),
+        })
+        .collect()
+}
+
 /// The single top-level directory of an archive's entries.
 pub fn prefix_of(entries: &[Entry]) -> Result<&str, String> {
     entries
@@ -460,7 +594,12 @@ fn glob(pattern: &str, text: &str) -> bool {
 }
 
 /// Reject a path that could not be unpacked safely, wherever it came from.
-fn check_path(path: &str, kind: EntryKind) -> Result<&str, String> {
+///
+/// This is the half of the rule that holds for any tar at all, so an exported
+/// one is checked by it too. What it does not say is where in a package the
+/// entry sits; that is [`check_path`], and only an archive of this format has
+/// an opinion about it.
+fn check_portable_path(path: &str) -> Result<&str, String> {
     if path.is_empty() {
         return Err("SL1001: an archive entry has an empty path".to_owned());
     }
@@ -477,6 +616,12 @@ fn check_path(path: &str, kind: EntryKind) -> Result<&str, String> {
             ));
         }
     }
+    Ok(path)
+}
+
+/// Reject a path that has no place in a package archive.
+fn check_path(path: &str, kind: EntryKind) -> Result<&str, String> {
+    let path = check_portable_path(path)?;
     // The one entry allowed a single component is the prefix directory itself.
     if path.split('/').count() < 2 && kind == EntryKind::File {
         return Err(format!(
@@ -686,6 +831,97 @@ mod tests {
         assert!(deep.len() > 100);
         let entries = read(&write(&[Entry::file(deep.clone(), b"x".to_vec())]).unwrap()).unwrap();
         assert!(entries.iter().any(|entry| entry.path == deep));
+    }
+
+    /// A tar from elsewhere carries a timestamp, an owner, a mode and its files
+    /// at the top level. None of that reaches the package (`D-050`).
+    #[test]
+    fn an_exported_tar_keeps_only_its_paths_and_contents() {
+        let canonical = write(&sample()).unwrap();
+        // Everything the writer put under the prefix, back-dated and owned by
+        // somebody — which is what `git archive` would have handed over. The
+        // prefix directory itself is dropped, because git has no idea it exists.
+        let mut foreign = Vec::new();
+        let mut start = 0;
+        while start + BLOCK <= canonical.len() {
+            let mut block = [0u8; BLOCK];
+            block.copy_from_slice(&canonical[start..start + BLOCK]);
+            if block.iter().all(|byte| *byte == 0) {
+                break;
+            }
+            let size = octal(&block, 124, 12).unwrap() as usize;
+            let payload = canonical[start + BLOCK..start + BLOCK + size].to_vec();
+            start += BLOCK + size.div_ceil(BLOCK) * BLOCK;
+
+            let Some(stripped) = field(&block, 0, 100)
+                .unwrap()
+                .strip_prefix("demo-1.0.0/")
+                .filter(|stripped| !stripped.is_empty())
+                .map(str::to_owned)
+            else {
+                continue;
+            };
+            block[..100].fill(0);
+            block[..stripped.len()].copy_from_slice(stripped.as_bytes());
+            block[136..147].copy_from_slice(b"14676756131");
+            block[108..115].copy_from_slice(b"0001750");
+            reseal(&mut block);
+            foreign.extend_from_slice(&block);
+            foreign.extend_from_slice(&payload);
+            foreign.resize(foreign.len() + (BLOCK - size % BLOCK) % BLOCK, 0);
+        }
+        foreign.resize(foreign.len() + 2 * BLOCK, 0);
+
+        let entries = read_exported(&foreign).unwrap();
+        assert!(entries
+            .iter()
+            .any(|entry| entry.path == "Slopium.toml" && entry.kind == EntryKind::File));
+        let repacked = write(&under_prefix(&entries, "demo-1.0.0")).unwrap();
+        // The timestamps and owners are gone, so the exported tar and the
+        // canonical one are the same package.
+        assert_eq!(repacked, write(&sample()).unwrap());
+    }
+
+    #[test]
+    fn an_exported_symbolic_link_is_refused() {
+        let mut foreign = write(&sample()).unwrap();
+        foreign[156] = b'2';
+        reseal(&mut foreign[..BLOCK]);
+        let error = read_exported(&foreign).unwrap_err();
+        assert!(error.contains("SL1002"), "{error}");
+    }
+
+    #[test]
+    fn an_exported_path_that_escapes_is_refused() {
+        let mut foreign = write(&sample()).unwrap();
+        let forged = b"../escape";
+        foreign[..100].fill(0);
+        foreign[..forged.len()].copy_from_slice(forged);
+        reseal(&mut foreign[..BLOCK]);
+        let error = read_exported(&foreign).unwrap_err();
+        assert!(error.contains("SL1001"), "{error}");
+    }
+
+    /// Recompute a header's checksum after forging one of its fields.
+    fn reseal(block: &mut [u8]) {
+        block[148..156].copy_from_slice(b"        ");
+        let sum: u32 = block.iter().map(|byte| u32::from(*byte)).sum();
+        block[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+    }
+
+    #[test]
+    fn a_pax_record_names_the_path_of_the_entry_after_it() {
+        let long = format!("{}/main.slp", ["directory"; 14].join("/"));
+        let record = format!("path={long}\n");
+        let length = record.len() + 4;
+        let header = format!("{length} {record}");
+        assert_eq!(header.len(), length);
+        assert_eq!(pax_path(header.as_bytes()).unwrap(), Some(long));
+        // git's global header carries a comment and no path at all.
+        assert_eq!(
+            pax_path(b"52 comment=0123456789abcdef0123456789abcdef01234567\n").unwrap(),
+            None
+        );
     }
 
     #[test]

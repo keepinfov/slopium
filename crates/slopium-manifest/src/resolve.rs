@@ -16,6 +16,7 @@ use crate::archive::prefix_for;
 use crate::manifest::{validate_package_name, Project, MANIFEST_FILE};
 use crate::sha256::Digest;
 use crate::source::{SourceId, SourceSpec};
+use crate::sources::Sources;
 use crate::std_library::{std_archive, std_language_items, STD_PACKAGE};
 use crate::store::verify_tree;
 use crate::version::{Version, VersionReq};
@@ -106,16 +107,24 @@ impl WorkspaceResolution {
 pub fn resolve_workspace(
     workspace: &Workspace,
     toolchain_version: &Version,
+    sources: &Sources,
 ) -> Result<WorkspaceResolution, String> {
     let mut members = BTreeMap::new();
     let mut packages: BTreeMap<String, ResolvedPackage> = BTreeMap::new();
     let mut reached_by: BTreeMap<String, String> = BTreeMap::new();
 
     for (name, project) in &workspace.members {
-        let resolution = resolve(project, workspace, toolchain_version)?;
+        let resolution = resolve(project, workspace, toolchain_version, sources)?;
         for package in resolution.packages.values() {
             match packages.get(&package.id.name) {
                 Some(existing) if existing.id == package.id => {}
+                Some(existing) if existing.id.version == package.id.version => {
+                    let first = &reached_by[&package.id.name];
+                    return Err(format!(
+                        "`{}` is required from two sources in one workspace: `{}` through `{first}` and `{}` through `{name}`. One lockfile cannot record both",
+                        package.id.name, existing.id.source, package.id.source
+                    ));
+                }
                 Some(existing) => {
                     let first = &reached_by[&package.id.name];
                     return Err(format!(
@@ -150,6 +159,7 @@ pub fn resolve(
     root: &Project,
     workspace: &Workspace,
     toolchain_version: &Version,
+    sources: &Sources,
 ) -> Result<Resolution, String> {
     let mut packages: BTreeMap<String, ResolvedPackage> = BTreeMap::new();
     let mut requirements: BTreeMap<String, Vec<Requirement>> = BTreeMap::new();
@@ -171,11 +181,13 @@ pub fn resolve(
         },
     );
 
+    // Each package is queued with the source it came from, because what a
+    // `path` dependency is allowed to mean depends on it (`D-051`).
     let mut queue = VecDeque::new();
-    queue.push_back(root.clone());
+    queue.push_back((root_id.source.clone(), root.clone()));
     let mut is_root = true;
 
-    while let Some(project) = queue.pop_front() {
+    while let Some((dependent_source, project)) = queue.pop_front() {
         let dependent = project.name.clone();
         for (declared, spec) in &project.dependencies {
             validate_package_name(declared)?;
@@ -203,7 +215,41 @@ pub fn resolve(
                     let vendored = replacement(workspace, &id, &digest)?;
                     (id, vendored, Some(digest))
                 }
+                SourceSpec::Git { url, reference } => {
+                    let pin = sources.pin_git(declared, &url, &reference)?;
+                    let id = PackageId {
+                        name: declared.clone(),
+                        version: pin.version.clone(),
+                        source: pin.source.clone(),
+                    };
+                    // A vendored copy is checked and used without the store
+                    // being touched at all, which is what makes `vendor`
+                    // followed by `--offline` work on a machine with no `git`.
+                    let dependency = match replacement(workspace, &id, &pin.checksum)? {
+                        Some(project) => project,
+                        None => {
+                            let root = sources.checkout(&id, &pin.checksum)?;
+                            load_project(Some(root.join(MANIFEST_FILE)))?
+                        }
+                    };
+                    if dependency.name != id.name || dependency.version != id.version {
+                        return Err(format!(
+                            "`{url}` at {} is `{} v{}`, but it was resolved as `{id}`",
+                            pin.source, dependency.name, dependency.version
+                        ));
+                    }
+                    (id, Some(dependency), Some(pin.checksum))
+                }
                 SourceSpec::Path(relative) => {
+                    // `D-051`: a git package is unpacked into the store, so a
+                    // relative path from one either escapes the package or
+                    // names a directory whose absolute path a lock must not
+                    // record. Both have answers; neither is in this release.
+                    if matches!(dependent_source, SourceId::Git { .. }) {
+                        return Err(format!(
+                            "`{dependent}` comes from git and declares the `path` dependency `{declared}`; a package fetched from a repository cannot have one yet, because there is no way to write where it lives into a lockfile that another machine could read"
+                        ));
+                    }
                     let dependency = load_path_dependency(&project, workspace, &relative)?;
                     // `D-035`: the key in `[dependencies]` *is* the package
                     // name, because the name is what the namespace and the lock
@@ -239,6 +285,16 @@ pub fn resolve(
 
             match packages.get(&id.name) {
                 Some(existing) if existing.id == id => continue,
+                // `D-038`, restated for git by `D-049`: two dependents that
+                // disagree about which commit of a repository to take is a
+                // question with two answers, and picking one silently is worse
+                // than reporting it.
+                Some(existing) if existing.id.version == id.version => {
+                    return Err(format!(
+                        "`{}` is required from two sources: `{}` and `{}`. A package name resolves from one source in a graph",
+                        id.name, existing.id.source, id.source
+                    ));
+                }
                 Some(existing) => {
                     return Err(format!(
                         "`{}` is required at two versions: {} and {}. Two incompatible versions of one package cannot coexist in a graph",
@@ -247,6 +303,8 @@ pub fn resolve(
                 }
                 None => {}
             }
+
+            let source = id.source.clone();
 
             packages.insert(
                 id.name.clone(),
@@ -261,7 +319,7 @@ pub fn resolve(
                 },
             );
             if let Some(dependency) = dependency {
-                queue.push_back(dependency);
+                queue.push_back((source, dependency));
             }
         }
         is_root = false;
@@ -504,7 +562,22 @@ mod tests {
             let manifest = self.root.join(package).join(MANIFEST_FILE);
             let workspace = crate::workspace::load_workspace(Some(manifest))?;
             let project = workspace.select(None, false)?[0].clone();
-            super::resolve(&project, &workspace, &Version::new(0, 3, 7))
+            super::resolve(
+                &project,
+                &workspace,
+                &Version::new(0, 3, 7),
+                &self.sources(),
+            )
+        }
+
+        /// A store inside the scratch directory, so a test never writes to the
+        /// developer's own — and never has to be told to clean it up.
+        fn sources(&self) -> Sources {
+            Sources::new(
+                crate::store::Store::at(self.root.join(".store")),
+                crate::store::Access::Online,
+                false,
+            )
         }
 
         fn write_manifest(&self, relative: &str, contents: &str) {
@@ -578,6 +651,123 @@ mod tests {
         .unwrap();
         let error = workspace.resolve("application").unwrap_err();
         assert!(error.contains("SL1012"), "{error}");
+    }
+
+    /// Build a repository holding one package, and return its URL and the
+    /// commit on its default branch.
+    ///
+    /// In a temporary directory at test time, because `nix flake check` runs
+    /// this suite in a sandbox with no network — a fixture that had to be
+    /// cloned would be a test that cannot run where it matters.
+    fn repository(workspace: &Workspace, name: &str, version: &str) -> (String, String) {
+        let root = workspace.root.join(format!("{name}.git"));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(
+            root.join(MANIFEST_FILE),
+            format!("[package]\nname = \"{name}\"\nversion = \"{version}\"\nsource = \"src\"\n"),
+        )
+        .unwrap();
+        fs::write(root.join("src/lib.slp"), "(fn unused () -> i32 0)\n").unwrap();
+
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .current_dir(&root)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        };
+        git(&["init", "--quiet", "--initial-branch=main"]);
+        git(&["config", "user.name", "Test"]);
+        git(&["config", "user.email", "test@example.invalid"]);
+        git(&["add", "--all"]);
+        git(&["commit", "--quiet", "--message", "first"]);
+        (root.display().to_string(), git(&["rev-parse", "HEAD"]))
+    }
+
+    /// The whole of v0.4.3 in one assertion: a repository becomes a package
+    /// pinned to a commit and to the digest of its archive, and the compiler is
+    /// handed a directory in the store.
+    #[test]
+    fn a_git_dependency_is_pinned_to_a_commit_and_a_digest() {
+        let workspace = Workspace::new("git");
+        let (url, commit) = repository(&workspace, "geometry", "1.4.0");
+        workspace.package(
+            "application",
+            "1.0.0",
+            &format!("geometry = {{ git = \"{url}\" }}\n"),
+        );
+
+        let resolution = workspace.resolve("application").unwrap();
+        let geometry = &resolution.packages["geometry"];
+        assert_eq!(geometry.id.version, Version::new(1, 4, 0));
+        assert_eq!(
+            geometry.id.source,
+            SourceId::Git {
+                url: url.clone(),
+                reference: crate::source::GitReference::DefaultBranch,
+                rev: commit.clone(),
+            }
+        );
+        let checksum = geometry
+            .checksum
+            .expect("a git package is pinned by digest");
+        let store = crate::store::Store::at(workspace.root.join(".store"));
+        assert!(store.holds(&checksum), "the archive was not stored");
+        assert_eq!(
+            geometry
+                .project
+                .as_ref()
+                .map(|project| project.root.clone()),
+            Some(store.checkout_path(&checksum))
+        );
+        // Resolving again is the same answer, and the second time the digest is
+        // re-derived from bytes that were already there.
+        assert_eq!(
+            workspace.resolve("application").unwrap().packages["geometry"].checksum,
+            Some(checksum)
+        );
+    }
+
+    /// `D-051`: a package unpacked into the store cannot have a `path`
+    /// dependency, because there is no portable way to write one down.
+    #[test]
+    fn a_git_package_may_not_declare_a_path_dependency() {
+        let workspace = Workspace::new("git-path");
+        let (url, _) = repository(&workspace, "geometry", "1.4.0");
+        fs::write(
+            workspace.root.join("geometry.git").join(MANIFEST_FILE),
+            "[package]\nname = \"geometry\"\nversion = \"1.4.0\"\nsource = \"src\"\n\n[dependencies]\nhelper = { path = \"../helper\" }\n",
+        )
+        .unwrap();
+        for args in [
+            vec!["add", "--all"],
+            vec!["commit", "--quiet", "--message", "second"],
+        ] {
+            std::process::Command::new("git")
+                .current_dir(workspace.root.join("geometry.git"))
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .args(&args)
+                .output()
+                .unwrap();
+        }
+        workspace.package(
+            "application",
+            "1.0.0",
+            &format!("geometry = {{ git = \"{url}\" }}\n"),
+        );
+
+        let error = workspace.resolve("application").unwrap_err();
+        assert!(error.contains("comes from git"), "{error}");
+        assert!(error.contains("`helper`"), "{error}");
     }
 
     /// The defect that motivated `D-035`, from the other direction: a package
@@ -796,7 +986,8 @@ mod tests {
 
         let loaded =
             crate::workspace::load_workspace(Some(workspace.root.join(MANIFEST_FILE))).unwrap();
-        let resolved = resolve_workspace(&loaded, &Version::new(0, 3, 7)).unwrap();
+        let resolved =
+            resolve_workspace(&loaded, &Version::new(0, 3, 7), &workspace.sources()).unwrap();
         assert_eq!(
             resolved.packages["helper"].id.version,
             Version::new(3, 1, 4)
