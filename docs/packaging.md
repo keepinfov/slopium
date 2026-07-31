@@ -449,6 +449,7 @@ derived entirely from the manifests, so there is nothing to lose. Under
 ```sh
 slopium vendor              # into ./vendor
 slopium vendor --dir third-party
+slopium vendor -p full      # only what one workspace member needs
 ```
 
 `vendor` copies every dependency that is not already a directory on this machine
@@ -488,17 +489,59 @@ puts it back.
 the copies, so requiring them to be intact first would leave an edited copy
 unrepairable by the only command that can repair it.
 
+### Vendoring one member
+
+`-p` copies one workspace member's share of the graph instead of all of it. The
+lock is unchanged either way — `-p` narrows what is copied, never what was
+resolved.
+
+The redirection is workspace-wide, because it names sources rather than
+packages, so a member left out of a partial copy stops building `--offline`.
+`vendor -p` prints which members those are rather than leaving it to be found
+later.
+
+Running `vendor` again over a redirection `vendor` itself wrote appends the
+sources the earlier run did not cover, which is what going from `-p` to the
+whole workspace needs. A `[source]` table that redirects somewhere else, or does
+something this command does not understand, is still refused rather than
+rewritten: guessing which half of a hand-written configuration to keep is not
+something to do to somebody's checkout.
+
 ## `--offline`
 
 `--offline` forbids reaching for bytes that are not already local, and
 `--frozen` is `--offline` and `--locked` together. What stays available is the
-lock, the package store, and any vendored copies; what is forbidden is running
-`git` and reading a registry index. When something is missing it says which
-package and what digest it wanted (`SL1011`).
+lock, the package store, any vendored copies, and the index cache below; what is
+forbidden is running `git` and downloading anything. When something is missing
+it says which package and what digest it wanted (`SL1011`).
 
 So a project that has resolved once builds offline from the store, and a project
 that has been vendored builds offline with no store, no `git` and no `curl`
 installed at all — the copies in `vendor/` are the whole answer, checked against
-the lock's checksums on the way in. A dependency nothing has pinned yet cannot
-be resolved offline: which commit a branch names today, and which versions an
-index publishes today, are exactly the questions `--offline` refuses to ask.
+the lock's checksums on the way in.
+
+### Resolving offline
+
+An index file this machine has already fetched is kept in
+`$SLOPIUM_HOME/index/<digest of the index url>/`, laid out the way the registry
+lays out its own `index/` tree, with a `url` file at the top saying which
+registry the directory belongs to. A `--offline` run reads that cache, so
+`slopium add` and a new requirement in `Slopium.toml` can select a version
+without a network — as long as some earlier run fetched that package's index
+file.
+
+Three rules keep the cache from being a way to build against something stale:
+
+- an online run always fetches and always overwrites. The cache is a fallback,
+  never a shortcut, because a version that has just been published is the whole
+  reason to read an index at all;
+- an online run that finds a package gone from the index deletes the cached
+  copy, so `--offline` never contradicts the last online run;
+- a registry that is a directory — `file://` or a relative path — is read
+  directly, offline or not. It is already local, and reading it was never a
+  network operation.
+
+What is still impossible offline is a package no run has ever fetched the index
+of (`SL1011`, naming the path it looked in), and any git dependency the lock
+does not already pin: which commit a branch names today is a question only the
+repository can answer.

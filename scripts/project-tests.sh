@@ -270,6 +270,42 @@ if run_manager "$library_project/Slopium.toml" run \
   exit 1
 fi
 assert_patterns <(printf '%s\n' 'is a library') "$result_dir/new-lib-run.stderr"
+
+# `D-072`: a package that declares no `entry` at all is entered through
+# `<source>/lib.slp`. `D-046` always allowed omitting it, but only resolution
+# exercised that — checking and building asked for an entry and refused.
+implicit_project="$result_dir/implicit-library"
+mkdir -p "$implicit_project/src"
+cat >"$implicit_project/Slopium.toml" <<'EOF'
+[package]
+name = "implicit-library"
+version = "1.0.0"
+source = "src"
+EOF
+cat >"$implicit_project/src/lib.slp" <<'EOF'
+(export add)
+
+(fn add ((left i64) (right i64)) -> i64
+  (+ left right))
+
+(test "an implicit entry"
+  (= (add 20 22) 42))
+EOF
+run_manager_logged "implicit entry" "$result_dir/implicit.stdout" \
+  "$result_dir/implicit.stderr" "$implicit_project/Slopium.toml" test
+assert_patterns <(printf '%s\n' 'test lib:an implicit entry ... ok') \
+  "$result_dir/implicit.stdout"
+
+# And when there is no such file, the message names the file it looked for
+# rather than the field that was not written.
+rm "$implicit_project/src/lib.slp"
+printf '(export other)\n\n(fn other () -> i64 1)\n' >"$implicit_project/src/other.slp"
+if run_manager "$implicit_project/Slopium.toml" check \
+  >"$result_dir/implicit-missing.stdout" 2>"$result_dir/implicit-missing.stderr"; then
+  echo "project-tests: a package with no entry and no lib.slp was accepted" >&2
+  exit 1
+fi
+assert_patterns <(printf '%s\n' 'SL1053' 'lib.slp') "$result_dir/implicit-missing.stderr"
 echo "project-tests: workspaces ... ok"
 
 basic_project="$projects_dir/pass/basics"

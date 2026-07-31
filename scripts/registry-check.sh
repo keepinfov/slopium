@@ -202,6 +202,17 @@ slopium update -p nonexistent >"$scratch/update.out" 2>&1 &&
 grep --quiet "nothing to update" "$scratch/update.out" ||
   fail "update -p on an unknown package said the wrong thing"
 
+# --- offline resolution against a registry that is a directory ----------------
+
+# A directory registry is local, so `--offline` has nothing to forbid about
+# reading it: a dependency nothing has pinned resolves without a network.
+consumer unpinned 'geometry = "^1"
+shapes = "^1"'
+(cd "$scratch/unpinned" && slopium check --offline) >"$scratch/offline.out" 2>&1 ||
+  fail "an unpinned dependency did not resolve offline from a directory registry: $(cat "$scratch/offline.out")"
+grep --quiet '^name = "geometry"' "$scratch/unpinned/Slopium.lock" ||
+  fail "the offline resolution did not write a lock naming geometry"
+
 # --- offline builds from the store, with no registry at all -------------------
 
 mv "$registry" "$scratch/registry.away"
@@ -211,14 +222,13 @@ slopium build --offline --locked >"$scratch/offline.out" 2>&1 ||
 [[ "$(./target/x86_64-unknown-linux-gnu/dev/application)" == "110" ]] ||
   fail "the offline build did not produce the same program"
 
-# A dependency nothing has pinned cannot be resolved offline: what version the
-# index publishes today is exactly the question `--offline` refuses to ask.
-consumer unpinned 'geometry = "^1"
-shapes = "^1"'
-(cd "$scratch/unpinned" && slopium check --offline) >"$scratch/offline.out" 2>&1 &&
-  fail "an unpinned registry dependency resolved offline"
-grep --quiet "SL1011" "$scratch/offline.out" ||
-  fail "an unpinned offline resolution did not report SL1011: $(cat "$scratch/offline.out")"
+# A registry directory that is not there is not a registry that publishes
+# nothing: the message has to send somebody looking for a path, not a package.
+consumer moved 'geometry = "^1"'
+(cd "$scratch/moved" && slopium check) >"$scratch/moved.out" 2>&1 &&
+  fail "a registry whose directory is gone was accepted"
+grep --quiet "SL1030" "$scratch/moved.out" ||
+  fail "a missing registry directory did not report SL1030: $(cat "$scratch/moved.out")"
 mv "$scratch/registry.away" "$registry"
 
 # --- the registry serving other bytes than it published -----------------------
@@ -329,5 +339,81 @@ grep --quiet 'target = "x86_64-unknown-linux-gnu"' Slopium.toml ||
 
 slopium remove units >/dev/null || fail "remove failed"
 grep --quiet "^units" Slopium.toml && fail "remove left the dependency behind"
+
+# --- tree --depth and --duplicates --------------------------------------------
+
+slopium tree --depth 1 >"$scratch/depth.out" 2>&1 || fail "tree --depth failed"
+grep --quiet "geometry v1.0.0" "$scratch/depth.out" ||
+  fail "tree --depth 1 dropped a direct dependency: $(cat "$scratch/depth.out")"
+grep --quiet "(\.\.\.)" "$scratch/depth.out" ||
+  fail "tree --depth 1 did not mark the subtree it cut: $(cat "$scratch/depth.out")"
+grep --quiet "^|   \`-- units" "$scratch/depth.out" &&
+  fail "tree --depth 1 printed a level it should have cut: $(cat "$scratch/depth.out")"
+
+# `units` is reached through both `geometry` and `shapes`, which is the only
+# kind of duplicate this resolver can produce: one version per name (`D-036`).
+slopium tree --duplicates >"$scratch/duplicates.out" 2>&1 ||
+  fail "tree --duplicates failed"
+grep --quiet "^units v1.0.0" "$scratch/duplicates.out" ||
+  fail "tree --duplicates did not report the shared package: $(cat "$scratch/duplicates.out")"
+grep --quiet "required by geometry" "$scratch/duplicates.out" ||
+  fail "tree --duplicates did not name a dependent: $(cat "$scratch/duplicates.out")"
+grep --quiet "required by shapes" "$scratch/duplicates.out" ||
+  fail "tree --duplicates did not name both dependents: $(cat "$scratch/duplicates.out")"
+
+# --- vendor -p ----------------------------------------------------------------
+
+# Two members with unequal needs: `full` pulls the registry graph, `bare` needs
+# only the bundled library. Vendoring one of them must copy one of them.
+members="$scratch/members"
+mkdir -p "$members/full/src" "$members/bare/src"
+configure "$members"
+cat >"$members/Slopium.toml" <<EOF
+[workspace]
+members = ["full", "bare"]
+EOF
+cat >"$members/full/Slopium.toml" <<EOF
+[package]
+name = "full"
+version = "1.0.0"
+source = "src"
+entry = "src/lib.slp"
+
+[dependencies]
+geometry = "^1.0.0"
+EOF
+printf '(take geometry:lib area)\n(export size)\n\n(fn size () -> i64 (area))\n' \
+  >"$members/full/src/lib.slp"
+cat >"$members/bare/Slopium.toml" <<EOF
+[package]
+name = "bare"
+version = "1.0.0"
+source = "src"
+entry = "src/lib.slp"
+
+[dependencies]
+std = { toolchain = true }
+EOF
+printf '(export nothing)\n\n(fn nothing () -> i64 0)\n' >"$members/bare/src/lib.slp"
+
+(cd "$members" && slopium vendor -p bare) >"$scratch/vendor.out" 2>&1 ||
+  fail "vendor -p failed: $(cat "$scratch/vendor.out")"
+[[ -d "$members/vendor/std" ]] ||
+  fail "vendor -p did not copy what the selected member needs"
+[[ ! -d "$members/vendor/geometry" ]] ||
+  fail "vendor -p copied a package only the other member needs"
+grep --quiet '`full` still needs packages that were not copied' "$scratch/vendor.out" ||
+  fail "vendor -p did not say which member it left unbuildable: $(cat "$scratch/vendor.out")"
+
+# The whole workspace leaves nothing out, and says nothing about it.
+(cd "$members" && slopium vendor) >"$scratch/vendor.out" 2>&1 ||
+  fail "vendor of the whole workspace failed: $(cat "$scratch/vendor.out")"
+[[ -d "$members/vendor/geometry" ]] ||
+  fail "vendor did not copy the whole workspace's packages"
+grep --quiet "still needs packages" "$scratch/vendor.out" &&
+  fail "a complete vendor warned about a member anyway: $(cat "$scratch/vendor.out")"
+
+(cd "$members" && slopium check --workspace --offline --locked) >"$scratch/vendor.out" 2>&1 ||
+  fail "a fully vendored workspace does not build offline: $(cat "$scratch/vendor.out")"
 
 echo "registry-check: selection, checksums, yanking, offline and confusion ... ok"

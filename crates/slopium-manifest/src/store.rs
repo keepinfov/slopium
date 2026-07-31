@@ -332,7 +332,7 @@ pub fn remove_tree(root: &Path) -> Result<(), String> {
 
 /// A suffix no other process is using, for a directory that is about to be
 /// renamed into place.
-fn scratch_suffix() -> String {
+pub(crate) fn scratch_suffix() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)

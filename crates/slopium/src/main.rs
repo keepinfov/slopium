@@ -5,7 +5,9 @@ use slopic_core::codegen::{DEFAULT_TARGET, TARGETS};
 use slopic_core::syntax::{format_source, FormatOptions};
 use slopium_manifest::archive::{package_archive, ARCHIVE_EXTENSION};
 use slopium_manifest::lock::{Lockfile, LOCK_FILE};
-use slopium_manifest::manifest::{load_local_config, validate_package_name, Profile, Project};
+use slopium_manifest::manifest::{
+    load_local_config, validate_package_name, LocalConfig, Profile, Project, MANIFEST_FILE,
+};
 use slopium_manifest::registry::{
     archive_path as published_archive_path, index_path as published_index_path,
     signature_path as published_signature_path, IndexDependency, IndexEntry, IndexSource,
@@ -19,7 +21,7 @@ use slopium_manifest::sources::Sources;
 use slopium_manifest::std_library::{std_module_path, STD_MODULES};
 use slopium_manifest::store::{remove_tree, Access, Store};
 use slopium_manifest::version::Version;
-use slopium_manifest::workspace::{load_workspace, Workspace};
+use slopium_manifest::workspace::{enclosing_workspace, load_workspace, Enclosing, Workspace};
 use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
@@ -83,6 +85,14 @@ enum Commands {
         /// Where the copies go, relative to the workspace root.
         #[arg(long, value_name = "DIR", default_value = "vendor")]
         dir: PathBuf,
+        /// Copy only what this member needs, instead of everything the
+        /// workspace resolves.
+        ///
+        /// The redirection this writes covers the whole workspace, so a member
+        /// left out of the copy stops building `--offline`. Which ones those
+        /// are is printed.
+        #[arg(short, long, value_name = "NAME")]
+        package: Option<String>,
         #[command(flatten)]
         resolve: ResolveArgs,
     },
@@ -162,6 +172,18 @@ enum Commands {
     },
     /// Print the resolved package graph.
     Tree {
+        /// Stop after this many levels. The root is level 0, so `--depth 1` is
+        /// the direct dependencies. A subtree that is cut off is marked `(...)`.
+        #[arg(long, value_name = "N")]
+        depth: Option<usize>,
+        /// List the packages more than one package depends on, with their
+        /// dependents, instead of the tree.
+        ///
+        /// This graph holds one version per name — two of them is an error
+        /// (`D-036`) — so a duplicate here is a shared dependency, never a
+        /// second copy the way it is in Cargo.
+        #[arg(long)]
+        duplicates: bool,
         #[command(flatten)]
         resolve: ResolveArgs,
         #[command(flatten)]
@@ -245,7 +267,7 @@ impl SelectArgs {
     fn one<'a>(&self, workspace: &'a Workspace, action: &str) -> Result<&'a Project, String> {
         if self.workspace {
             return Err(format!(
-                "`{action}` acts on one package, but `--workspace` names every member"
+                "SL1060: `{action}` acts on one package, but `--workspace` names every member"
             ));
         }
         workspace.select_one(self.package.as_deref(), action)
@@ -357,10 +379,12 @@ fn main() {
             }
             Ok(())
         }),
-        Commands::Vendor { dir, resolve } => {
-            Session::open_ignoring_replacements(cli.manifest_path, resolve)
-                .and_then(|session| vendor(&session, &dir))
-        }
+        Commands::Vendor {
+            dir,
+            package,
+            resolve,
+        } => Session::open_ignoring_replacements(cli.manifest_path, resolve)
+            .and_then(|session| vendor(&session, &dir, package.as_deref())),
         Commands::Add {
             spec,
             git,
@@ -414,14 +438,17 @@ fn main() {
                 PrivateKey::read(&path).map(|key| println!("{}", key.public()))
             }
         },
-        Commands::Tree { resolve, select } => {
-            Session::open(cli.manifest_path, resolve).and_then(|session| {
-                for project in select.all(&session.workspace)? {
-                    tree(&session, project)?;
-                }
-                Ok(())
-            })
-        }
+        Commands::Tree {
+            depth,
+            duplicates,
+            resolve,
+            select,
+        } => Session::open(cli.manifest_path, resolve).and_then(|session| {
+            for project in select.all(&session.workspace)? {
+                tree(&session, project, depth, duplicates)?;
+            }
+            Ok(())
+        }),
         Commands::Targets => {
             for spec in TARGETS {
                 let note = if spec.triple == DEFAULT_TARGET {
@@ -565,6 +592,50 @@ fn create_project(name: &str, path: Option<PathBuf>, library: bool) -> Result<()
         .map_err(|error| format!("cannot write .gitignore: {error}"))?;
     let kind = if library { "library" } else { "package" };
     println!("Created {kind} `{name}` at {}", root.display());
+    enlist_in_workspace(&root)
+}
+
+/// Add a freshly created package to the workspace it landed inside.
+///
+/// Without this the package is unbuildable the moment it is created:
+/// `load_workspace` refuses a package that sits in a workspace directory
+/// without being listed, so every command run inside it fails until somebody
+/// edits the root manifest by hand.
+///
+/// A failure here is reported without unwinding the new package. The files are
+/// correct and the fix is one line in a manifest, so deleting somebody's new
+/// package because its root manifest is written in a form this command does not
+/// edit would be the worse outcome — the message says which line to write.
+fn enlist_in_workspace(root: &Path) -> Result<(), String> {
+    let workspace_root = match enclosing_workspace(root)? {
+        Enclosing::Nothing | Enclosing::Member(_) => return Ok(()),
+        Enclosing::Unlisted(workspace_root) => workspace_root,
+    };
+    let relative = root
+        .canonicalize()
+        .map_err(|error| format!("cannot read `{}`: {error}", root.display()))?
+        .strip_prefix(&workspace_root)
+        .map_err(|_| {
+            format!(
+                "`{}` is not inside the workspace at `{}`",
+                root.display(),
+                workspace_root.display()
+            )
+        })?
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/");
+    let manifest_path = workspace_root.join(MANIFEST_FILE);
+    let source = fs::read_to_string(&manifest_path)
+        .map_err(|error| format!("cannot read `{}`: {error}", manifest_path.display()))?;
+    let edited = with_member(&source, &relative)?;
+    fs::write(&manifest_path, edited)
+        .map_err(|error| format!("cannot write `{}`: {error}", manifest_path.display()))?;
+    println!(
+        "Added `{relative}` to `[workspace] members` in {}",
+        manifest_path.display()
+    );
     Ok(())
 }
 
@@ -1244,7 +1315,8 @@ fn update(
 ) -> Result<(), String> {
     if args.locked() {
         return Err(
-            "`update` is what moves the lockfile, and `--locked` forbids moving it".to_owned(),
+            "SL1082: `update` is what moves the lockfile, and `--locked` forbids moving it"
+                .to_owned(),
         );
     }
     if precise.is_some() && packages.len() != 1 {
@@ -1303,6 +1375,67 @@ fn updatable_lock(manifest_path: Option<PathBuf>) -> Result<BTreeMap<String, Ver
 /// Line-based on purpose. TOML keeps an inline table on one line, so an entry
 /// this tool ever writes is one line; an entry written as `[dependencies.name]`
 /// is not, and is refused rather than half-edited.
+/// Add a path to `[workspace] members`, keeping the file readable.
+///
+/// Text rather than a TOML round trip, for the same reason `with_dependency` is
+/// text: a manifest somebody wrote keeps its comments, its ordering and its
+/// spacing. Only the one-line array form is written; anything else is refused
+/// by name rather than half-edited.
+fn with_member(source: &str, path: &str) -> Result<String, String> {
+    let mut lines: Vec<String> = source.lines().map(str::to_owned).collect();
+    let mut in_workspace = false;
+    let mut end_of_workspace = None;
+    for index in 0..lines.len() {
+        let trimmed = lines[index].trim();
+        if trimmed.starts_with('[') {
+            if in_workspace {
+                end_of_workspace = Some(index);
+            }
+            in_workspace = trimmed == "[workspace]";
+            continue;
+        }
+        if !in_workspace || trimmed.split_once('=').map(|(key, _)| key.trim()) != Some("members") {
+            continue;
+        }
+        let value = trimmed
+            .split_once('=')
+            .expect("the line holds a `=`")
+            .1
+            .trim();
+        let inner = value
+            .strip_prefix('[')
+            .and_then(|value| value.strip_suffix(']'))
+            .ok_or_else(|| {
+                "`[workspace] members` is not written as a one-line array; add the package to it by hand"
+                    .to_owned()
+            })?;
+        let inner = inner.trim().trim_end_matches(',').trim_end();
+        let indent = &lines[index][..lines[index].len() - lines[index].trim_start().len()];
+        lines[index] = match inner.is_empty() {
+            true => format!("{indent}members = [\"{path}\"]"),
+            false => format!("{indent}members = [{inner}, \"{path}\"]"),
+        };
+        return Ok(joined(&lines));
+    }
+
+    // `[workspace]` with no `members` at all: start the list at the end of the
+    // table, not at the end of the file, or it would land in whatever table
+    // comes next.
+    let written = format!("members = [\"{path}\"]");
+    match end_of_workspace.or(in_workspace.then_some(lines.len())) {
+        Some(index) => {
+            let insert = lines[..index]
+                .iter()
+                .rposition(|line| !line.trim().is_empty())
+                .map(|last| last + 1)
+                .unwrap_or(index);
+            lines.insert(insert, written);
+        }
+        None => return Err("this manifest has no `[workspace]` table".to_owned()),
+    }
+    Ok(joined(&lines))
+}
+
 fn with_dependency(source: &str, name: &str, entry: Option<&str>) -> Result<String, String> {
     let section = format!("[dependencies.{name}]");
     if source.lines().any(|line| line.trim() == section) {
@@ -1380,7 +1513,13 @@ fn source_label(source: &SourceId) -> String {
     }
 }
 
-fn tree(session: &Session, project: &Project) -> Result<(), String> {
+fn tree(
+    session: &Session,
+    project: &Project,
+    depth: Option<usize>,
+    duplicates: bool,
+) -> Result<(), String> {
+    #[allow(clippy::too_many_arguments)]
     fn walk(
         name: &str,
         resolution: &Resolution,
@@ -1388,27 +1527,33 @@ fn tree(session: &Session, project: &Project) -> Result<(), String> {
         last: bool,
         root: bool,
         seen: &mut HashSet<String>,
+        level: usize,
+        limit: Option<usize>,
     ) {
         let Some(package) = resolution.packages.get(name) else {
             return;
         };
         let repeated = !seen.insert(name.to_owned());
+        // A subtree that exists and is not shown says so. `--depth` is the
+        // caller's own doing, but a tree that looks complete and is not is how
+        // somebody concludes a dependency is absent.
+        let elided = limit == Some(level) && !package.dependencies.is_empty() && !repeated;
+        let mark = match (repeated && !package.dependencies.is_empty(), elided) {
+            (true, _) => " (*)",
+            (_, true) => " (...)",
+            _ => "",
+        };
         if root {
-            println!("{}", package.id);
+            println!("{}{mark}", package.id);
         } else {
             println!(
-                "{prefix}{}{} {}{}",
+                "{prefix}{}{} {}{mark}",
                 if last { "`-- " } else { "|-- " },
                 package.id,
                 source_label(&package.id.source),
-                if repeated && !package.dependencies.is_empty() {
-                    " (*)"
-                } else {
-                    ""
-                }
             );
         }
-        if repeated {
+        if repeated || elided {
             return;
         }
         let child_prefix = if root {
@@ -1418,11 +1563,23 @@ fn tree(session: &Session, project: &Project) -> Result<(), String> {
         };
         for (index, dependency) in package.dependencies.iter().enumerate() {
             let last = index + 1 == package.dependencies.len();
-            walk(dependency, resolution, &child_prefix, last, false, seen);
+            walk(
+                dependency,
+                resolution,
+                &child_prefix,
+                last,
+                false,
+                seen,
+                level + 1,
+                limit,
+            );
         }
     }
 
     let resolution = session.resolution.member(&project.name)?;
+    if duplicates {
+        return shared_dependencies(resolution);
+    }
     walk(
         &resolution.root.name,
         resolution,
@@ -1430,7 +1587,47 @@ fn tree(session: &Session, project: &Project) -> Result<(), String> {
         true,
         true,
         &mut HashSet::new(),
+        0,
+        depth,
     );
+    Ok(())
+}
+
+/// The packages more than one package in this graph depends on.
+///
+/// Not what `--duplicates` means to Cargo, and it cannot be: identity here is
+/// name *and* version, and two versions of one name in a graph is an error
+/// (`D-035`, `D-036`), so a second copy of a package is a thing this resolver
+/// refuses rather than a thing to report. What is worth reporting is the other
+/// kind of duplicate — the package reached along more than one path, which the
+/// tree marks `(*)` and this lists with the dependents that share it.
+fn shared_dependencies(resolution: &Resolution) -> Result<(), String> {
+    let mut dependents: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for package in resolution.packages.values() {
+        for dependency in &package.dependencies {
+            dependents
+                .entry(dependency.as_str())
+                .or_default()
+                .push(package.id.name.as_str());
+        }
+    }
+    let shared = dependents
+        .iter()
+        .filter(|(_, dependents)| dependents.len() > 1)
+        .collect::<Vec<_>>();
+    if shared.is_empty() {
+        println!("No dependency of {} is shared.", resolution.root);
+        return Ok(());
+    }
+    for (name, dependents) in shared {
+        let Some(package) = resolution.packages.get(*name) else {
+            continue;
+        };
+        println!("{} {}", package.id, source_label(&package.id.source));
+        for dependent in dependents {
+            println!("|-- required by {dependent}");
+        }
+    }
     Ok(())
 }
 
@@ -1789,15 +1986,36 @@ fn published_entry(project: &Project, checksum: Digest) -> Result<IndexEntry, St
 /// Only packages with immutable bytes are vendored, which is what having a
 /// checksum means: a path dependency is already a directory on this machine and
 /// copying it would only make a second one that can drift from the first.
-fn vendor(session: &Session, directory: &Path) -> Result<(), String> {
+fn vendor(session: &Session, directory: &Path, member: Option<&str>) -> Result<(), String> {
     let workspace = &session.workspace;
     let root = workspace.root.join(directory);
     let mut vendored = Vec::new();
 
-    for package in session.resolution.packages.values() {
+    // Everything the workspace resolves, or one member's share of it. The lock
+    // covers the whole workspace either way, so `-p` narrows what is copied and
+    // never what was resolved.
+    let selected = match member {
+        None => session.resolution.packages.values().collect::<Vec<_>>(),
+        Some(name) => {
+            // Through the workspace first: `member` on the resolution reports a
+            // package that was not resolved, which is not what a misspelled
+            // `-p` is.
+            workspace.member(name)?;
+            session
+                .resolution
+                .member(name)?
+                .packages
+                .values()
+                .collect::<Vec<_>>()
+        }
+    };
+    let mut copied = HashSet::new();
+
+    for package in selected {
         let Some(checksum) = package.checksum else {
             continue;
         };
+        copied.insert(package.id.name.clone());
         let described = package.id.to_string();
         // Through the store rather than around it: the copy that lands in the
         // vendor directory is one that has already been verified against its
@@ -1814,6 +2032,7 @@ fn vendor(session: &Session, directory: &Path) -> Result<(), String> {
         println!("Nothing to vendor: every dependency is already a directory on this machine.");
         return Ok(());
     }
+    report_members_left_out(session, &copied);
     vendored.sort_unstable();
     vendored.dedup();
     let name = directory
@@ -1822,12 +2041,73 @@ fn vendor(session: &Session, directory: &Path) -> Result<(), String> {
     redirect_sources(workspace, &vendored, name)
 }
 
+/// Say which members `vendor -p` has just stopped from building offline.
+///
+/// The redirection written below covers the whole workspace, because it names
+/// sources rather than packages: after a partial copy, a member needing
+/// something that was not copied looks for it in the vendor directory and does
+/// not find it. That is a reasonable thing to want — a release copying one
+/// member's dependencies and no others — but not a reasonable thing to discover
+/// later.
+fn report_members_left_out(session: &Session, copied: &HashSet<String>) {
+    let left_out = session
+        .resolution
+        .members
+        .iter()
+        .filter(|(_, resolution)| {
+            resolution
+                .packages
+                .values()
+                .any(|package| package.checksum.is_some() && !copied.contains(&package.id.name))
+        })
+        .map(|(name, _)| format!("`{name}`"))
+        .collect::<Vec<_>>();
+    if left_out.is_empty() {
+        return;
+    }
+    println!(
+        "Note: {} still needs packages that were not copied, so it will not build `--offline` from this vendor directory.",
+        left_out.join(", ")
+    );
+}
+
+/// Whether every `[source]` table already there is a redirection to this very
+/// vendor directory — that is, one `slopium vendor` could have written.
+///
+/// Shape rather than provenance: nothing records who wrote a config file, and a
+/// hand-written redirection identical to ours is one there is no reason to
+/// refuse. What is refused is a redirection pointing somewhere else, or a
+/// `[source]` table doing something this command does not understand.
+fn redirects_here(config: &LocalConfig, workspace: &Workspace, directory: &str) -> bool {
+    let target = workspace.root.join(directory);
+    let vendor = config.source.get(VENDOR_SOURCE);
+    if vendor.and_then(|entry| entry.directory.as_ref()) != Some(&PathBuf::from(directory)) {
+        return false;
+    }
+    config.source.iter().all(|(name, entry)| {
+        name == VENDOR_SOURCE
+            || config
+                .replacement(name, &workspace.root)
+                .ok()
+                .flatten()
+                .is_some_and(|replacement| {
+                    replacement == target && entry.replace_with.as_deref() == Some(VENDOR_SOURCE)
+                })
+    })
+}
+
 /// Point `.slopium/config.toml` at the vendor directory.
 ///
 /// The file belongs to the checkout and may already say things about the C
 /// compiler, so this appends rather than replaces — and refuses outright if
-/// sources are already configured, because guessing which half of a hand-written
-/// redirection to keep is not something to do to somebody's configuration.
+/// sources are already configured by hand, because guessing which half of
+/// somebody's redirection to keep is not something to do to their configuration.
+///
+/// A redirection this command wrote is a different matter, and `-p` makes it a
+/// common one: vendoring one member and then the workspace wants a second and a
+/// third source added to a file that already redirects the first. That case
+/// appends what is missing instead of refusing, because there is nothing there
+/// to lose.
 fn redirect_sources(
     workspace: &Workspace,
     sources: &[&str],
@@ -1841,35 +2121,60 @@ fn redirect_sources(
     let mut wanted = sources.to_vec();
     wanted.push(VENDOR_SOURCE);
     wanted.sort_unstable();
-    if configured == wanted
-        && config
-            .replacement(sources[0], &workspace.root)
-            .ok()
-            .flatten()
-            .as_deref()
-            == Some(&*workspace.root.join(directory))
-    {
-        return Ok(());
-    }
+
+    let ours = redirects_here(&config, workspace, directory);
+    let missing = wanted
+        .iter()
+        .filter(|source| !configured.iter().any(|name| name == *source))
+        .copied()
+        .collect::<Vec<_>>();
     if !configured.is_empty() {
-        return Err(format!(
-            "`.slopium/config.toml` already configures {}; edit it by hand or remove the `[source]` tables and vendor again",
-            configured
-                .iter()
-                .map(|name| format!("`[source.{name}]`"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
+        if !ours {
+            return Err(format!(
+                "`.slopium/config.toml` already configures {}; edit it by hand or remove the `[source]` tables and vendor again",
+                configured
+                    .iter()
+                    .map(|name| format!("`[source.{name}]`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if missing.is_empty() {
+            return Ok(());
+        }
     }
 
-    let mut text = format!(
-        "\n# Written by `slopium vendor`. Builds read these packages from `{directory}`\n\
-         # instead of the source named; delete these tables to go back.\n"
-    );
-    for source in sources {
+    // Everything, or only what the existing redirection does not already cover.
+    let (added, header) = match configured.is_empty() {
+        true => (
+            sources.to_vec(),
+            format!(
+                "\n# Written by `slopium vendor`. Builds read these packages from `{directory}`\n\
+                 # instead of the source named; delete these tables to go back.\n"
+            ),
+        ),
+        false => (
+            missing
+                .into_iter()
+                .filter(|source| *source != VENDOR_SOURCE)
+                .collect(),
+            "\n# Added by a later `slopium vendor`.\n".to_owned(),
+        ),
+    };
+    let mut text = header;
+    for source in &added {
         text.push_str(&format!(
             "\n[source.{source}]\nreplace-with = \"{VENDOR_SOURCE}\"\n"
         ));
+    }
+    if !configured.is_empty() {
+        let path = workspace.root.join(".slopium/config.toml");
+        let existing = fs::read_to_string(&path)
+            .map_err(|error| format!("cannot read `{}`: {error}", path.display()))?;
+        fs::write(&path, format!("{existing}{text}"))
+            .map_err(|error| format!("cannot write `{}`: {error}", path.display()))?;
+        println!("Wrote {}", path.display());
+        return Ok(());
     }
     text.push_str(&format!(
         "\n[source.{VENDOR_SOURCE}]\ndirectory = \"{directory}\"\n"
@@ -1986,9 +2291,9 @@ fn synchronize_lock(
     if args.locked() {
         return Err(match existing {
             Some(_) => format!(
-                "`{LOCK_FILE}` is out of date and --locked was given; run without it to update"
+                "SL1082: `{LOCK_FILE}` is out of date and --locked was given; run without it to update"
             ),
-            None => format!("`{LOCK_FILE}` is missing and --locked was given"),
+            None => format!("SL1082: `{LOCK_FILE}` is missing and --locked was given"),
         });
     }
     fs::write(&path, resolved.render())
@@ -2234,7 +2539,7 @@ fn verify_compiler(path: &Path, target: &str) -> Result<(), String> {
     })?;
     if info.protocol != slopic_core::COMPILER_PROTOCOL {
         return Err(format!(
-            "incompatible slopic protocol {}; slopium requires {}",
+            "SL1090: incompatible slopic protocol {}; slopium requires {}",
             info.protocol,
             slopic_core::COMPILER_PROTOCOL
         ));
@@ -2330,6 +2635,48 @@ mod tests {
             edited,
             "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n\n[dependencies]\ngeometry = \"^1\"\n"
         );
+    }
+
+    /// `slopium new` inside a workspace has to leave the root manifest
+    /// buildable, and readable: comments and ordering stay where they were.
+    #[test]
+    fn a_member_is_appended_to_the_list_that_is_there() {
+        let source = "[workspace]\nmembers = [\"alpha\"]\n\n# kept\n[workspace.package]\nversion = \"0.1.0\"\n";
+        let edited = with_member(source, "beta").unwrap();
+        assert!(
+            edited.contains("members = [\"alpha\", \"beta\"]"),
+            "{edited}"
+        );
+        assert!(edited.contains("# kept"), "{edited}");
+    }
+
+    /// An empty list, a trailing comma, and a `[workspace]` with no `members`
+    /// at all are the three shapes a hand-written root turns up in.
+    #[test]
+    fn a_member_list_is_started_when_there_is_none() {
+        assert!(with_member("[workspace]\nmembers = []\n", "beta")
+            .unwrap()
+            .contains("members = [\"beta\"]"));
+        assert!(with_member("[workspace]\nmembers = [\"alpha\",]\n", "beta")
+            .unwrap()
+            .contains("members = [\"alpha\", \"beta\"]"));
+        // The list has to land inside `[workspace]`, not in the table below it.
+        let edited = with_member(
+            "[workspace]\n\n[workspace.package]\nversion = \"0.1.0\"\n",
+            "beta",
+        )
+        .unwrap();
+        assert_eq!(
+            edited,
+            "[workspace]\nmembers = [\"beta\"]\n\n[workspace.package]\nversion = \"0.1.0\"\n"
+        );
+    }
+
+    /// The form this command cannot edit says so rather than mangling it.
+    #[test]
+    fn a_multi_line_member_list_is_refused() {
+        let error = with_member("[workspace]\nmembers = [\n  \"alpha\",\n]\n", "beta").unwrap_err();
+        assert!(error.contains("by hand"), "{error}");
     }
 
     /// The one form this command cannot edit says so instead of guessing.

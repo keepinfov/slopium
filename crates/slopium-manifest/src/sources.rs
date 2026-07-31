@@ -88,7 +88,14 @@ impl Sources {
         }
     }
 
-    pub fn with_registries(mut self, registries: Registries) -> Self {
+    /// Take the configured registries, and hand each one this run's access
+    /// policy and index cache directory.
+    ///
+    /// The wiring happens here rather than at the call site so the two cannot
+    /// disagree: a `Registries` built online and installed into offline
+    /// `Sources` would otherwise reach the network behind `--offline`.
+    pub fn with_registries(mut self, mut registries: Registries) -> Self {
+        registries.serve(self.access, self.store.root());
         self.registries = registries;
         self
     }
@@ -192,7 +199,7 @@ impl Sources {
         }
         if self.locked {
             return Err(format!(
-                "`{declared}` is not pinned by `{}` and --locked was given; run without it to resolve {reference} of `{url}`",
+                "SL1082: `{declared}` is not pinned by `{}` and --locked was given; run without it to resolve {reference} of `{url}`",
                 crate::lock::LOCK_FILE
             ));
         }
@@ -222,21 +229,19 @@ impl Sources {
 
     /// Every version of a package a registry publishes, newest first.
     ///
-    /// Reading an index is reaching for the network, so it obeys the same two
-    /// rules a git fetch does: `--locked` forbids resolving a name the lock
-    /// does not already pin, and `--offline` forbids the reach itself. What
-    /// makes a fully pinned project resolve without either is that the caller
-    /// asks `pinned` first and never gets here.
+    /// `--locked` forbids resolving a name the lock does not already pin; what
+    /// makes a fully pinned project resolve without any of this is that the
+    /// caller asks `pinned` first and never gets here.
+    ///
+    /// `--offline` used to refuse outright. It no longer does, because reading
+    /// an index is only a network operation for a registry that is a URL, and
+    /// even then only when nothing was cached from an earlier run — see
+    /// `Registry::index_file`. Selecting a version offline is the point of
+    /// keeping the cache at all.
     pub fn published(&self, declared: &str, index: &str) -> Result<Vec<IndexEntry>, String> {
         if self.locked {
             return Err(format!(
-                "`{declared}` is not pinned by `{}` and --locked was given; run without it to select a version from `{index}`",
-                crate::lock::LOCK_FILE
-            ));
-        }
-        if self.access == Access::Offline {
-            return Err(format!(
-                "SL1011: `{declared}` is not pinned by `{}`, and `--offline` forbids reading the index of `{index}` to find a version",
+                "SL1082: `{declared}` is not pinned by `{}` and --locked was given; run without it to select a version from `{index}`",
                 crate::lock::LOCK_FILE
             ));
         }

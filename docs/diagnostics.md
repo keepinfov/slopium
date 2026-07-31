@@ -21,8 +21,14 @@ Code families are stable:
 - `SL07xx`: internal compiler errors.
 
 `SL10xx` belongs to the project manager rather than the compiler, and is plain
-text rather than JSON — `slopium` reports one error and exits. Packaging and
-fetching are the only parts of it with codes so far (`D-048`):
+text rather than JSON — `slopium` reports one error and exits.
+
+A code marks **a refusal about something somebody wrote** — a manifest field, a
+dependency entry, a selection, a graph that cannot exist — which is a thing to
+look up. It does not mark a failure to *do* something: `cannot read
+'/x/Slopium.toml': No such file or directory` is the operating system's own
+explanation, and a number in front of it would add nothing. Uncoded manager
+messages are that kind, deliberately (`D-071`).
 
 - `SL1001`: an archive entry names a path outside the package;
 - `SL1002`: an archive entry is not a file or a directory;
@@ -57,6 +63,45 @@ fetching are the only parts of it with codes so far (`D-048`):
 - `SL1044`: the Nix bridge cannot fetch a locked source. It is thrown during
   evaluation rather than printed by `slopium`, because that is where the
   refusal happens (`D-061`).
+
+The manifest, the workspace, the graph, the lock and the build:
+
+- `SL1050`: a dependency entry names no source, or names several;
+- `SL1051`: a git dependency's reference is wrong — two of `branch`/`tag`/`rev`,
+  or a reference with no repository to take it from;
+- `SL1052`: `workspace = true` cannot be satisfied — there is no workspace, no
+  entry to inherit, or a source is named alongside it;
+- `SL1053`: a manifest field is missing or has the wrong shape, including a
+  package with no `entry` where a module to start from is needed;
+- `SL1054`: a `[source.*]` table in `.slopium/config.toml` is incomplete or
+  points at nothing;
+- `SL1060`: the selection is ambiguous or contradictory — `--workspace` with
+  `--package`, or several members and neither;
+- `SL1061`: a named package is not a member of this workspace;
+- `SL1062`: a package sits inside a workspace without being listed in
+  `[workspace] members`;
+- `SL1063`: `members` is malformed, names a directory that is not there, or two
+  members share a name;
+- `SL1070`: a dependency cycle;
+- `SL1071`: the key in `[dependencies]` is not the name of the package found
+  there (`D-040`);
+- `SL1072`: one name is required at two versions;
+- `SL1073`: no published version satisfies a requirement;
+- `SL1074`: two packages define `[language-items]` (`D-041`);
+- `SL1075`: a replaced or vendored package is missing, or is a different
+  package;
+- `SL1076`: a git package declares a `path` dependency (`D-051`);
+- `SL1077`: the toolchain source is named for something other than the bundled
+  library;
+- `SL1078`: a lock entry needs a checksum and has none;
+- `SL1080`: `Slopium.lock` is malformed;
+- `SL1081`: `Slopium.lock` is a format version this toolchain does not write;
+- `SL1082`: `--locked` was given and the lock would have to change;
+- `SL1090`: the compiler and the manager disagree about the protocol version.
+
+Resolution is spread over two families: `SL103x` keeps the registry errors that
+happen during resolution, because a stable code that moves is not stable
+(`D-071`).
 
 The v0.2 package and language-core diagnostics reserve:
 

@@ -18,6 +18,11 @@ use std::path::{Path, PathBuf};
 /// The name of a manifest file, everywhere it is looked for.
 pub const MANIFEST_FILE: &str = "Slopium.toml";
 
+/// What a package with no `entry` is entered through, relative to its source
+/// root (`D-072`). It is also the name that makes a package with an `entry` a
+/// library (`D-015`), which is why there is one constant and not two.
+pub const LIBRARY_ENTRY: &str = "lib.slp";
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
@@ -103,7 +108,7 @@ impl<T> Inheritable<T> {
             Self::Set(value) => Ok(value),
             Self::FromWorkspace => from_workspace.ok_or_else(|| {
                 format!(
-                    "`{field}.workspace = true`, but the workspace sets no `{field}` in `[workspace.package]`"
+                    "SL1052: `{field}.workspace = true`, but the workspace sets no `{field}` in `[workspace.package]`"
                 )
             }),
         }
@@ -130,7 +135,7 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for Inheritable<T> {
                 while let Some(key) = map.next_key::<String>()? {
                     if key != "workspace" {
                         return Err(de::Error::custom(format!(
-                            "unknown key `{key}`; a field taken from the workspace is written `{}`",
+                            "SL1053: unknown key `{key}`; a field taken from the workspace is written `{}`",
                             "<field>.workspace = true"
                         )));
                     }
@@ -295,7 +300,7 @@ impl DependencySpec {
             [("tag", tag)] => Ok(GitReference::Tag((*tag).clone())),
             [("rev", rev)] => Ok(GitReference::Rev((*rev).clone())),
             _ => Err(format!(
-                "dependency `{name}` names {}; a git dependency takes one commit",
+                "SL1051: dependency `{name}` names {}; a git dependency takes one commit",
                 given
                     .iter()
                     .map(|(key, _)| format!("`{key}`"))
@@ -318,16 +323,16 @@ impl DependencySpec {
         match self.workspace {
             None => Ok(self.clone()),
             Some(false) => Err(format!(
-                "dependency `{name}` has `workspace = false`; drop the key or name a source"
+                "SL1052: dependency `{name}` has `workspace = false`; drop the key or name a source"
             )),
             Some(true) => {
                 if !self.named_sources().is_empty() || self.version.is_some() {
                     return Err(format!(
-                        "dependency `{name}` says `workspace = true` and also names a source; the workspace entry is taken whole"
+                        "SL1052: dependency `{name}` says `workspace = true` and also names a source; the workspace entry is taken whole"
                     ));
                 }
                 let inheritance = inheritance.ok_or_else(|| {
-                    format!("dependency `{name}` says `workspace = true`, but this package is not in a workspace")
+                    format!("SL1052: dependency `{name}` says `workspace = true`, but this package is not in a workspace")
                 })?;
                 let mut spec = inheritance
                     .section
@@ -336,7 +341,7 @@ impl DependencySpec {
                     .cloned()
                     .ok_or_else(|| {
                         format!(
-                            "dependency `{name}` says `workspace = true`, but `[workspace.dependencies]` has no `{name}`"
+                            "SL1052: dependency `{name}` says `workspace = true`, but `[workspace.dependencies]` has no `{name}`"
                         )
                     })?;
                 spec.path = spec.path.map(|path| inheritance.root.join(path));
@@ -350,7 +355,7 @@ impl DependencySpec {
     pub fn source(&self, name: &str) -> Result<SourceSpec, String> {
         if self.workspace.is_some() {
             return Err(format!(
-                "dependency `{name}` still says `workspace = true` after inheritance"
+                "SL1052: dependency `{name}` still says `workspace = true` after inheritance"
             ));
         }
         // `branch`, `tag` and `rev` refine `git` rather than naming a source of
@@ -362,7 +367,7 @@ impl DependencySpec {
                 .find(|key| self.named_sources().contains(key))
             {
                 return Err(format!(
-                    "dependency `{name}` names `{dangling}` without `git`; there is no repository to take it from"
+                    "SL1051: dependency `{name}` names `{dangling}` without `git`; there is no repository to take it from"
                 ));
             }
         }
@@ -374,11 +379,11 @@ impl DependencySpec {
                     registry: DEFAULT_REGISTRY.to_owned(),
                 }),
                 None => Err(format!(
-                    "dependency `{name}` names no source; give a version requirement, `path`, `git`, or `toolchain = true`"
+                    "SL1050: dependency `{name}` names no source; give a version requirement, `path`, `git`, or `toolchain = true`"
                 )),
             },
             (None, Some(false), None, None) => Err(format!(
-                "dependency `{name}` has `toolchain = false`; name a `path` or a `git` repository instead"
+                "SL1050: dependency `{name}` has `toolchain = false`; name a `path` or a `git` repository instead"
             )),
             (Some(path), None, None, None) => Ok(SourceSpec::Path(path.clone())),
             (None, Some(true), None, None) => Ok(SourceSpec::Toolchain),
@@ -390,7 +395,7 @@ impl DependencySpec {
                 registry: registry.clone(),
             }),
             _ => Err(format!(
-                "dependency `{name}` names {}; pick one",
+                "SL1050: dependency `{name}` names {}; pick one",
                 self.named_sources()
                     .iter()
                     .filter(|key| matches!(**key, "path" | "toolchain" | "git" | "registry"))
@@ -486,10 +491,10 @@ impl LocalConfig {
             return Ok(None);
         };
         let target = self.source.get(replacement).ok_or_else(|| {
-            format!("`[source.{source}]` is replaced with `{replacement}`, which is not configured")
+            format!("SL1054: `[source.{source}]` is replaced with `{replacement}`, which is not configured")
         })?;
         let directory = target.directory.as_ref().ok_or_else(|| {
-            format!("`[source.{replacement}]` names no `directory` to take packages from")
+            format!("SL1054: `[source.{replacement}]` names no `directory` to take packages from")
         })?;
         Ok(Some(root.join(directory)))
     }
@@ -524,7 +529,7 @@ impl RawManifest {
     pub fn into_project(self, inheritance: Option<Inheritance<'_>>) -> Result<Project, String> {
         let package = self.manifest.package.clone().ok_or_else(|| {
             format!(
-                "`{}` defines a workspace and no package of its own",
+                "SL1053: `{}` defines a workspace and no package of its own",
                 self.manifest_path.display()
             )
         })?;
@@ -598,25 +603,35 @@ impl Project {
 
     /// The module a build of this package starts from.
     ///
-    /// A library has none, and asking for one is a question about a package
-    /// that cannot be answered rather than a path that happens not to exist.
+    /// A package that declares no `entry` is entered through
+    /// `<source>/lib.slp` (`D-072`). `D-046` always allowed omitting `entry`,
+    /// but only resolution ever exercised it: `check` and `build` asked for an
+    /// entry unconditionally and refused, so the shortest way to write a
+    /// library was a package nothing could build.
     pub fn entry_path(&self) -> Result<PathBuf, String> {
-        let entry = self.entry.as_ref().ok_or_else(|| {
-            format!(
-                "`{}` declares no `entry`; it is a library and has no module to start from",
-                self.name
-            )
-        })?;
-        Ok(self.root.join(entry))
+        if let Some(entry) = &self.entry {
+            return Ok(self.root.join(entry));
+        }
+        let implied = self.source_root()?.join(LIBRARY_ENTRY);
+        if !implied.is_file() {
+            return Err(format!(
+                "SL1053: `{}` declares no `entry`, so it is entered through `{}`, and there is no such file. Write one, or name an `entry`",
+                self.name,
+                implied.display()
+            ));
+        }
+        Ok(implied)
     }
 
     /// `D-015`: a package entered through `lib.slp` is a library, and a library
     /// has no `main` to validate and no executable to link. A package that
-    /// declares no `entry` at all is the same thing said more directly.
+    /// declares no `entry` at all is the same thing said more directly — and
+    /// since `D-072` it is entered through the same file, so the two spellings
+    /// now differ only in whether it is written down.
     pub fn is_library(&self) -> bool {
         match &self.entry {
             None => true,
-            Some(entry) => entry.file_name().and_then(|name| name.to_str()) == Some("lib.slp"),
+            Some(entry) => entry.file_name().and_then(|name| name.to_str()) == Some(LIBRARY_ENTRY),
         }
     }
 }

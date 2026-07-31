@@ -55,7 +55,7 @@ impl Workspace {
     pub fn member(&self, name: &str) -> Result<&Project, String> {
         self.members.get(name).ok_or_else(|| {
             format!(
-                "no package named `{name}` in this workspace; it has {}",
+                "SL1061: no package named `{name}` in this workspace; it has {}",
                 self.member_list()
             )
         })
@@ -83,7 +83,7 @@ impl Workspace {
         if all {
             if let Some(name) = package {
                 return Err(format!(
-                    "`--workspace` and `--package {name}` disagree about what to act on"
+                    "SL1060: `--workspace` and `--package {name}` disagree about what to act on"
                 ));
             }
             return Ok(self.members.values().collect());
@@ -98,7 +98,7 @@ impl Workspace {
             return Ok(self.members.values().collect());
         }
         Err(format!(
-            "this workspace defines several packages ({}); name one with `--package` or act on all of them with `--workspace`",
+            "SL1060: this workspace defines several packages ({}); name one with `--package` or act on all of them with `--workspace`",
             self.member_list()
         ))
     }
@@ -109,7 +109,7 @@ impl Workspace {
         match selected.len() {
             1 => Ok(selected[0]),
             _ => Err(format!(
-                "`{action}` acts on one package; name it with `--package`"
+                "SL1060: `{action}` acts on one package; name it with `--package`"
             )),
         }
     }
@@ -179,7 +179,7 @@ pub fn load_workspace(manifest_path: Option<PathBuf>) -> Result<Workspace, Strin
         }))?;
         if let Some(previous) = members.insert(member.name.clone(), member) {
             return Err(format!(
-                "two members of this workspace are named `{}`: `{}` and one more",
+                "SL1063: two members of this workspace are named `{}`: `{}` and one more",
                 previous.name,
                 previous.root.display()
             ));
@@ -193,7 +193,7 @@ pub fn load_workspace(manifest_path: Option<PathBuf>) -> Result<Workspace, Strin
     if let Some(name) = &current {
         if !members.contains_key(name) {
             return Err(format!(
-                "`{name}` is not a member of the workspace at `{}`; add it to `[workspace] members` or move it out",
+                "SL1062: `{name}` is not a member of the workspace at `{}`; add it to `[workspace] members` or move it out",
                 root.root.display()
             ));
         }
@@ -236,6 +236,57 @@ pub fn load_project(manifest_path: Option<PathBuf>) -> Result<Project, String> {
 }
 
 /// Walk up from a package directory looking for a workspace that lists it.
+/// What sits above a package directory.
+///
+/// `find_enclosing_workspace` answers a narrower question — it stops only at a
+/// root that *already* lists the package, because that is what inheritance
+/// needs. `slopium new` needs the other half: the root that would have to list
+/// a package for it to be buildable at all, since `load_workspace` refuses a
+/// package sitting unlisted inside a workspace directory.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Enclosing {
+    /// No workspace anywhere above.
+    Nothing,
+    /// A workspace that already reaches this package, by a pattern or by an
+    /// entry somebody wrote.
+    Member(PathBuf),
+    /// A workspace that does not list this package, which is the state that
+    /// makes every command run inside it fail.
+    Unlisted(PathBuf),
+}
+
+/// The workspace above this package directory, and whether it lists it.
+///
+/// `package_root` must exist: membership is decided by comparing canonical
+/// paths, the way `members` patterns are expanded.
+pub fn enclosing_workspace(package_root: &Path) -> Result<Enclosing, String> {
+    let package_root = package_root
+        .canonicalize()
+        .map_err(|error| format!("cannot read `{}`: {error}", package_root.display()))?;
+    let mut directory = package_root.parent().map(Path::to_path_buf);
+    let mut unlisted = None;
+    while let Some(candidate) = directory {
+        let Some(manifest_path) = find_manifest(&candidate) else {
+            break;
+        };
+        let raw = read_manifest(&manifest_path)?;
+        if let Some(section) = &raw.manifest.workspace {
+            if lists_member(&raw.root, section, &package_root)? {
+                return Ok(Enclosing::Member(raw.root));
+            }
+            // Keep walking: an outer workspace may still list this package,
+            // which is the case `find_enclosing_workspace` exists to find. The
+            // innermost one is what `new` would add to, so remember the first.
+            unlisted.get_or_insert(raw.root.clone());
+        }
+        directory = raw.root.parent().map(Path::to_path_buf);
+    }
+    Ok(match unlisted {
+        Some(root) => Enclosing::Unlisted(root),
+        None => Enclosing::Nothing,
+    })
+}
+
 fn find_enclosing_workspace(package_root: &Path) -> Result<Option<RawManifest>, String> {
     let mut directory = package_root.parent().map(Path::to_path_buf);
     while let Some(candidate) = directory {
@@ -300,7 +351,7 @@ fn expand_member(root: &Path, pattern: &str) -> Result<Vec<PathBuf>, String> {
     };
     if prefix.contains('*') {
         return Err(format!(
-            "workspace member `{pattern}` uses `*` outside the final component; only a trailing `/*` is understood"
+            "SL1063: workspace member `{pattern}` uses `*` outside the final component; only a trailing `/*` is understood"
         ));
     }
     let directory = if prefix.is_empty() {
@@ -311,7 +362,7 @@ fn expand_member(root: &Path, pattern: &str) -> Result<Vec<PathBuf>, String> {
     if !wildcard {
         let canonical = directory.canonicalize().map_err(|error| {
             format!(
-                "workspace member `{pattern}`: cannot read `{}`: {error}",
+                "SL1063: workspace member `{pattern}`: cannot read `{}`: {error}",
                 directory.display()
             )
         })?;
@@ -319,7 +370,7 @@ fn expand_member(root: &Path, pattern: &str) -> Result<Vec<PathBuf>, String> {
     }
     let entries = std::fs::read_dir(&directory).map_err(|error| {
         format!(
-            "workspace member `{pattern}`: cannot read `{}`: {error}",
+            "SL1063: workspace member `{pattern}`: cannot read `{}`: {error}",
             directory.display()
         )
     })?;
@@ -506,6 +557,7 @@ mod tests {
             "[package]\nname = \"app\"\nversion.workspace = true\nentry = \"src/lib.slp\"\n",
         );
         let error = load_workspace(Some(tree.root.join(MANIFEST_FILE))).unwrap_err();
+        assert!(error.contains("SL1052"), "{error}");
         assert!(error.contains("[workspace.package]"), "{error}");
     }
 
@@ -545,6 +597,7 @@ mod tests {
         let workspace = load_workspace(Some(tree.root.join(MANIFEST_FILE))).unwrap();
 
         let error = workspace.select(None, false).unwrap_err();
+        assert!(error.contains("SL1060"), "{error}");
         assert!(error.contains("--package"), "{error}");
         assert_eq!(workspace.select(Some("two"), false).unwrap().len(), 1);
         assert_eq!(workspace.select(None, true).unwrap().len(), 2);

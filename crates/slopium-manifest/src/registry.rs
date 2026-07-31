@@ -11,10 +11,20 @@
 //! by carrying the requirements of versions that have not been downloaded, and
 //! it is trusted for nothing else. Every byte it points at is checked against a
 //! digest before anything reads it.
+//!
+//! Index files fetched over the network are kept under
+//! `$SLOPIUM_HOME/index/<digest of the index url>/`, which is what lets
+//! `--offline` resolve a dependency the lock does not already pin. The cache is
+//! a fallback and never a shortcut: an online run always fetches and always
+//! overwrites, because an index that grew a version is the whole reason to read
+//! one, and serving a stale copy would pin an old version silently. A registry
+//! that is a directory needs none of this — it is already local, and reading it
+//! was never a network operation.
 
 use crate::manifest::{validate_package_name, LocalConfig};
-use crate::sha256::Digest;
+use crate::sha256::{sha256, Digest};
 use crate::signature::{PublicKey, Signature, SIGNATURE_EXTENSION};
+use crate::store::Access;
 use crate::version::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -204,6 +214,12 @@ pub struct Registry {
     /// Index files already read, so backtracking does not re-fetch. An empty
     /// entry is a package the registry does not have.
     cached: Arc<Mutex<BTreeMap<String, Arc<Vec<IndexEntry>>>>>,
+    /// Whether this run may reach the network at all.
+    access: Access,
+    /// Where fetched index files are kept between runs, if anywhere. `None` is
+    /// a registry nobody gave a store to — the tests, and the LSP, which
+    /// resolves nothing.
+    cache: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug)]
@@ -265,7 +281,24 @@ impl Registry {
             trusted: keys,
             transport,
             cached: Arc::new(Mutex::new(BTreeMap::new())),
+            access: Access::Online,
+            cache: None,
         })
+    }
+
+    /// Tell this registry what this run is allowed to do and where it may keep
+    /// what it fetched.
+    ///
+    /// Set from `Sources`, which owns both the access policy and the store, so
+    /// that a registry cannot end up online while the rest of the run is
+    /// offline. Nothing else calls it.
+    pub(crate) fn serve(&mut self, access: Access, store_root: &Path) {
+        self.access = access;
+        self.cache = Some(
+            store_root
+                .join("index")
+                .join(sha256(self.index.as_bytes()).to_string()),
+        );
     }
 
     pub fn name(&self) -> &str {
@@ -301,10 +334,12 @@ impl Registry {
         if let Some(cached) = self.cached.lock().unwrap().get(name) {
             return Ok(cached.clone());
         }
-        let relative = format!("{INDEX_DIRECTORY}/{}", index_path(name)?);
+        let within_index = index_path(name)?;
+        let relative = format!("{INDEX_DIRECTORY}/{within_index}");
         let file = format!("{}/{relative}", self.index);
+        let cached_at = self.cache.as_ref().map(|root| root.join(&within_index));
         let mut entries = Vec::new();
-        if let Some(bytes) = self.read(&relative)? {
+        if let Some(bytes) = self.index_file(name, cached_at.as_deref(), &relative)? {
             let text = String::from_utf8(bytes)
                 .map_err(|_| format!("SL1036: `{file}` is not UTF-8, so it is not an index"))?;
             for line in text.lines().filter(|line| !line.trim().is_empty()) {
@@ -360,12 +395,107 @@ impl Registry {
             .and_then(|entry| entry.signature))
     }
 
+    /// One package's index file, from wherever this run is allowed to read it.
+    ///
+    /// The three cases are different enough to be worth naming. A directory
+    /// registry is read directly, offline or not, because reading a directory
+    /// was never a network operation. An online run fetches and writes what it
+    /// got through to the cache. An offline run reads the cache and nothing
+    /// else, which is what makes resolving an unpinned dependency possible at
+    /// all without a network.
+    fn index_file(
+        &self,
+        name: &str,
+        cached_at: Option<&Path>,
+        relative: &str,
+    ) -> Result<Option<Vec<u8>>, String> {
+        if matches!(self.transport, Transport::Directory(_)) {
+            return self.read(relative);
+        }
+        if self.access == Access::Offline {
+            let Some(path) = cached_at else {
+                return Err(format!(
+                    "SL1011: `--offline` forbids reading the index of `{}`, and this run has no index cache to read instead",
+                    self.index
+                ));
+            };
+            return match std::fs::read(path) {
+                Ok(bytes) => Ok(Some(bytes)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(format!(
+                    "SL1011: `--offline` forbids reading the index of `{}`, and no copy of `{name}`'s index file is cached at `{}`. Resolve once without `--offline` to put one there",
+                    self.index,
+                    path.display()
+                )),
+                Err(error) => Err(format!(
+                    "SL1011: cannot read the cached index file `{}`: {error}",
+                    path.display()
+                )),
+            };
+        }
+        let fetched = self.read(relative)?;
+        if let Some(path) = cached_at {
+            match &fetched {
+                Some(bytes) => self.cache_index_file(path, bytes),
+                // Online the index is the authority, so a package it has
+                // stopped serving stops resolving here too. Leaving the old
+                // copy would make `--offline` disagree with the last online
+                // run, which is the one thing a cache must never do.
+                None => {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+        }
+        Ok(fetched)
+    }
+
+    /// Keep a fetched index file for the next run, best effort.
+    ///
+    /// A cache write that fails is not a build failure: the resolution it
+    /// belongs to has already succeeded, and refusing it would turn a full disk
+    /// into a broken toolchain. Losing the write costs one fetch next time.
+    ///
+    /// The `url` file at the top is for whoever opens `$SLOPIUM_HOME` and
+    /// wonders what a directory named after a digest holds.
+    fn cache_index_file(&self, path: &Path, bytes: &[u8]) {
+        let (Some(root), Some(directory)) = (self.cache.as_deref(), path.parent()) else {
+            return;
+        };
+        if std::fs::create_dir_all(directory).is_err() {
+            return;
+        }
+        let temporary = directory.join(format!(".index-{}", crate::store::scratch_suffix()));
+        if std::fs::write(&temporary, bytes).is_err() || std::fs::rename(&temporary, path).is_err()
+        {
+            let _ = std::fs::remove_file(&temporary);
+            return;
+        }
+        let marker = root.join("url");
+        if !marker.exists() {
+            let _ = std::fs::write(marker, format!("{}\n", self.index));
+        }
+    }
+
     /// One file of this registry, or `None` if the registry does not have it.
     fn read(&self, relative: &str) -> Result<Option<Vec<u8>>, String> {
         match &self.transport {
             Transport::Directory(root) => match std::fs::read(root.join(relative)) {
                 Ok(bytes) => Ok(Some(bytes)),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                // A file that is not there means the registry does not publish
+                // it — but only if the registry is there at all. A directory
+                // that does not exist is a misconfigured or moved registry, and
+                // answering "it publishes nothing" would send whoever reads the
+                // message looking for a package instead of for a path.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    if root.is_dir() {
+                        Ok(None)
+                    } else {
+                        Err(format!(
+                            "SL1030: registry `{}` is the directory `{}`, and there is no such directory",
+                            self.name,
+                            root.display()
+                        ))
+                    }
+                }
                 Err(error) => Err(format!(
                     "SL1037: cannot read `{}` from registry `{}`: {error}",
                     root.join(relative).display(),
@@ -382,6 +512,17 @@ impl Registry {
     /// that cannot tell "this package is not published here" from "the server
     /// is broken" would turn an outage into a resolution error.
     fn fetch(&self, url: &str) -> Result<Option<Vec<u8>>, String> {
+        // Index reads have already gone through `index_file`, which serves the
+        // cache offline. Anything else reaching here offline — an archive, a
+        // detached signature — is a download, and `Sources` refuses those
+        // before asking; this is the backstop that keeps a stray path from
+        // running `curl` behind `--offline`.
+        if self.access == Access::Offline {
+            return Err(format!(
+                "SL1011: `--offline` forbids fetching `{url}` from registry `{}`",
+                self.name
+            ));
+        }
         let body = std::env::temp_dir().join(format!(
             "slopium-fetch-{}-{}",
             std::process::id(),
@@ -490,6 +631,18 @@ pub struct Registries {
 }
 
 impl Registries {
+    /// Tell every registry what this run may do and where it may cache.
+    ///
+    /// Called from `Sources`, which holds the access policy and the store
+    /// already. Doing it in one place is the point: a registry configured
+    /// online while the run is offline would reach the network behind
+    /// `--offline`, and there would be nothing in either type to stop it.
+    pub(crate) fn serve(&mut self, access: Access, store_root: &Path) {
+        for registry in self.by_name.values_mut() {
+            registry.serve(access, store_root);
+        }
+    }
+
     pub fn from_config(config: &LocalConfig, root: &Path) -> Result<Self, String> {
         let mut by_name = BTreeMap::new();
         for (name, entry) in &config.registry {

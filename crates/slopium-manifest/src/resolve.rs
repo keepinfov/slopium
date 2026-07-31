@@ -128,14 +128,14 @@ pub fn resolve_workspace(
                 Some(existing) if existing.id.version == package.id.version => {
                     let first = &reached_by[&package.id.name];
                     return Err(format!(
-                        "`{}` is required from two sources in one workspace: `{}` through `{first}` and `{}` through `{name}`. One lockfile cannot record both",
+                        "SL1031: `{}` is required from two sources in one workspace: `{}` through `{first}` and `{}` through `{name}`. One lockfile cannot record both",
                         package.id.name, existing.id.source, package.id.source
                     ));
                 }
                 Some(existing) => {
                     let first = &reached_by[&package.id.name];
                     return Err(format!(
-                        "`{}` is required at two versions in one workspace: {} through `{first}` and {} through `{name}`. One lockfile cannot record both",
+                        "SL1072: `{}` is required at two versions in one workspace: {} through `{first}` and {} through `{name}`. One lockfile cannot record both",
                         package.id.name, existing.id.version, package.id.version
                     ));
                 }
@@ -517,7 +517,7 @@ impl Context<'_> {
         // that differed from it would give one package two names.
         if project.name != need.name {
             return Err(format!(
-                "`{}` declares dependency `{}`, but the package at `{}` is named `{}`; the key in `[dependencies]` must be the package name",
+                "SL1071: `{}` declares dependency `{}`, but the package at `{}` is named `{}`; the key in `[dependencies]` must be the package name",
                 need.dependent,
                 need.name,
                 project.root.display(),
@@ -542,7 +542,7 @@ impl Context<'_> {
     fn toolchain_package(&self, need: &Need) -> Result<Chosen, String> {
         if need.name != STD_PACKAGE {
             return Err(format!(
-                "dependency `{}` cannot use the toolchain source; the bundled package is named `{STD_PACKAGE}`",
+                "SL1077: dependency `{}` cannot use the toolchain source; the bundled package is named `{STD_PACKAGE}`",
                 need.name
             ));
         }
@@ -581,7 +581,7 @@ impl Context<'_> {
         let project = self.materialize(&id, &pin.checksum)?;
         if project.name != id.name || project.version != id.version {
             return Err(format!(
-                "`{url}` at {} is `{} v{}`, but it was resolved as `{id}`",
+                "SL1071: `{url}` at {} is `{} v{}`, but it was resolved as `{id}`",
                 pin.source, project.name, project.version
             ));
         }
@@ -604,7 +604,7 @@ impl Context<'_> {
     fn registry_package_from_lock(&self, need: &Need, pin: &Pin) -> Result<Chosen, String> {
         let checksum = pin.checksum.ok_or_else(|| {
             format!(
-                "`{}` records `{}` as a registry package with no checksum; delete it and resolve again",
+                "SL1078: `{}` records `{}` as a registry package with no checksum; delete it and resolve again",
                 crate::lock::LOCK_FILE,
                 need.name
             )
@@ -738,7 +738,7 @@ impl Context<'_> {
                 // directory whose absolute path a lock must not record. Both
                 // have answers; neither is in this release.
                 SourceId::Git { .. } => Err(format!(
-                    "`{dependent}` comes from git and declares the `path` dependency `{declared}`; a package fetched from a repository cannot have one yet, because there is no way to write where it lives into a lockfile that another machine could read"
+                    "SL1076: `{dependent}` comes from git and declares the `path` dependency `{declared}`; a package fetched from a repository cannot have one yet, because there is no way to write where it lives into a lockfile that another machine could read"
                 )),
                 SourceId::Registry { .. } => Err(format!(
                     "SL1032: `{dependent} v{}` came from a registry and declares the `path` dependency `{declared}`; a published package depends only on its own registry and the toolchain (`D-054`)",
@@ -810,7 +810,7 @@ impl Context<'_> {
             ));
         }
         Ok(format!(
-            "`{}` is required at two versions: {} and {}. Two incompatible versions of one package cannot coexist in a graph",
+            "SL1072: `{}` is required at two versions: {} and {}. Two incompatible versions of one package cannot coexist in a graph",
             need.name, existing.id.version, best.id.version
         ))
     }
@@ -818,7 +818,7 @@ impl Context<'_> {
     /// Why nothing a source offers satisfies a requirement.
     fn no_candidate(&self, need: &Need, options: &Options) -> String {
         let asked = format!(
-            "cannot select a version of `{}`: `{}` requires {}",
+            "SL1073: cannot select a version of `{}`: `{}` requires {}",
             need.name, need.dependent, need.requirement
         );
         // A yanked version that would otherwise have been the answer is the
@@ -918,7 +918,7 @@ fn replacement(
     let root = directory.join(&id.name);
     if !root.is_dir() {
         return Err(format!(
-            "`{source}` is replaced by the vendored packages in `{}`, but `{}` is not there; run `slopium vendor`",
+            "SL1075: `{source}` is replaced by the vendored packages in `{}`, but `{}` is not there; run `slopium vendor`",
             directory.display(),
             id.name
         ));
@@ -932,7 +932,7 @@ fn replacement(
     let project = load_project(Some(root.join(MANIFEST_FILE)))?;
     if project.name != id.name || project.version != id.version {
         return Err(format!(
-            "the vendored copy at `{}` is `{} v{}`, but it stands in for `{id}`",
+            "SL1075: the vendored copy at `{}` is `{} v{}`, but it stands in for `{id}`",
             root.display(),
             project.name,
             project.version
@@ -966,7 +966,7 @@ fn collect_language_items(
     };
     if let Some(previous) = source {
         return Err(format!(
-            "`{previous}` and `{declared}` both define `[language-items]`; a package graph has one standard library"
+            "SL1074: `{previous}` and `{declared}` both define `[language-items]`; a package graph has one standard library"
         ));
     }
     *source = Some(declared.to_owned());
@@ -999,7 +999,10 @@ fn reject_cycles(packages: &BTreeMap<String, ResolvedPackage>, root: &str) -> Re
                 let start = path.iter().position(|entry| entry == name).unwrap_or(0);
                 let mut cycle = path[start..].to_vec();
                 cycle.push(name.to_owned());
-                return Err(format!("package dependency cycle: {}", cycle.join(" -> ")));
+                return Err(format!(
+                    "SL1070: package dependency cycle: {}",
+                    cycle.join(" -> ")
+                ));
             }
             State::Unvisited => {}
         }
@@ -1048,7 +1051,12 @@ mod tests {
             if root.exists() {
                 fs::remove_dir_all(&root).unwrap();
             }
-            fs::create_dir_all(&root).unwrap();
+            // The registry directory exists from the start even when nothing is
+            // published into it. A registry that publishes no version of a name
+            // and a registry whose directory is not there are different
+            // failures with different messages, and a fixture that conflated
+            // them would test the wrong one.
+            fs::create_dir_all(root.join("registry")).unwrap();
             Self {
                 root,
                 trusted: std::cell::RefCell::new(Vec::new()),
@@ -1396,6 +1404,7 @@ mod tests {
         );
 
         let error = workspace.resolve("application").unwrap_err();
+        assert!(error.contains("SL1076"), "{error}");
         assert!(error.contains("comes from git"), "{error}");
         assert!(error.contains("`helper`"), "{error}");
     }
@@ -1466,6 +1475,7 @@ mod tests {
 
         let error = workspace.resolve("application").unwrap_err();
         assert!(error.contains("SL1031"), "{error}");
+        assert!(error.contains("SL1031"), "{error}");
         assert!(error.contains("two sources"), "{error}");
         assert!(error.contains("old-shared"), "{error}");
     }
@@ -1511,6 +1521,7 @@ mod tests {
         workspace.package("b", "1.0.0", "a = { path = \"../a\" }\n");
 
         let error = workspace.resolve("a").unwrap_err();
+        assert!(error.contains("SL1070"), "{error}");
         assert!(error.contains("package dependency cycle"), "{error}");
     }
 
@@ -1521,6 +1532,7 @@ mod tests {
         workspace.package("application", "1.0.0", "math = { path = \"../mathlib\" }\n");
 
         let error = workspace.resolve("application").unwrap_err();
+        assert!(error.contains("SL1071"), "{error}");
         assert!(error.contains("must be the package name"), "{error}");
     }
 
@@ -1576,6 +1588,7 @@ mod tests {
         );
 
         let error = workspace.resolve("application").unwrap_err();
+        assert!(error.contains("SL1074"), "{error}");
         assert!(error.contains("one standard library"), "{error}");
     }
 
@@ -1700,6 +1713,7 @@ mod tests {
         workspace.package("application", "1.0.0", "left = \"^1\"\nshared = \"^1\"\n");
 
         let error = workspace.resolve("application").unwrap_err();
+        assert!(error.contains("SL1072"), "{error}");
         assert!(error.contains("two versions"), "{error}");
         assert!(error.contains("shared"), "{error}");
     }
@@ -1821,6 +1835,20 @@ mod tests {
             "{error}"
         );
         assert!(error.contains("offers no"), "{error}");
+    }
+
+    /// The other half of the one above: a registry directory that is not there
+    /// is not a registry that publishes nothing. Answering "it offers no
+    /// `geometry`" would send somebody looking for a package when what is
+    /// wrong is a path.
+    #[test]
+    fn a_registry_directory_that_is_not_there_says_so() {
+        let workspace = Workspace::new("no-registry-directory");
+        workspace.package("application", "1.0.0", "geometry = \"^1\"\n");
+        fs::remove_dir_all(workspace.root.join("registry")).unwrap();
+        let error = workspace.resolve("application").unwrap_err();
+        assert!(error.contains("SL1030"), "{error}");
+        assert!(error.contains("no such directory"), "{error}");
     }
 
     /// `D-057`: keys configured, key used, package built. The signature is
