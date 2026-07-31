@@ -822,7 +822,10 @@ fn add_resolved_dependencies(
             }
             // A fetched package has been unpacked into the store by the time
             // resolution returns, so it is read like any other directory.
-            (SourceId::Path(_) | SourceId::Git { .. }, Some(project)) => {
+            (
+                SourceId::Path(_) | SourceId::Git { .. } | SourceId::Registry { .. },
+                Some(project),
+            ) => {
                 let source_root = project.source_root()?;
                 let mut paths = Vec::new();
                 collect_workspace_sources(&source_root, &mut paths)?;

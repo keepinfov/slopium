@@ -15,14 +15,16 @@ use crate::archive::{self, prefix_for};
 use crate::git;
 use crate::lock::Lockfile;
 use crate::manifest::{Manifest, MANIFEST_FILE};
+use crate::registry::{IndexEntry, Registries};
 use crate::resolve::PackageId;
 use crate::sha256::Digest;
 use crate::source::{GitReference, SourceId};
 use crate::std_library::std_archive;
 use crate::store::{Access, Store};
 use crate::version::Version;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 /// What resolution settled on for one git dependency.
 #[derive(Clone, Debug)]
@@ -32,7 +34,28 @@ pub struct GitPin {
     pub checksum: Digest,
 }
 
-/// The store, the access policy, and the lock's pins.
+/// What the lockfile says about one package.
+#[derive(Clone, Debug)]
+pub struct Pin {
+    pub source: SourceId,
+    pub version: Version,
+    pub checksum: Option<Digest>,
+}
+
+/// Which pins `slopium update` has been told to throw away.
+#[derive(Clone, Debug, Default)]
+enum Refresh {
+    /// Every pin stands.
+    #[default]
+    Nothing,
+    /// `slopium update`: resolve as though there were no lock.
+    Everything,
+    /// `slopium update -p name`: exactly these move, and nothing else may.
+    These(BTreeSet<String>),
+}
+
+/// The store, the access policy, the configured registries, and the lock's
+/// pins.
 #[derive(Clone, Debug)]
 pub struct Sources {
     store: Store,
@@ -41,13 +64,13 @@ pub struct Sources {
     locked: bool,
     /// What the lockfile pinned, by package name.
     pins: BTreeMap<String, Pin>,
-}
-
-#[derive(Clone, Debug)]
-struct Pin {
-    source: SourceId,
-    version: Version,
-    checksum: Option<Digest>,
+    registries: Registries,
+    refresh: Refresh,
+    /// Versions `--precise` demands, by package name.
+    precise: BTreeMap<String, Version>,
+    /// Git pins already resolved this run. Backtracking can reach one
+    /// dependency many times, and a fetch is not something to repeat.
+    fetched: Arc<Mutex<BTreeMap<(String, GitReference), GitPin>>>,
 }
 
 impl Sources {
@@ -57,7 +80,64 @@ impl Sources {
             access,
             locked,
             pins: BTreeMap::new(),
+            registries: Registries::default(),
+            refresh: Refresh::Nothing,
+            precise: BTreeMap::new(),
+            fetched: Arc::new(Mutex::new(BTreeMap::new())),
         }
+    }
+
+    pub fn with_registries(mut self, registries: Registries) -> Self {
+        self.registries = registries;
+        self
+    }
+
+    /// Throw away every pin, which is what `slopium update` is.
+    pub fn updating_everything(mut self) -> Self {
+        self.refresh = Refresh::Everything;
+        self
+    }
+
+    /// Throw away the pins of these packages and no others, which is what
+    /// `slopium update -p` is — and what makes the lock diff prove it.
+    pub fn updating(mut self, names: impl IntoIterator<Item = String>) -> Self {
+        self.refresh = Refresh::These(names.into_iter().collect());
+        self
+    }
+
+    /// Demand an exact version of a package, whatever the index offers.
+    pub fn at_precisely(mut self, name: &str, version: Version) -> Self {
+        self.precise.insert(name.to_owned(), version);
+        self
+    }
+
+    pub fn registries(&self) -> &Registries {
+        &self.registries
+    }
+
+    pub fn locked(&self) -> bool {
+        self.locked
+    }
+
+    /// What the lock pinned this package to, unless it is being updated.
+    pub fn pinned(&self, name: &str) -> Option<&Pin> {
+        let stands = match &self.refresh {
+            Refresh::Nothing => true,
+            Refresh::Everything => false,
+            Refresh::These(names) => !names.contains(name),
+        };
+        stands.then(|| self.pins.get(name)).flatten()
+    }
+
+    /// The version `--precise` demands for this package, if any.
+    pub fn precise(&self, name: &str) -> Option<&Version> {
+        self.precise.get(name)
+    }
+
+    /// Every name the lockfile knows, so `update -p` can say when it is aimed
+    /// at a package that is not in the graph.
+    pub fn pinned_names(&self) -> Vec<&str> {
+        self.pins.keys().map(String::as_str).collect()
     }
 
     /// Take the lockfile's pins, ignoring entries it cannot make sense of.
@@ -105,6 +185,10 @@ impl Sources {
         if let Some(pin) = self.pinned_git(declared, url, reference) {
             return pin;
         }
+        let key = (url.to_owned(), reference.clone());
+        if let Some(fetched) = self.fetched.lock().unwrap().get(&key) {
+            return Ok(fetched.clone());
+        }
         if self.locked {
             return Err(format!(
                 "`{declared}` is not pinned by `{}` and --locked was given; run without it to resolve {reference} of `{url}`",
@@ -126,11 +210,40 @@ impl Sources {
         };
         let (bytes, version) = self.archive_from_git(declared, &source)?;
         let checksum = self.store.insert(&bytes)?;
-        Ok(GitPin {
+        let pin = GitPin {
             source,
             version,
             checksum,
-        })
+        };
+        self.fetched.lock().unwrap().insert(key, pin.clone());
+        Ok(pin)
+    }
+
+    /// Every version of a package a registry publishes, newest first.
+    ///
+    /// Reading an index is reaching for the network, so it obeys the same two
+    /// rules a git fetch does: `--locked` forbids resolving a name the lock
+    /// does not already pin, and `--offline` forbids the reach itself. What
+    /// makes a fully pinned project resolve without either is that the caller
+    /// asks `pinned` first and never gets here.
+    pub fn published(&self, declared: &str, index: &str) -> Result<Vec<IndexEntry>, String> {
+        if self.locked {
+            return Err(format!(
+                "`{declared}` is not pinned by `{}` and --locked was given; run without it to select a version from `{index}`",
+                crate::lock::LOCK_FILE
+            ));
+        }
+        if self.access == Access::Offline {
+            return Err(format!(
+                "SL1011: `{declared}` is not pinned by `{}`, and `--offline` forbids reading the index of `{index}` to find a version",
+                crate::lock::LOCK_FILE
+            ));
+        }
+        let registry = self.registries.at_index(index)?;
+        let published = registry.versions(declared)?;
+        let mut entries = published.as_ref().clone();
+        entries.sort_by(|left, right| right.version.cmp(&left.version));
+        Ok(entries)
     }
 
     /// The lock's answer for this dependency, if it has one that still applies.
@@ -140,7 +253,7 @@ impl Sources {
         url: &str,
         reference: &GitReference,
     ) -> Option<Result<GitPin, String>> {
-        let pin = self.pins.get(declared)?;
+        let pin = self.pinned(declared)?;
         // The reference is part of the source id (`D-049`), so a manifest that
         // moved from one branch to another does not match its own lock entry
         // and is resolved again.
@@ -187,6 +300,16 @@ impl Sources {
                     }
                     self.archive_from_git(&id.name, &id.source)?.0
                 }
+                SourceId::Registry { index } => {
+                    if self.access == Access::Offline {
+                        return Err(format!(
+                            "SL1011: `{described}` is not in the package store — it needs {checksum} — and `--offline` forbids downloading it from `{index}`"
+                        ));
+                    }
+                    self.registries
+                        .at_index(index)?
+                        .archive(&id.name, &id.version)?
+                }
                 SourceId::Path(path) => {
                     return Err(format!(
                         "`{described}` is the directory `{}`; there is nothing to fetch and nothing to pin",
@@ -194,14 +317,22 @@ impl Sources {
                     ))
                 }
             };
-            let digest = self.store.insert(&bytes)?;
-            // The store files bytes under what they hash to, so a mismatch here
-            // is the source disagreeing with the lock rather than a bad write.
+            // The digest is checked before the archive is read, let alone
+            // stored: bytes that are not the ones this graph resolved should
+            // not get as far as being parsed, and what they would have parsed
+            // to is not the interesting thing to report about them.
+            let digest = crate::sha256::sha256(&bytes);
             if digest != *checksum {
-                return Err(format!(
-                    "SL1022: `{described}` now archives to {digest}, but the lock records {checksum}. The source has changed underneath a pinned commit"
-                ));
+                return Err(match &id.source {
+                    SourceId::Registry { index } => format!(
+                        "SL1034: `{index}` served a `{described}` that hashes to {digest}, but {checksum} is what was published for it. The bytes are not the ones this graph resolved"
+                    ),
+                    _ => format!(
+                        "SL1022: `{described}` now archives to {digest}, but the lock records {checksum}. The source has changed underneath a pinned commit"
+                    ),
+                });
             }
+            self.store.insert(&bytes)?;
         }
         self.store.checkout(checksum, &described, self.access)
     }

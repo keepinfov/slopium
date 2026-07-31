@@ -168,10 +168,141 @@ Some consequences, each of them deliberate:
   into the store, so a relative path from it would either escape the package or
   name a directory whose absolute path no lock could portably record.
 
+## Registries
+
+A registry is a directory that some file server serves. There is no protocol
+beyond "fetch this path", which is why any file server — or a directory, or
+`file://` — is one, and why no registry server lives in this repository.
+
+```
+index/<prefix>/<name>.json          one JSON object per line, one line per version
+packages/<name>/<name>-<version>.sl.tar
+```
+
+`<prefix>` fans the index out by name length: `1/` for one-character names,
+`2/`, `3/<first>/`, and `<first two>/<next two>/` beyond that. The index file is
+JSON *per line* rather than one document, so publishing appends. A line that
+cannot be read is an error naming the file (`SL1036`); an unknown field is
+ignored, so a later format can add one without older clients refusing the index.
+
+```json
+{"name":"geometry","version":"1.4.0","dependencies":[{"name":"units","requirement":"^2"},{"name":"std","requirement":"^0.4","source":"toolchain"}],"checksum":"9b3f…","yanked":false}
+```
+
+A dependency naming no `source` means **the registry the entry came from**
+(`D-054`), never the consumer's default — that is what stops a package published
+to an internal index from being made to reach a public one by how a consumer is
+configured. `"source": "toolchain"` is the bundled library. Nothing else is
+accepted yet.
+
+### Naming one
+
+```toml
+[dependencies]
+geometry = "^1.2"                                    # the `default` registry
+physics = { version = "^2", registry = "internal" }
+```
+
+Registries are configured per checkout, and **this toolchain ships no registry
+URL** (`D-053`):
+
+```toml
+# .slopium/config.toml
+[registry.default]
+index = "https://packages.example.com"
+
+[registry.internal]
+index = "file:///srv/registry"
+```
+
+An unconfigured registry — including `default` — is an error (`SL1030`), not a
+download from somewhere nobody chose. `https://` goes through `curl` with a
+fixed argument list no configuration can extend; a value with no scheme is a
+path relative to the workspace root, because a local registry is a directory;
+and `http://` is accepted only for a loopback host, since whoever answers a
+plaintext index chooses what a first resolution pins.
+
+The **index URL is the identity**, so the lock records it and never the local
+name. Two developers who call one index by two names still produce one lockfile:
+
+```toml
+[[package]]
+name = "geometry"
+version = "1.4.0"
+source = "registry+https://packages.example.com"
+checksum = "9b3f…"
+```
+
+### Selecting a version
+
+The registry is the first source that offers more than one version of a package,
+so it is the first that makes selection mean anything. Selection is maximal with
+backtracking (`D-036`): the newest version satisfying a requirement, and when
+that leaves some other requirement unsatisfiable, an older one. A diamond whose
+newest dependent needs a major nobody else accepts resolves to the older
+dependent rather than failing.
+
+Requirements come out of the index during the search, because downloading every
+candidate to find out what it needs is the cost an index exists to avoid. What
+gets built is checked against the archive: a package whose manifest disagrees
+with the entry that selected it is refused (`SL1033`), and so is one whose bytes
+do not hash to what was published (`SL1034`). The index is trusted to make
+resolution fast and for nothing else (`D-055`).
+
+A pinned dependency is not resolved again, exactly as for git — and a fully
+pinned graph never reads an index at all, which is what lets `--offline` work
+against a populated store.
+
+A yanked version is not selected, but is still built when the lock already names
+it: yanking is a statement about new resolutions, and a lockfile that stops
+working when somebody edits an index is not a lockfile. A requirement whose only
+candidates are yanked says so (`SL1035`).
+
+### Deliberate limits in v0.4
+
+- a published package depends only on its own registry and the toolchain
+  (`D-054`). A registry name in a manifest is a local nickname and means nothing
+  on the machine that fetched it, and a directory or repository is `D-051`'s
+  problem again. All three are `SL1032`.
+- two dependents naming one package from two sources is an error (`SL1031`),
+  whether the disagreement is registry against registry, registry against git,
+  or registry against path.
+- a workspace resolves each member separately, so two members whose requirements
+  select different versions of one package is an error rather than a joint
+  solve. Requirements that overlap select the same version and are unaffected.
+
+### Editing the manifest
+
+```sh
+slopium add geometry@^1.2               # from the default registry
+slopium add geometry --git https://example.com/geometry.git --tag v1.4.0
+slopium add helper --path ../helper
+slopium remove geometry
+slopium update                          # move every pin its source allows
+slopium update -p geometry              # move exactly one
+slopium update -p geometry --precise 1.3.0
+```
+
+`add` and `remove` edit `Slopium.toml` as text rather than reprinting it from
+its parse: a manifest is something a person wrote, and a tool that reformats it
+on every touch is one people stop using. The one form they will not touch is a
+dependency written as `[dependencies.<name>]`, which they refuse rather than
+half-edit.
+
+`update` is what moves a lock, so `--locked` refuses it. `-p` throws away
+exactly one pin and leaves the rest, which is what makes the lock's own diff the
+proof of what moved.
+
+`slopium package --index-entry` prints the index line for the archive it wrote,
+which is what putting a package into a static tree takes. It is also where
+`D-054` is enforced from the writing side: a manifest that depends on a
+directory or a repository cannot become an index entry.
+
 ## Checksums in the lock
 
 `Slopium.lock` is format 2 and records a `checksum` for every package whose
-bytes cannot change under it:
+bytes cannot change under it — the bundled library, a git commit, and a
+published version:
 
 ```toml
 [[package]]
@@ -243,12 +374,12 @@ unrepairable by the only command that can repair it.
 `--offline` forbids reaching for bytes that are not already local, and
 `--frozen` is `--offline` and `--locked` together. What stays available is the
 lock, the package store, and any vendored copies; what is forbidden is running
-`git`. When something is missing it says which package and what digest it wanted
-(`SL1011`).
+`git` and reading a registry index. When something is missing it says which
+package and what digest it wanted (`SL1011`).
 
 So a project that has resolved once builds offline from the store, and a project
-that has been vendored builds offline with no store and no `git` installed at
-all — the copies in `vendor/` are the whole answer, checked against the lock's
-checksums on the way in. A dependency nothing has pinned yet cannot be resolved
-offline: finding out which commit a branch names today is exactly the question
-`--offline` refuses to ask.
+that has been vendored builds offline with no store, no `git` and no `curl`
+installed at all — the copies in `vendor/` are the whole answer, checked against
+the lock's checksums on the way in. A dependency nothing has pinned yet cannot
+be resolved offline: which commit a branch names today, and which versions an
+index publishes today, are exactly the questions `--offline` refuses to ask.

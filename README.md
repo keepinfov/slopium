@@ -326,6 +326,8 @@ entry = "src/main.slp"
 
 [dependencies]
 std = { toolchain = true }
+# geometry = "^1.2"                       # registry `default`
+# geometry = { version = "^1.2", registry = "internal" }
 # geometry = { path = "../geometry" }
 # geometry = { path = "../geometry", version = "^1.2" }
 # geometry = { git = "https://example.com/geometry.git" }
@@ -375,16 +377,18 @@ pass. `debug` управляет DWARF line tables; если поле не ук�
 самого lock, поэтому копия проекта в другом каталоге даёт тот же файл.
 
 `checksum` есть у пакета, чьи байты не могут измениться под lock: библиотека,
-входящая в компилятор, и пакет из git. У path-зависимости его нет — это рабочий
-каталог, и хеширование переписывало бы lock на каждое нажатие клавиши.
+входящая в компилятор, пакет из git и опубликованная версия из registry. У
+path-зависимости его нет — это рабочий каталог, и хеширование переписывало бы
+lock на каждое нажатие клавиши.
 Lock, который этот toolchain не может прочитать, перезаписывается с сообщением:
 он целиком выводится из manifests. Под `--locked` это ошибка.
 
 ```sh
 slopium tree                  # разрешённый граф; повтор помечается (*)
 slopium build --locked        # упасть, если lock пришлось бы изменить
-slopium build --offline       # только lock, store и vendor; git не запускать
+slopium build --offline       # только lock, store и vendor: ни git, ни индекса
 slopium build --frozen        # --locked и --offline вместе
+slopium update -p geometry    # единственная команда, двигающая lock
 ```
 
 Приложению lock стоит коммитить, библиотеке — нет.
@@ -500,6 +504,50 @@ Submodules в v0.4 не скачиваются — дерево с `.gitmodules`
 без store — копии в `vendor/` проверяются по контрольным суммам из lock.
 
 Подробности формата — в `docs/packaging.md`.
+
+### Зависимости из registry
+
+```toml
+[dependencies]
+geometry = "^1.2"                                     # registry `default`
+physics = { version = "^2", registry = "internal" }
+```
+
+Registry — это каталог, который кто-то отдаёт по сети: `index/` с одной строкой
+JSON на каждую опубликованную версию и `packages/` с архивами. Никакого сервера
+для этого не нужно, и в этом репозитории его нет.
+
+**Встроенного адреса registry в toolchain нет.** Адреса задаются на машине:
+
+```toml
+# .slopium/config.toml
+[registry.default]
+index = "https://packages.example.com"
+```
+
+Незаданный registry — ошибка (`SL1030`), а не скачивание непонятно откуда. В lock
+записывается адрес индекса, а не его локальное имя, поэтому два разработчика,
+называющие один индекс по-разному, получают один и тот же lock.
+
+Registry — первый источник, у которого версий больше одной, поэтому выбор здесь
+наконец что-то значит: берётся наибольшая подходящая версия, а если из-за неё
+перестаёт разрешаться что-то другое — разрешение откатывается и берёт версию
+постарше. Требования кандидатов читаются из индекса, но скачанный пакет
+сверяется и с записью индекса (`SL1033`), и с опубликованным digest (`SL1034`):
+индексу доверяют скорость, и больше ничего.
+
+```sh
+slopium add geometry@^1.2
+slopium remove geometry
+slopium update -p geometry --precise 1.3.0
+slopium tree
+```
+
+`add` и `remove` правят `Slopium.toml` как текст и не переписывают то, чего не
+трогали. `update` — единственная команда, двигающая lock; `-p` двигает ровно
+один пакет, и это видно по diff'у самого lock.
+
+Подробности — в `docs/packaging.md`.
 
 ### Отладка в GDB
 
@@ -732,10 +780,14 @@ nvim examples/fibonacci.slp
   регистр и на тех участках, где ни разу не упоминается;
 - ссылки и borrowed slices нельзя возвращать или хранить в aggregates и
   коллекциях;
-- нет traits, bounds, registry/Git dependencies и stable FFI;
-- dependency graph поддерживает path и bundled-toolchain источники; registry и
-  Git появятся в v0.4.3–v0.4.4, вместе с ними — checksums в lock;
-- workspaces ещё нет: один manifest — один пакет;
+- нет traits, bounds и stable FFI;
+- dependency graph поддерживает path, bundled-toolchain, git и registry;
+  подписи пакетов и `slopium publish` — v0.4.5;
+- опубликованный пакет может зависеть только от своего registry и toolchain:
+  ни `path`, ни `git`, ни чужой индекс (`SL1032`);
+- workspace разрешает участников по отдельности, поэтому два участника с
+  требованиями, выбирающими разные версии одного пакета, — ошибка, а не общий
+  подбор;
 - два backend — прямой codegen для System V AMD64 и для AAPCS64; сборка под
   aarch64 требует cross-`cc`, а запуск на x86-64-хосте — `qemu-aarch64`;
 - object writer не пишет DWARF, поэтому сборка с `--debug` идёт через

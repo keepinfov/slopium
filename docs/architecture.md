@@ -257,6 +257,17 @@ dependency the lock names is not re-resolved, which is what makes a moved branch
 unable to move a build. The compiler is still handed a directory, so nothing
 below the manager knows a repository was involved.
 
+A registry is a static index tree and an archive next to it, reached over
+`file://` or through `curl`. It is the first source offering more than one
+version of a package, so it is what puts weight on selection: the resolver takes
+the newest version a requirement allows and backtracks when that makes some
+other requirement unsatisfiable. Candidate requirements come out of the index,
+because downloading every candidate to read its manifest is the cost an index
+exists to avoid — and what is downloaded is then checked against both the entry
+that selected it and the digest it was published under. Again the compiler is
+handed a directory in the store, so the resolver is the only part of the system
+that knows registries exist at all.
+
 ## Runtime boundary
 
 Generated programs link a small C runtime through the stable `sl_rt_*` ABI.

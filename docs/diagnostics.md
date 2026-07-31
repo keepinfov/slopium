@@ -34,7 +34,18 @@ fetching are the only parts of it with codes so far (`D-048`):
 - `SL1020`: a `git` command could not be run, or failed;
 - `SL1021`: a fetched package uses submodules, which v0.4 does not fetch;
 - `SL1022`: a pinned commit no longer archives to the digest the lock records;
-- `SL1023`: a git reference names no commit in the repository.
+- `SL1023`: a git reference names no commit in the repository;
+- `SL1030`: a registry a manifest or a lock names is not configured, or its
+  index is not one this toolchain can reach;
+- `SL1031`: one package name is required from two different sources (`D-038`);
+- `SL1032`: a published package depends on something it may not — a directory,
+  a repository, or a registry it names by a local nickname (`D-054`);
+- `SL1033`: a fetched package's manifest disagrees with the index entry that
+  selected it (`D-055`);
+- `SL1034`: a downloaded archive does not hash to what the index published;
+- `SL1035`: every version that would satisfy a requirement is yanked;
+- `SL1036`: an index file is malformed;
+- `SL1037`: an index or a package could not be fetched.
 
 The v0.2 package and language-core diagnostics reserve:
 

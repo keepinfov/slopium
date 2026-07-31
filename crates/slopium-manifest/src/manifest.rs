@@ -5,7 +5,7 @@
 //! file and walked the dependency graph a second time. Anything both of them
 //! must agree about belongs outside both (`D-025`).
 
-use crate::source::{GitReference, SourceSpec};
+use crate::source::{GitReference, SourceSpec, DEFAULT_REGISTRY};
 use crate::version::{Version, VersionReq};
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
@@ -183,9 +183,10 @@ impl LanguageItemSection {
 ///
 /// A struct rather than the untagged enum this used to be: an untagged enum
 /// cannot say which field it disliked, so `{ pth = "../x" }` reported that the
-/// table matched no variant instead of naming the typo.
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// table matched no variant instead of naming the typo. The bare string form
+/// `dep = "^1.2"` is handled by the `Deserialize` impl below rather than by an
+/// untagged enum, for exactly that reason.
+#[derive(Clone, Debug, Default)]
 pub struct DependencySpec {
     pub path: Option<PathBuf>,
     pub toolchain: Option<bool>,
@@ -196,9 +197,68 @@ pub struct DependencySpec {
     pub branch: Option<String>,
     pub tag: Option<String>,
     pub rev: Option<String>,
+    /// Which configured registry to take this from. Absent alongside a
+    /// `version` means `default`, which has no built-in URL either (`D-053`).
+    pub registry: Option<String>,
     pub version: Option<VersionReq>,
     /// `workspace = true`: take this entry from `[workspace.dependencies]`.
     pub workspace: Option<bool>,
+}
+
+/// The table form, kept separate only so the derived reader stays available:
+/// the visitor below needs it for `visit_map` while `DependencySpec` itself
+/// answers to a string as well.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DependencyTable {
+    path: Option<PathBuf>,
+    toolchain: Option<bool>,
+    git: Option<String>,
+    branch: Option<String>,
+    tag: Option<String>,
+    rev: Option<String>,
+    registry: Option<String>,
+    version: Option<VersionReq>,
+    workspace: Option<bool>,
+}
+
+impl<'de> Deserialize<'de> for DependencySpec {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Entry;
+
+        impl<'de> Visitor<'de> for Entry {
+            type Value = DependencySpec;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a version requirement or a dependency table")
+            }
+
+            fn visit_str<E: de::Error>(self, text: &str) -> Result<Self::Value, E> {
+                Ok(DependencySpec {
+                    version: Some(VersionReq::parse(text).map_err(E::custom)?),
+                    ..DependencySpec::default()
+                })
+            }
+
+            fn visit_map<M: MapAccess<'de>>(self, map: M) -> Result<Self::Value, M::Error> {
+                let table =
+                    DependencyTable::deserialize(de::value::MapAccessDeserializer::new(map))?;
+                Ok(DependencySpec {
+                    path: table.path,
+                    toolchain: table.toolchain,
+                    git: table.git,
+                    branch: table.branch,
+                    tag: table.tag,
+                    rev: table.rev,
+                    registry: table.registry,
+                    version: table.version,
+                    workspace: table.workspace,
+                })
+            }
+        }
+
+        deserializer.deserialize_any(Entry)
+    }
 }
 
 impl DependencySpec {
@@ -212,6 +272,7 @@ impl DependencySpec {
             ("branch", self.branch.is_some()),
             ("tag", self.tag.is_some()),
             ("rev", self.rev.is_some()),
+            ("registry", self.registry.is_some()),
         ]
         .into_iter()
         .filter_map(|(name, given)| given.then_some(name))
@@ -285,7 +346,7 @@ impl DependencySpec {
     }
 
     /// Which source this entry names, rejecting the combinations that have no
-    /// meaning. The `Registry` arm arrives in v0.4.4.
+    /// meaning.
     pub fn source(&self, name: &str) -> Result<SourceSpec, String> {
         if self.workspace.is_some() {
             return Err(format!(
@@ -305,24 +366,34 @@ impl DependencySpec {
                 ));
             }
         }
-        match (&self.path, self.toolchain, &self.git) {
-            (None, None, None) => Err(format!(
-                "dependency `{name}` names no source; add `path`, `git`, or `toolchain = true`"
-            )),
-            (None, Some(false), None) => Err(format!(
+        match (&self.path, self.toolchain, &self.git, &self.registry) {
+            // A requirement and nothing else is the default registry (`D-053`),
+            // which is configuration rather than a URL this toolchain knows.
+            (None, None, None, None) => match self.version {
+                Some(_) => Ok(SourceSpec::Registry {
+                    registry: DEFAULT_REGISTRY.to_owned(),
+                }),
+                None => Err(format!(
+                    "dependency `{name}` names no source; give a version requirement, `path`, `git`, or `toolchain = true`"
+                )),
+            },
+            (None, Some(false), None, None) => Err(format!(
                 "dependency `{name}` has `toolchain = false`; name a `path` or a `git` repository instead"
             )),
-            (Some(path), None, None) => Ok(SourceSpec::Path(path.clone())),
-            (None, Some(true), None) => Ok(SourceSpec::Toolchain),
-            (None, None, Some(url)) => Ok(SourceSpec::Git {
+            (Some(path), None, None, None) => Ok(SourceSpec::Path(path.clone())),
+            (None, Some(true), None, None) => Ok(SourceSpec::Toolchain),
+            (None, None, Some(url), None) => Ok(SourceSpec::Git {
                 url: url.clone(),
                 reference: self.reference(name)?,
+            }),
+            (None, None, None, Some(registry)) => Ok(SourceSpec::Registry {
+                registry: registry.clone(),
             }),
             _ => Err(format!(
                 "dependency `{name}` names {}; pick one",
                 self.named_sources()
                     .iter()
-                    .filter(|key| matches!(**key, "path" | "toolchain" | "git"))
+                    .filter(|key| matches!(**key, "path" | "toolchain" | "git" | "registry"))
                     .map(|key| format!("`{key}`"))
                     .collect::<Vec<_>>()
                     .join(" and ")
@@ -369,6 +440,20 @@ pub struct LocalConfig {
     /// else — replacement is invisible to resolution on purpose (`D-047`).
     #[serde(default)]
     pub source: BTreeMap<String, SourceConfig>,
+    /// The registries this checkout has been told about, by the name manifests
+    /// use for them. `default` is the one a bare requirement means, and it has
+    /// no built-in URL either (`D-053`).
+    #[serde(default)]
+    pub registry: BTreeMap<String, RegistryConfig>,
+}
+
+/// One `[registry.<name>]` table.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegistryConfig {
+    /// Where the index tree is: an `https://` URL, a `file://` one, or a path
+    /// relative to the workspace root.
+    pub index: Option<String>,
 }
 
 /// One `[source.<name>]` table: either a redirection or a place to redirect to.
@@ -811,6 +896,71 @@ mod tests {
     #[test]
     fn an_absent_version_requirement_matches_anything() {
         assert_eq!(DependencySpec::default().requirement().to_string(), "*");
+    }
+
+    /// `D-053`: a bare requirement is the registry named `default`, which is
+    /// still a name somebody has to configure.
+    #[test]
+    fn a_bare_requirement_is_the_default_registry() {
+        let manifest: Manifest = toml::from_str(
+            r#"
+            [package]
+            name = "demo"
+            version = "0.1.0"
+
+            [dependencies]
+            geometry = "^1.2"
+            physics = { version = "=2.0.0", registry = "internal" }
+            "#,
+        )
+        .unwrap();
+
+        let geometry = &manifest.dependencies["geometry"];
+        assert_eq!(geometry.requirement().to_string(), "^1.2");
+        assert_eq!(
+            geometry.source("geometry").unwrap(),
+            SourceSpec::Registry {
+                registry: "default".to_owned(),
+            }
+        );
+        assert_eq!(
+            manifest.dependencies["physics"].source("physics").unwrap(),
+            SourceSpec::Registry {
+                registry: "internal".to_owned(),
+            }
+        );
+    }
+
+    /// The string form is read by a visitor rather than an untagged enum, so a
+    /// mistyped key in the table form still names itself.
+    #[test]
+    fn a_mistyped_dependency_key_is_named() {
+        let error = toml::from_str::<Manifest>(
+            r#"
+            [package]
+            name = "demo"
+            version = "0.1.0"
+
+            [dependencies]
+            geometry = { pth = "../geometry" }
+            "#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("pth"), "{error}");
+    }
+
+    #[test]
+    fn a_registry_dependency_that_is_also_a_repository_is_refused() {
+        let error = DependencySpec {
+            git: Some("https://example.invalid/x.git".to_owned()),
+            registry: Some("internal".to_owned()),
+            ..DependencySpec::default()
+        }
+        .source("x")
+        .unwrap_err();
+        assert!(error.contains("pick one"), "{error}");
+        assert!(error.contains("`registry`"), "{error}");
     }
 
     #[test]

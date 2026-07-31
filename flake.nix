@@ -37,6 +37,9 @@
           # directory and fetch from it, which needs `git` in the sandbox —
           # and nothing else, because nothing there reaches the network.
           pkgs.git
+          # The registry transport test serves a directory over loopback and
+          # fetches it back. Same rule: the only host it talks to is itself.
+          pkgs.curl
         ];
 
         cargoBuildFlags = [ "--workspace" ];
@@ -247,6 +250,7 @@
               stdenv.cc
               binutils
               git
+              curl
               gdb
               valgrind
               crossCc

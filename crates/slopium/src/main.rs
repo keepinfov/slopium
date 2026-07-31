@@ -6,14 +6,16 @@ use slopic_core::syntax::{format_source, FormatOptions};
 use slopium_manifest::archive::{package_archive, ARCHIVE_EXTENSION};
 use slopium_manifest::lock::{Lockfile, LOCK_FILE};
 use slopium_manifest::manifest::{load_local_config, validate_package_name, Profile, Project};
+use slopium_manifest::registry::{IndexDependency, IndexEntry, IndexSource, Registries};
 use slopium_manifest::resolve::{resolve_workspace, Resolution, WorkspaceResolution};
-use slopium_manifest::source::SourceId;
+use slopium_manifest::sha256::Digest;
+use slopium_manifest::source::{SourceId, SourceSpec, DEFAULT_REGISTRY};
 use slopium_manifest::sources::Sources;
 use slopium_manifest::std_library::{std_module_path, STD_MODULES};
 use slopium_manifest::store::{remove_tree, Access, Store};
 use slopium_manifest::version::Version;
 use slopium_manifest::workspace::{load_workspace, Workspace};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
 use std::fs::OpenOptions;
@@ -61,6 +63,10 @@ enum Commands {
     Clean(SelectArgs),
     /// Write a package archive under `target/package` and print its digest.
     Package {
+        /// Print the registry index line for the archive instead, and nothing
+        /// else — which is what putting a package into a static index takes.
+        #[arg(long)]
+        index_entry: bool,
         #[command(flatten)]
         resolve: ResolveArgs,
         #[command(flatten)]
@@ -72,6 +78,49 @@ enum Commands {
         /// Where the copies go, relative to the workspace root.
         #[arg(long, value_name = "DIR", default_value = "vendor")]
         dir: PathBuf,
+        #[command(flatten)]
+        resolve: ResolveArgs,
+    },
+    /// Add a dependency to `Slopium.toml` and resolve it.
+    Add {
+        /// `name`, or `name@<requirement>` for a registry dependency.
+        spec: String,
+        /// Take it from a repository instead of a registry.
+        #[arg(long, value_name = "URL")]
+        git: Option<String>,
+        #[arg(long, value_name = "NAME", requires = "git")]
+        branch: Option<String>,
+        #[arg(long, value_name = "NAME", requires = "git")]
+        tag: Option<String>,
+        #[arg(long, value_name = "REV", requires = "git")]
+        rev: Option<String>,
+        /// Take it from a directory instead of a registry.
+        #[arg(long, value_name = "DIR")]
+        path: Option<PathBuf>,
+        /// Take it from this configured registry instead of `default`.
+        #[arg(long, value_name = "NAME")]
+        registry: Option<String>,
+        #[command(flatten)]
+        resolve: ResolveArgs,
+        #[command(flatten)]
+        select: SelectArgs,
+    },
+    /// Remove a dependency from `Slopium.toml` and resolve again.
+    Remove {
+        name: String,
+        #[command(flatten)]
+        resolve: ResolveArgs,
+        #[command(flatten)]
+        select: SelectArgs,
+    },
+    /// Move packages the lockfile pins to whatever their source offers now.
+    Update {
+        /// Update only this package. Repeatable; without any, everything moves.
+        #[arg(short, long, value_name = "NAME")]
+        package: Vec<String>,
+        /// Move the one named package to exactly this version.
+        #[arg(long, value_name = "VERSION", requires = "package")]
+        precise: Option<String>,
         #[command(flatten)]
         resolve: ResolveArgs,
     },
@@ -250,17 +299,54 @@ fn main() {
         Commands::Clean(select) => {
             load_workspace(cli.manifest_path).and_then(|workspace| clean(&workspace, &select))
         }
-        Commands::Package { resolve, select } => Session::open(cli.manifest_path, resolve)
-            .and_then(|session| {
-                for project in select.all(&session.workspace)? {
-                    package(&session.workspace, project)?;
-                }
-                Ok(())
-            }),
+        Commands::Package {
+            index_entry,
+            resolve,
+            select,
+        } => Session::open(cli.manifest_path, resolve).and_then(|session| {
+            for project in select.all(&session.workspace)? {
+                package(&session.workspace, project, index_entry)?;
+            }
+            Ok(())
+        }),
         Commands::Vendor { dir, resolve } => {
             Session::open_ignoring_replacements(cli.manifest_path, resolve)
                 .and_then(|session| vendor(&session, &dir))
         }
+        Commands::Add {
+            spec,
+            git,
+            branch,
+            tag,
+            rev,
+            path,
+            registry,
+            resolve,
+            select,
+        } => add(
+            cli.manifest_path,
+            &spec,
+            Added {
+                git,
+                branch,
+                tag,
+                rev,
+                path,
+                registry,
+            },
+            resolve,
+            &select,
+        ),
+        Commands::Remove {
+            name,
+            resolve,
+            select,
+        } => remove(cli.manifest_path, &name, resolve, &select),
+        Commands::Update {
+            package,
+            precise,
+            resolve,
+        } => update(cli.manifest_path, package, precise, resolve),
         Commands::Tree { resolve, select } => {
             Session::open(cli.manifest_path, resolve).and_then(|session| {
                 for project in select.all(&session.workspace)? {
@@ -430,9 +516,29 @@ struct Session {
     sources: Sources,
 }
 
+/// What `slopium update` asked to move.
+///
+/// A pin is what makes a build reproducible, so throwing one away is a command
+/// of its own rather than something a build decides — and `-p` throwing away
+/// exactly one is what lets the lock's diff prove what moved.
+#[derive(Clone, Debug, Default)]
+struct Update {
+    /// Empty means every pin.
+    packages: Vec<String>,
+    precise: Option<Version>,
+}
+
 impl Session {
     fn open(manifest_path: Option<PathBuf>, args: ResolveArgs) -> Result<Self, String> {
-        Self::load(manifest_path, args, true)
+        Self::load(manifest_path, args, true, None)
+    }
+
+    fn open_updating(
+        manifest_path: Option<PathBuf>,
+        args: ResolveArgs,
+        update: &Update,
+    ) -> Result<Self, String> {
+        Self::load(manifest_path, args, true, Some(update))
     }
 
     /// The workspace resolved as if nothing had been vendored.
@@ -446,13 +552,14 @@ impl Session {
         manifest_path: Option<PathBuf>,
         args: ResolveArgs,
     ) -> Result<Self, String> {
-        Self::load(manifest_path, args, false)
+        Self::load(manifest_path, args, false, None)
     }
 
     fn load(
         manifest_path: Option<PathBuf>,
         args: ResolveArgs,
         replacements: bool,
+        update: Option<&Update>,
     ) -> Result<Self, String> {
         let mut workspace = load_workspace(manifest_path)?;
         if !replacements {
@@ -462,8 +569,27 @@ impl Session {
         // pinned is an input to resolving a source that moves, and reading it
         // twice would mean reporting an unreadable one twice.
         let existing = read_lock(&workspace, args)?;
-        let sources =
-            Sources::new(Store::open()?, args.access(), args.locked()).with_lock(existing.as_ref());
+        let mut sources = Sources::new(Store::open()?, args.access(), args.locked())
+            .with_lock(existing.as_ref())
+            .with_registries(Registries::from_config(&workspace.config, &workspace.root)?);
+        if let Some(update) = update {
+            let known = sources.pinned_names().join(", ");
+            for name in &update.packages {
+                if sources.pinned(name).is_none() {
+                    return Err(format!(
+                        "`{}` pins no `{name}`, so there is nothing to update; it holds {known}",
+                        LOCK_FILE
+                    ));
+                }
+            }
+            sources = match update.packages.as_slice() {
+                [] => sources.updating_everything(),
+                names => sources.updating(names.iter().cloned()),
+            };
+            if let (Some(version), [name]) = (&update.precise, update.packages.as_slice()) {
+                sources = sources.at_precisely(name, version.clone());
+            }
+        }
         let toolchain_version = Version::parse(slopic_core::STANDARD_LIBRARY_VERSION)?;
         let resolution = resolve_workspace(&workspace, &toolchain_version, &sources)?;
         synchronize_lock(&workspace, &resolution, existing, args)?;
@@ -921,6 +1047,272 @@ fn profile_directories(target: &Path) -> Result<Vec<PathBuf>, String> {
 /// A package appears once per place it is depended on, but is only expanded the
 /// first time — the repeat is marked `(*)`. That is the visible shape of
 /// `D-035`: a diamond shows the shared package twice and builds it once.
+/// What `slopium add` was told to write.
+#[derive(Debug, Default)]
+struct Added {
+    git: Option<String>,
+    branch: Option<String>,
+    tag: Option<String>,
+    rev: Option<String>,
+    path: Option<PathBuf>,
+    registry: Option<String>,
+}
+
+impl Added {
+    /// The value half of the `[dependencies]` entry, given a requirement.
+    fn entry(&self, requirement: Option<&str>) -> Result<String, String> {
+        let mut keys = Vec::new();
+        if let Some(path) = &self.path {
+            keys.push(format!("path = \"{}\"", path.display()));
+        }
+        if let Some(url) = &self.git {
+            keys.push(format!("git = \"{url}\""));
+            for (name, value) in [
+                ("branch", &self.branch),
+                ("tag", &self.tag),
+                ("rev", &self.rev),
+            ] {
+                if let Some(value) = value {
+                    keys.push(format!("{name} = \"{value}\""));
+                }
+            }
+        }
+        if let Some(registry) = &self.registry {
+            if self.git.is_some() || self.path.is_some() {
+                return Err(
+                    "`--registry` names where to take a package from, and so do `--git` and `--path`; pick one"
+                        .to_owned(),
+                );
+            }
+            keys.push(format!("registry = \"{registry}\""));
+        }
+        if let Some(requirement) = requirement {
+            // A bare requirement is the whole entry when nothing else was
+            // asked for, which is the form most manifests want.
+            if keys.is_empty() {
+                return Ok(format!("\"{requirement}\""));
+            }
+            keys.insert(0, format!("version = \"{requirement}\""));
+        } else if keys.is_empty() {
+            return Err(
+                "no source and no version requirement; write `name@<requirement>`, or give `--git`, `--path` or `--registry`"
+                    .to_owned(),
+            );
+        }
+        Ok(format!("{{ {} }}", keys.join(", ")))
+    }
+}
+
+/// Write a dependency into a member's `Slopium.toml`, then resolve it.
+///
+/// The manifest is edited as text rather than reprinted from its parse: a
+/// manifest is something a person wrote, and a tool that reformats it every
+/// time it touches it is one people stop using.
+fn add(
+    manifest_path: Option<PathBuf>,
+    spec: &str,
+    added: Added,
+    args: ResolveArgs,
+    select: &SelectArgs,
+) -> Result<(), String> {
+    let (name, requirement) = match spec.split_once('@') {
+        Some((name, requirement)) => (name, Some(requirement)),
+        None => (spec, None),
+    };
+    validate_package_name(name)?;
+    let entry = added.entry(requirement)?;
+
+    let workspace = load_workspace(manifest_path.clone())?;
+    let project = select.one(&workspace, "add")?;
+    let edited = with_dependency(&project.manifest_source, name, Some(&entry))?;
+    fs::write(&project.manifest_path, edited).map_err(|error| {
+        format!(
+            "cannot write `{}`: {error}",
+            project.manifest_path.display()
+        )
+    })?;
+
+    // Resolve afterwards, so a dependency that cannot be resolved is reported
+    // by the same machinery every other command reports it with.
+    let session = Session::open(manifest_path, args)?;
+    let member = session.resolution.member(&project.name)?;
+    match member.packages.get(name) {
+        Some(package) => println!("Added {} {}", package.id, source_label(&package.id.source)),
+        None => println!("Added `{name}`"),
+    }
+    Ok(())
+}
+
+fn remove(
+    manifest_path: Option<PathBuf>,
+    name: &str,
+    args: ResolveArgs,
+    select: &SelectArgs,
+) -> Result<(), String> {
+    let workspace = load_workspace(manifest_path.clone())?;
+    let project = select.one(&workspace, "remove")?;
+    if !project.dependencies.contains_key(name) {
+        return Err(format!(
+            "`{}` declares no dependency `{name}`",
+            project.name
+        ));
+    }
+    let edited = with_dependency(&project.manifest_source, name, None)?;
+    fs::write(&project.manifest_path, edited).map_err(|error| {
+        format!(
+            "cannot write `{}`: {error}",
+            project.manifest_path.display()
+        )
+    })?;
+    Session::open(manifest_path, args)?;
+    println!("Removed `{name}`");
+    Ok(())
+}
+
+fn update(
+    manifest_path: Option<PathBuf>,
+    packages: Vec<String>,
+    precise: Option<String>,
+    args: ResolveArgs,
+) -> Result<(), String> {
+    if args.locked() {
+        return Err(
+            "`update` is what moves the lockfile, and `--locked` forbids moving it".to_owned(),
+        );
+    }
+    if precise.is_some() && packages.len() != 1 {
+        return Err(
+            "`--precise` names one version, so it takes exactly one `-p <name>`".to_owned(),
+        );
+    }
+    let update = Update {
+        precise: precise.map(|text| Version::parse(&text)).transpose()?,
+        packages,
+    };
+    let before = updatable_lock(manifest_path.clone())?;
+    let session = Session::open_updating(manifest_path, args, &update)?;
+
+    let mut moved = false;
+    for (name, package) in &session.resolution.packages {
+        let was = before.get(name);
+        if was != Some(&package.id.version) {
+            moved = true;
+            match was {
+                Some(version) => println!("Updated {name} v{version} -> v{}", package.id.version),
+                None => println!("Added {}", package.id),
+            }
+        }
+    }
+    for (name, version) in &before {
+        if !session.resolution.packages.contains_key(name) {
+            moved = true;
+            println!("Removed {name} v{version}");
+        }
+    }
+    if !moved {
+        println!("Everything is already at the newest version its requirements allow");
+    }
+    Ok(())
+}
+
+/// What the lockfile pinned before an update, so the report can say what moved.
+fn updatable_lock(manifest_path: Option<PathBuf>) -> Result<BTreeMap<String, Version>, String> {
+    let workspace = load_workspace(manifest_path)?;
+    let Ok(text) = fs::read_to_string(workspace.lock_path()) else {
+        return Ok(BTreeMap::new());
+    };
+    let Ok(lock) = Lockfile::parse(&text) else {
+        return Ok(BTreeMap::new());
+    };
+    Ok(lock
+        .packages
+        .into_iter()
+        .map(|package| (package.name, package.version))
+        .collect())
+}
+
+/// A manifest with one `[dependencies]` entry written, replaced, or taken out.
+///
+/// Line-based on purpose. TOML keeps an inline table on one line, so an entry
+/// this tool ever writes is one line; an entry written as `[dependencies.name]`
+/// is not, and is refused rather than half-edited.
+fn with_dependency(source: &str, name: &str, entry: Option<&str>) -> Result<String, String> {
+    let section = format!("[dependencies.{name}]");
+    if source.lines().any(|line| line.trim() == section) {
+        return Err(format!(
+            "`{name}` is written as `{section}`; edit it by hand — this command only writes the one-line form"
+        ));
+    }
+
+    let mut lines: Vec<String> = source.lines().map(str::to_owned).collect();
+    let is_entry = |line: &str| {
+        line.split_once('=')
+            .is_some_and(|(key, _)| key.trim().trim_matches('"') == name)
+    };
+    let mut in_dependencies = false;
+    let mut end_of_dependencies = None;
+    for index in 0..lines.len() {
+        let trimmed = lines[index].trim();
+        if trimmed.starts_with('[') {
+            if in_dependencies {
+                end_of_dependencies = Some(index);
+            }
+            in_dependencies = trimmed == "[dependencies]";
+            continue;
+        }
+        if in_dependencies && is_entry(trimmed) {
+            match entry {
+                Some(entry) => lines[index] = format!("{name} = {entry}"),
+                None => {
+                    lines.remove(index);
+                }
+            }
+            return Ok(joined(&lines));
+        }
+    }
+    let Some(entry) = entry else {
+        return Err(format!("`[dependencies]` has no `{name}` to remove"));
+    };
+
+    // Not there yet. Append to `[dependencies]`, or start the table.
+    let written = format!("{name} = {entry}");
+    match end_of_dependencies.or(in_dependencies.then_some(lines.len())) {
+        Some(index) => {
+            let insert = lines[..index]
+                .iter()
+                .rposition(|line| !line.trim().is_empty())
+                .map(|last| last + 1)
+                .unwrap_or(index);
+            lines.insert(insert, written);
+        }
+        None => {
+            while lines.last().is_some_and(|line| line.trim().is_empty()) {
+                lines.pop();
+            }
+            lines.push(String::new());
+            lines.push("[dependencies]".to_owned());
+            lines.push(written);
+        }
+    }
+    Ok(joined(&lines))
+}
+
+fn joined(lines: &[String]) -> String {
+    let mut text = lines.join("\n");
+    text.push('\n');
+    text
+}
+
+/// Where a package comes from, for the one line `tree` gives it.
+fn source_label(source: &SourceId) -> String {
+    match source {
+        SourceId::Path(_) => "(path)".to_owned(),
+        SourceId::Toolchain => "(toolchain)".to_owned(),
+        SourceId::Git { url, rev, .. } => format!("(git {url}#{})", &rev[..7.min(rev.len())]),
+        SourceId::Registry { index } => format!("(registry {index})"),
+    }
+}
+
 fn tree(session: &Session, project: &Project) -> Result<(), String> {
     fn walk(
         name: &str,
@@ -938,9 +1330,10 @@ fn tree(session: &Session, project: &Project) -> Result<(), String> {
             println!("{}", package.id);
         } else {
             println!(
-                "{prefix}{}{}{}",
+                "{prefix}{}{} {}{}",
                 if last { "`-- " } else { "|-- " },
                 package.id,
+                source_label(&package.id.source),
                 if repeated && !package.dependencies.is_empty() {
                     " (*)"
                 } else {
@@ -1081,12 +1474,13 @@ fn dependencies_of(project: &Project, resolution: &Resolution) -> Result<Depende
                 ResolvedDependencySource::Path(project.source_root()?)
             }
             (SourceId::Toolchain, None) => ResolvedDependencySource::Toolchain,
-            // A git package has been unpacked into the store or copied into the
-            // vendor directory by the time a build reads it, so like every
-            // other fetched package it is a directory of sources.
-            (SourceId::Path(_) | SourceId::Git { .. }, Some(project)) => {
-                ResolvedDependencySource::Path(project.source_root()?)
-            }
+            // A fetched package has been unpacked into the store or copied into
+            // the vendor directory by the time a build reads it, so like every
+            // other package it is a directory of sources.
+            (
+                SourceId::Path(_) | SourceId::Git { .. } | SourceId::Registry { .. },
+                Some(project),
+            ) => ResolvedDependencySource::Path(project.source_root()?),
             (source, None) => {
                 return Err(format!(
                     "package `{}` from `{source}` was resolved without a manifest",
@@ -1118,7 +1512,7 @@ const VENDOR_SOURCE: &str = "vendored";
 /// records it, the store files the bytes under it, and a vendored copy is
 /// checked against it — so it is printed in `sha256sum` order, digest first, to
 /// be compared against that tool directly.
-fn package(workspace: &Workspace, project: &Project) -> Result<PathBuf, String> {
+fn package(workspace: &Workspace, project: &Project, index_entry: bool) -> Result<PathBuf, String> {
     let (bytes, digest) = package_archive(project)?;
     let directory = workspace.target_dir().join("package");
     fs::create_dir_all(&directory)
@@ -1129,9 +1523,55 @@ fn package(workspace: &Workspace, project: &Project) -> Result<PathBuf, String> 
     ));
     fs::write(&path, &bytes)
         .map_err(|error| format!("cannot write `{}`: {error}", path.display()))?;
-    println!("Packaged {} v{}", project.name, project.version);
-    println!("{digest}  {}", path.display());
+    if index_entry {
+        println!("{}", published_entry(project, digest)?.render()?);
+    } else {
+        println!("Packaged {} v{}", project.name, project.version);
+        println!("{digest}  {}", path.display());
+    }
     Ok(path)
+}
+
+/// The index line describing an archive of this package.
+///
+/// This is where `D-054` is enforced from the writing side: what a published
+/// package may depend on is what an index entry can say, so a manifest that
+/// depends on a directory or a repository cannot become one.
+fn published_entry(project: &Project, checksum: Digest) -> Result<IndexEntry, String> {
+    let mut dependencies = Vec::new();
+    for (name, spec) in &project.dependencies {
+        let unpublishable = |what: &str| {
+            Err(format!(
+                "SL1032: `{}` depends on `{name}` through {what}; a published package depends only on its own registry and the toolchain (`D-054`)",
+                project.name
+            ))
+        };
+        let source = match spec.source(name)? {
+            SourceSpec::Toolchain => IndexSource::Toolchain,
+            SourceSpec::Registry { registry } if registry == DEFAULT_REGISTRY => {
+                IndexSource::SameIndex
+            }
+            // A registry's local nickname means nothing to whoever reads the
+            // entry, and there is no other way for the entry to say it.
+            SourceSpec::Registry { registry } => {
+                return unpublishable(&format!("the registry it calls `{registry}`"))
+            }
+            SourceSpec::Path(_) => return unpublishable("a directory"),
+            SourceSpec::Git { .. } => return unpublishable("a repository"),
+        };
+        dependencies.push(IndexDependency {
+            name: name.clone(),
+            requirement: spec.requirement(),
+            source,
+        });
+    }
+    Ok(IndexEntry {
+        name: project.name.clone(),
+        version: project.version.clone(),
+        dependencies,
+        checksum,
+        yanked: false,
+    })
 }
 
 /// Copy every dependency that is not a directory on this machine into the
@@ -1637,6 +2077,97 @@ fn status_result(status: ExitStatus, action: &str) -> Result<(), String> {
 mod tests {
     use super::*;
     use slopium_manifest::workspace::load_project;
+
+    const MANIFEST: &str = "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n\n[dependencies]\nstd = { toolchain = true }\n\n[build]\ntarget = \"x86_64-unknown-linux-gnu\"\n";
+
+    /// `add` edits the file rather than reprinting it, so everything it did not
+    /// touch comes out byte-identical.
+    #[test]
+    fn adding_a_dependency_leaves_the_rest_of_the_manifest_alone() {
+        let edited = with_dependency(MANIFEST, "geometry", Some("\"^1.2\"")).unwrap();
+        assert_eq!(
+            edited,
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n\n[dependencies]\nstd = { toolchain = true }\ngeometry = \"^1.2\"\n\n[build]\ntarget = \"x86_64-unknown-linux-gnu\"\n"
+        );
+    }
+
+    #[test]
+    fn adding_a_dependency_twice_replaces_it() {
+        let once = with_dependency(MANIFEST, "geometry", Some("\"^1.2\"")).unwrap();
+        let twice = with_dependency(&once, "geometry", Some("\"^2\"")).unwrap();
+        assert!(twice.contains("geometry = \"^2\""), "{twice}");
+        assert!(!twice.contains("^1.2"), "{twice}");
+    }
+
+    #[test]
+    fn removing_a_dependency_takes_out_its_line() {
+        let removed = with_dependency(MANIFEST, "std", None).unwrap();
+        assert!(!removed.contains("toolchain"), "{removed}");
+        assert!(removed.contains("[dependencies]"), "{removed}");
+        assert!(with_dependency(&removed, "std", None).is_err());
+    }
+
+    /// A manifest with no `[dependencies]` gets one, at the end where a person
+    /// would have put it.
+    #[test]
+    fn a_manifest_without_dependencies_grows_the_table() {
+        let edited = with_dependency(
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+            "geometry",
+            Some("\"^1\""),
+        )
+        .unwrap();
+        assert_eq!(
+            edited,
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n\n[dependencies]\ngeometry = \"^1\"\n"
+        );
+    }
+
+    /// The one form this command cannot edit says so instead of guessing.
+    #[test]
+    fn a_dependency_written_as_a_table_is_refused() {
+        let error = with_dependency(
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n\n[dependencies.geometry]\nversion = \"^1\"\n",
+            "geometry",
+            Some("\"^2\""),
+        )
+        .unwrap_err();
+        assert!(error.contains("by hand"), "{error}");
+    }
+
+    /// A bare requirement is the whole entry, and a source turns it into a
+    /// table with the requirement kept.
+    #[test]
+    fn what_add_writes_depends_on_what_it_was_given() {
+        assert_eq!(Added::default().entry(Some("^1.2")).unwrap(), "\"^1.2\"");
+        assert_eq!(
+            Added {
+                registry: Some("internal".to_owned()),
+                ..Added::default()
+            }
+            .entry(Some("^1.2"))
+            .unwrap(),
+            "{ version = \"^1.2\", registry = \"internal\" }"
+        );
+        assert_eq!(
+            Added {
+                git: Some("https://example.invalid/x.git".to_owned()),
+                tag: Some("v1".to_owned()),
+                ..Added::default()
+            }
+            .entry(None)
+            .unwrap(),
+            "{ git = \"https://example.invalid/x.git\", tag = \"v1\" }"
+        );
+        assert!(Added::default().entry(None).is_err());
+        assert!(Added {
+            git: Some("https://example.invalid/x.git".to_owned()),
+            registry: Some("internal".to_owned()),
+            ..Added::default()
+        }
+        .entry(None)
+        .is_err());
+    }
 
     #[test]
     fn fnv_is_stable() {

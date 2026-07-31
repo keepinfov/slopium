@@ -2,6 +2,7 @@ pub mod archive;
 pub mod git;
 pub mod lock;
 pub mod manifest;
+pub mod registry;
 pub mod resolve;
 pub mod sha256;
 pub mod source;

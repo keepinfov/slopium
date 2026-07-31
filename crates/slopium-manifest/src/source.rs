@@ -4,8 +4,11 @@
 //! on and what the lockfile records. They are separate because a spec can be
 //! under-determined (`git = "...", branch = "main"` names a branch, and a branch
 //! moves) while an id must be exact enough to reproduce — `git+URL?branch=main#`
-//! and forty hex digits. The `Registry` arm lands in v0.4.4; the shape is
-//! settled now so the lockfile format does not have to change when it does.
+//! and forty hex digits.
+//!
+//! A registry source is identified by its index URL and never by the name
+//! `.slopium/config.toml` gave it (`D-052`): two developers who call one index
+//! by two names have to produce one lockfile.
 
 use std::fmt;
 use std::path::PathBuf;
@@ -74,7 +77,13 @@ pub enum SourceSpec {
         url: String,
         reference: GitReference,
     },
+    /// A registry, by the name it is configured under — `default` when the
+    /// entry named none. There is no built-in URL for either (`D-053`).
+    Registry { registry: String },
 }
+
+/// The registry a dependency means when it names none.
+pub const DEFAULT_REGISTRY: &str = "default";
 
 /// A resolved source, exact enough to appear in `Slopium.lock`.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -90,6 +99,8 @@ pub enum SourceId {
         /// A full forty-character commit hash, always.
         rev: String,
     },
+    /// A registry, named by the URL of its index and by nothing else (`D-052`).
+    Registry { index: String },
 }
 
 impl SourceId {
@@ -109,6 +120,7 @@ impl SourceId {
             Self::Path(_) => "path",
             Self::Toolchain => "toolchain",
             Self::Git { .. } => "git",
+            Self::Registry { .. } => "registry",
         }
     }
 
@@ -122,12 +134,21 @@ impl SourceId {
                 reference,
                 rev,
             } => format!("git+{url}{}#{rev}", reference.query()),
+            Self::Registry { index } => format!("registry+{index}"),
         }
     }
 
     pub fn from_lock_field(text: &str) -> Result<Self, String> {
         if text == "toolchain" {
             return Ok(Self::Toolchain);
+        }
+        if let Some(index) = text.strip_prefix("registry+") {
+            if index.is_empty() {
+                return Err(format!("registry source `{text}` names no index"));
+            }
+            return Ok(Self::Registry {
+                index: index.to_owned(),
+            });
         }
         if let Some(path) = text.strip_prefix("path+") {
             return Ok(Self::Path(PathBuf::from(path)));
@@ -178,6 +199,7 @@ impl fmt::Display for SourceId {
             Self::Path(path) => write!(formatter, "{}", path.display()),
             Self::Toolchain => formatter.write_str("toolchain"),
             Self::Git { url, rev, .. } => write!(formatter, "{url}#{rev}"),
+            Self::Registry { index } => write!(formatter, "registry {index}"),
         }
     }
 }
@@ -205,11 +227,29 @@ mod tests {
             git(GitReference::Branch("main".to_owned())),
             git(GitReference::Tag("v1.4.0".to_owned())),
             git(GitReference::Rev("0123456".to_owned())),
+            SourceId::Registry {
+                index: "https://example.invalid/index".to_owned(),
+            },
         ] {
             let field = source.to_lock_field();
             assert_eq!(SourceId::from_lock_field(&field).unwrap(), source);
         }
-        assert!(SourceId::from_lock_field("registry+https://example").is_err());
+        assert!(SourceId::from_lock_field("packages+https://example").is_err());
+    }
+
+    /// `D-052`: the index URL is the identity, so a lock written on a machine
+    /// that calls the index `internal` is read on one that calls it `work`.
+    #[test]
+    fn a_registry_is_its_index_and_not_its_local_name() {
+        let source = SourceId::Registry {
+            index: "https://example.invalid/index".to_owned(),
+        };
+        assert_eq!(
+            source.to_lock_field(),
+            "registry+https://example.invalid/index"
+        );
+        let error = SourceId::from_lock_field("registry+").unwrap_err();
+        assert!(error.contains("names no index"), "{error}");
     }
 
     /// The exact text is part of the lockfile's contract, since the whole value
@@ -260,5 +300,9 @@ mod tests {
         assert!(SourceId::Path(PathBuf::from("/tmp/x")).is_mutable());
         assert!(!SourceId::Toolchain.is_mutable());
         assert!(!git(GitReference::DefaultBranch).is_mutable());
+        assert!(!SourceId::Registry {
+            index: "https://example.invalid/index".to_owned()
+        }
+        .is_mutable());
     }
 }

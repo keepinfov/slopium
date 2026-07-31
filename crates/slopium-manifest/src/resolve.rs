@@ -5,24 +5,31 @@
 //! namespaces and two copies in the binary. A resolved graph holds each package
 //! once, keyed by name and version, and its namespace is its package name.
 //!
-//! Selection is maximal (`D-036`). Every source available in v0.4.0 offers
-//! exactly one version of a package, so the interesting half of that rule —
-//! choosing among candidates — has nothing to choose from yet and arrives with
-//! the registry. What exists now is the half that already bites: collecting
-//! every requirement on a name and reporting who disagreed when none is
-//! satisfied.
+//! Selection is maximal with backtracking (`D-036`). Until the registry there
+//! was nothing to select *from* — every source offered exactly one version of a
+//! package — so the search below has one candidate per name for a path, a
+//! toolchain or a git dependency, and a list for a registry. That is the only
+//! difference: a diamond that needs an older version of one dependent to make
+//! its shared dependency satisfiable is resolved by trying the older one.
+//!
+//! What a search never does is guess. A dependency the lock pins is offered its
+//! pinned version first and, if that works, the index is not read at all; a
+//! registry package's requirements come from the index during the search and
+//! are checked against its manifest once the graph settles (`D-055`).
 
 use crate::archive::prefix_for;
 use crate::manifest::{validate_package_name, Project, MANIFEST_FILE};
+use crate::registry::{IndexEntry, IndexSource};
 use crate::sha256::Digest;
-use crate::source::{SourceId, SourceSpec};
-use crate::sources::Sources;
+use crate::source::{GitReference, SourceId, SourceSpec, DEFAULT_REGISTRY};
+use crate::sources::{Pin, Sources};
 use crate::std_library::{std_archive, std_language_items, STD_PACKAGE};
 use crate::store::verify_tree;
 use crate::version::{Version, VersionReq};
 use crate::workspace::{load_project, Workspace};
 use std::collections::{BTreeMap, VecDeque};
-use std::path::PathBuf;
+use std::fmt;
+use std::path::{Path, PathBuf};
 
 /// A package, identified the way the lockfile identifies it.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -144,11 +151,134 @@ pub fn resolve_workspace(
     Ok(WorkspaceResolution { members, packages })
 }
 
-/// Who asked for what, kept so a conflict can name both sides.
+/// A source as one requirement names it: the manifest's `SourceSpec` with the
+/// parts that depend on who was asking already worked out.
+///
+/// Comparing one of these against a `SourceId` is how the search decides
+/// whether a package already chosen for a name is the one being asked for
+/// (`D-038`), and it answers without fetching anything.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum Want {
+    Path(PathBuf),
+    Toolchain,
+    Git {
+        url: String,
+        reference: GitReference,
+    },
+    Registry {
+        index: String,
+    },
+}
+
+impl Want {
+    fn matches(&self, source: &SourceId) -> bool {
+        match (self, source) {
+            (Self::Path(wanted), SourceId::Path(chosen)) => same_directory(wanted, chosen),
+            (Self::Toolchain, SourceId::Toolchain) => true,
+            (
+                Self::Git { url, reference },
+                SourceId::Git {
+                    url: chosen,
+                    reference: chosen_reference,
+                    ..
+                },
+            ) => url == chosen && reference == chosen_reference,
+            (Self::Registry { index }, SourceId::Registry { index: chosen }) => index == chosen,
+            _ => false,
+        }
+    }
+}
+
+impl fmt::Display for Want {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Path(path) => write!(formatter, "the directory `{}`", path.display()),
+            Self::Toolchain => formatter.write_str("the toolchain"),
+            Self::Git { url, reference } => write!(formatter, "`{url}` at {reference}"),
+            Self::Registry { index } => write!(formatter, "the registry `{index}`"),
+        }
+    }
+}
+
+/// Two paths are one directory if they name one, whether or not they are
+/// spelled the same — `../shared` reached from two members is one package.
+fn same_directory(left: &Path, right: &Path) -> bool {
+    left == right
+        || match (left.canonicalize(), right.canonicalize()) {
+            (Ok(left), Ok(right)) => left == right,
+            _ => false,
+        }
+}
+
+/// One requirement to satisfy: who wrote it, what it asks for, and where from.
 #[derive(Clone, Debug)]
-struct Requirement {
-    requested_by: String,
-    request: VersionReq,
+struct Need {
+    dependent: String,
+    name: String,
+    requirement: VersionReq,
+    want: Want,
+}
+
+/// One package chosen for a name, and what choosing it demands.
+#[derive(Clone, Debug)]
+struct Chosen {
+    id: PackageId,
+    checksum: Option<Digest>,
+    /// Absent while the search is running for a package the index offered:
+    /// its requirements are known without downloading it, and downloading
+    /// every candidate is the cost an index exists to avoid.
+    project: Option<Project>,
+    /// The index entry that offered it, kept so the manifest can be checked
+    /// against it once the graph settles (`D-055`).
+    entry: Option<IndexEntry>,
+    needs: Vec<Need>,
+}
+
+impl Chosen {
+    fn dependencies(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.needs.iter().map(|need| need.name.clone()).collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+}
+
+/// What a source has to offer for one name.
+struct Options {
+    /// Every version, newest first, before the requirement is applied.
+    all: Vec<Chosen>,
+    /// Versions the index has and will not select (`D-055`).
+    yanked: Vec<Version>,
+    /// Whether `all` is the lockfile's answer rather than the whole list, in
+    /// which case there is somewhere to fall back to if it does not work out.
+    from_pin: bool,
+}
+
+/// The deepest reason a branch of the search failed.
+///
+/// A search that fails everywhere fails many times, and the useful message is
+/// almost always the one from furthest in: the shallow failures are "and that
+/// did not work either" restated once per candidate.
+#[derive(Default)]
+struct Failure {
+    depth: usize,
+    reason: Option<String>,
+}
+
+impl Failure {
+    fn record(&mut self, depth: usize, reason: String) {
+        if self.reason.is_none() || depth >= self.depth {
+            self.depth = depth;
+            self.reason = Some(reason);
+        }
+    }
+}
+
+/// Everything the search consults but never changes.
+struct Context<'a> {
+    workspace: &'a Workspace,
+    toolchain_version: &'a Version,
+    sources: &'a Sources,
 }
 
 /// Resolve `root` and everything it reaches.
@@ -161,171 +291,68 @@ pub fn resolve(
     toolchain_version: &Version,
     sources: &Sources,
 ) -> Result<Resolution, String> {
-    let mut packages: BTreeMap<String, ResolvedPackage> = BTreeMap::new();
-    let mut requirements: BTreeMap<String, Vec<Requirement>> = BTreeMap::new();
-    let mut language_items: Vec<(String, String)> = Vec::new();
-    let mut language_item_source: Option<String> = None;
-
+    let context = Context {
+        workspace,
+        toolchain_version,
+        sources,
+    };
     let root_id = PackageId {
         name: root.name.clone(),
         version: root.version.clone(),
         source: SourceId::Path(root.root.clone()),
     };
-    packages.insert(
+    let needs = context.needs_of(root, &root_id)?;
+
+    let mut chosen = BTreeMap::new();
+    chosen.insert(
         root_id.name.clone(),
-        ResolvedPackage {
+        Chosen {
             id: root_id.clone(),
-            project: Some(root.clone()),
-            dependencies: root.dependencies.keys().cloned().collect(),
             checksum: None,
+            project: Some(root.clone()),
+            entry: None,
+            needs: needs.clone(),
         },
     );
 
-    // Each package is queued with the source it came from, because what a
-    // `path` dependency is allowed to mean depends on it (`D-051`).
-    let mut queue = VecDeque::new();
-    queue.push_back((root_id.source.clone(), root.clone()));
-    let mut is_root = true;
+    let mut failure = Failure::default();
+    let solved = context
+        .search(VecDeque::from(needs.clone()), chosen, 0, &mut failure)?
+        .ok_or_else(|| {
+            failure
+                .reason
+                .unwrap_or_else(|| format!("cannot resolve the dependencies of `{}`", root_id.name))
+        })?;
+    let solved = context.settle(solved)?;
 
-    while let Some((dependent_source, project)) = queue.pop_front() {
-        let dependent = project.name.clone();
-        for (declared, spec) in &project.dependencies {
-            validate_package_name(declared)?;
-            requirements
-                .entry(declared.clone())
-                .or_default()
-                .push(Requirement {
-                    requested_by: dependent.clone(),
-                    request: spec.requirement(),
-                });
-
-            let (id, dependency, checksum) = match spec.source(declared)? {
-                SourceSpec::Toolchain => {
-                    if declared != STD_PACKAGE {
-                        return Err(format!(
-                            "dependency `{declared}` cannot use the toolchain source; the bundled package is named `{STD_PACKAGE}`"
-                        ));
-                    }
-                    let (_, digest) = std_archive(toolchain_version)?;
-                    let id = PackageId {
-                        name: STD_PACKAGE.to_owned(),
-                        version: toolchain_version.clone(),
-                        source: SourceId::Toolchain,
-                    };
-                    let vendored = replacement(workspace, &id, &digest)?;
-                    (id, vendored, Some(digest))
-                }
-                SourceSpec::Git { url, reference } => {
-                    let pin = sources.pin_git(declared, &url, &reference)?;
-                    let id = PackageId {
-                        name: declared.clone(),
-                        version: pin.version.clone(),
-                        source: pin.source.clone(),
-                    };
-                    // A vendored copy is checked and used without the store
-                    // being touched at all, which is what makes `vendor`
-                    // followed by `--offline` work on a machine with no `git`.
-                    let dependency = match replacement(workspace, &id, &pin.checksum)? {
-                        Some(project) => project,
-                        None => {
-                            let root = sources.checkout(&id, &pin.checksum)?;
-                            load_project(Some(root.join(MANIFEST_FILE)))?
-                        }
-                    };
-                    if dependency.name != id.name || dependency.version != id.version {
-                        return Err(format!(
-                            "`{url}` at {} is `{} v{}`, but it was resolved as `{id}`",
-                            pin.source, dependency.name, dependency.version
-                        ));
-                    }
-                    (id, Some(dependency), Some(pin.checksum))
-                }
-                SourceSpec::Path(relative) => {
-                    // `D-051`: a git package is unpacked into the store, so a
-                    // relative path from one either escapes the package or
-                    // names a directory whose absolute path a lock must not
-                    // record. Both have answers; neither is in this release.
-                    if matches!(dependent_source, SourceId::Git { .. }) {
-                        return Err(format!(
-                            "`{dependent}` comes from git and declares the `path` dependency `{declared}`; a package fetched from a repository cannot have one yet, because there is no way to write where it lives into a lockfile that another machine could read"
-                        ));
-                    }
-                    let dependency = load_path_dependency(&project, workspace, &relative)?;
-                    // `D-035`: the key in `[dependencies]` *is* the package
-                    // name, because the name is what the namespace and the lock
-                    // are built from. An alias that differed from it would give
-                    // one package two names.
-                    if dependency.name != *declared {
-                        return Err(format!(
-                            "`{dependent}` declares dependency `{declared}`, but the package at `{}` is named `{}`; the key in `[dependencies]` must be the package name",
-                            dependency.root.display(),
-                            dependency.name
-                        ));
-                    }
-                    (
-                        PackageId {
-                            name: dependency.name.clone(),
-                            version: dependency.version.clone(),
-                            source: SourceId::Path(dependency.root.clone()),
-                        },
-                        Some(dependency),
-                        None,
-                    )
-                }
-            };
-
-            if is_root {
-                collect_language_items(
-                    declared,
-                    dependency.as_ref(),
-                    &mut language_items,
-                    &mut language_item_source,
-                )?;
-            }
-
-            match packages.get(&id.name) {
-                Some(existing) if existing.id == id => continue,
-                // `D-038`, restated for git by `D-049`: two dependents that
-                // disagree about which commit of a repository to take is a
-                // question with two answers, and picking one silently is worse
-                // than reporting it.
-                Some(existing) if existing.id.version == id.version => {
-                    return Err(format!(
-                        "`{}` is required from two sources: `{}` and `{}`. A package name resolves from one source in a graph",
-                        id.name, existing.id.source, id.source
-                    ));
-                }
-                Some(existing) => {
-                    return Err(format!(
-                        "`{}` is required at two versions: {} and {}. Two incompatible versions of one package cannot coexist in a graph",
-                        id.name, existing.id.version, id.version
-                    ));
-                }
-                None => {}
-            }
-
-            let source = id.source.clone();
-
-            packages.insert(
-                id.name.clone(),
-                ResolvedPackage {
-                    id,
-                    dependencies: dependency
-                        .as_ref()
-                        .map(|project| project.dependencies.keys().cloned().collect())
-                        .unwrap_or_default(),
-                    project: dependency.clone(),
-                    checksum,
-                },
-            );
-            if let Some(dependency) = dependency {
-                queue.push_back((source, dependency));
-            }
-        }
-        is_root = false;
+    // Language items come from the root's own direct dependencies, in the order
+    // its manifest lists them, so two of them are reported the same way twice.
+    let mut language_items = Vec::new();
+    let mut language_item_source = None;
+    for need in &needs {
+        let project = solved[&need.name].project.as_ref();
+        collect_language_items(
+            &need.name,
+            project,
+            &mut language_items,
+            &mut language_item_source,
+        )?;
     }
 
-    check_requirements(&packages, &requirements)?;
+    let packages: BTreeMap<String, ResolvedPackage> = solved
+        .into_iter()
+        .map(|(name, chosen)| {
+            (
+                name,
+                ResolvedPackage {
+                    dependencies: chosen.dependencies(),
+                    id: chosen.id,
+                    project: chosen.project,
+                    checksum: chosen.checksum,
+                },
+            )
+        })
+        .collect();
     reject_cycles(&packages, &root_id.name)?;
 
     Ok(Resolution {
@@ -333,6 +360,543 @@ pub fn resolve(
         packages,
         language_items,
     })
+}
+
+impl Context<'_> {
+    /// Satisfy `pending` against `chosen`, or answer that this branch cannot.
+    ///
+    /// `Err` is a failure of the machinery — an unreadable manifest, a registry
+    /// nobody configured — and stops everything. `Ok(None)` is this branch not
+    /// working out, which is what backtracking is for.
+    fn search(
+        &self,
+        mut pending: VecDeque<Need>,
+        chosen: BTreeMap<String, Chosen>,
+        depth: usize,
+        failure: &mut Failure,
+    ) -> Result<Option<BTreeMap<String, Chosen>>, String> {
+        let Some(need) = pending.pop_front() else {
+            return Ok(Some(chosen));
+        };
+
+        if let Some(existing) = chosen.get(&need.name) {
+            if need.requirement.matches(&existing.id.version)
+                && need.want.matches(&existing.id.source)
+            {
+                return self.search(pending, chosen, depth + 1, failure);
+            }
+            let options = self.options(&need, false)?;
+            failure.record(depth, self.disagreement(&need, existing, &options)?);
+            return Ok(None);
+        }
+
+        let options = self.options(&need, true)?;
+        if let Some(solved) = self.try_each(&need, &options, &pending, &chosen, depth, failure)? {
+            return Ok(Some(solved));
+        }
+        // The lockfile's answer did not work out. It is still the answer this
+        // graph is supposed to have, so it was tried first; the rest of what
+        // the registry publishes is tried only now.
+        if options.from_pin {
+            let all = self.options(&need, false)?;
+            let already = options.all.first().map(|chosen| chosen.id.clone());
+            let rest = Options {
+                all: all
+                    .all
+                    .into_iter()
+                    .filter(|candidate| Some(&candidate.id) != already.as_ref())
+                    .collect(),
+                ..all
+            };
+            if let Some(solved) = self.try_each(&need, &rest, &pending, &chosen, depth, failure)? {
+                return Ok(Some(solved));
+            }
+        }
+        Ok(None)
+    }
+
+    fn try_each(
+        &self,
+        need: &Need,
+        options: &Options,
+        pending: &VecDeque<Need>,
+        chosen: &BTreeMap<String, Chosen>,
+        depth: usize,
+        failure: &mut Failure,
+    ) -> Result<Option<BTreeMap<String, Chosen>>, String> {
+        let matching = self.matching(need, options);
+        if matching.is_empty() && !options.from_pin {
+            failure.record(depth, self.no_candidate(need, options));
+            return Ok(None);
+        }
+        for candidate in matching {
+            let mut pending = pending.clone();
+            pending.extend(candidate.needs.iter().cloned());
+            let mut chosen = chosen.clone();
+            chosen.insert(need.name.clone(), candidate.clone());
+            if let Some(solved) = self.search(pending, chosen, depth + 1, failure)? {
+                return Ok(Some(solved));
+            }
+        }
+        Ok(None)
+    }
+
+    /// The candidates that satisfy a requirement, newest first.
+    fn matching<'a>(&self, need: &Need, options: &'a Options) -> Vec<&'a Chosen> {
+        options
+            .all
+            .iter()
+            .filter(|candidate| need.requirement.matches(&candidate.id.version))
+            .filter(|candidate| match self.sources.precise(&need.name) {
+                Some(exact) => candidate.id.version == *exact,
+                None => true,
+            })
+            .collect()
+    }
+
+    /// Everything a source offers for a name, newest first.
+    ///
+    /// With `use_pin`, a lockfile entry that still applies is the whole answer
+    /// and nothing is fetched to produce it — which is what lets a resolved
+    /// project resolve again with no network and no index.
+    fn options(&self, need: &Need, use_pin: bool) -> Result<Options, String> {
+        let single = |chosen: Chosen| Options {
+            all: vec![chosen],
+            yanked: Vec::new(),
+            from_pin: false,
+        };
+        match &need.want {
+            Want::Path(root) => Ok(single(self.path_package(need, root)?)),
+            Want::Toolchain => Ok(single(self.toolchain_package(need)?)),
+            Want::Git { url, reference } => Ok(single(self.git_package(need, url, reference)?)),
+            Want::Registry { index } => {
+                if use_pin {
+                    if let Some(pin) = self.applicable_pin(need, index) {
+                        return Ok(Options {
+                            all: vec![self.registry_package_from_lock(need, pin)?],
+                            yanked: Vec::new(),
+                            from_pin: true,
+                        });
+                    }
+                }
+                let mut all = Vec::new();
+                let mut yanked = Vec::new();
+                for entry in self.sources.published(&need.name, index)? {
+                    if entry.yanked {
+                        yanked.push(entry.version.clone());
+                        continue;
+                    }
+                    all.push(self.registry_package(need, index, entry)?);
+                }
+                Ok(Options {
+                    all,
+                    yanked,
+                    from_pin: false,
+                })
+            }
+        }
+    }
+
+    /// The lockfile's entry for this name, if it is still an answer to it.
+    fn applicable_pin(&self, need: &Need, index: &str) -> Option<&Pin> {
+        let pin = self.sources.pinned(&need.name)?;
+        let applies = need.want.matches(&pin.source)
+            && need.requirement.matches(&pin.version)
+            && self
+                .sources
+                .precise(&need.name)
+                .is_none_or(|exact| *exact == pin.version);
+        let _ = index;
+        applies.then_some(pin)
+    }
+
+    fn path_package(&self, need: &Need, root: &Path) -> Result<Chosen, String> {
+        let project = self.load_path_dependency(root)?;
+        // `D-035`: the key in `[dependencies]` *is* the package name, because
+        // the name is what the namespace and the lock are built from. An alias
+        // that differed from it would give one package two names.
+        if project.name != need.name {
+            return Err(format!(
+                "`{}` declares dependency `{}`, but the package at `{}` is named `{}`; the key in `[dependencies]` must be the package name",
+                need.dependent,
+                need.name,
+                project.root.display(),
+                project.name
+            ));
+        }
+        let id = PackageId {
+            name: project.name.clone(),
+            version: project.version.clone(),
+            source: SourceId::Path(project.root.clone()),
+        };
+        let needs = self.needs_of(&project, &id)?;
+        Ok(Chosen {
+            id,
+            checksum: None,
+            project: Some(project),
+            entry: None,
+            needs,
+        })
+    }
+
+    fn toolchain_package(&self, need: &Need) -> Result<Chosen, String> {
+        if need.name != STD_PACKAGE {
+            return Err(format!(
+                "dependency `{}` cannot use the toolchain source; the bundled package is named `{STD_PACKAGE}`",
+                need.name
+            ));
+        }
+        let (_, checksum) = std_archive(self.toolchain_version)?;
+        let id = PackageId {
+            name: STD_PACKAGE.to_owned(),
+            version: self.toolchain_version.clone(),
+            source: SourceId::Toolchain,
+        };
+        let project = replacement(self.workspace, &id, &checksum)?;
+        let needs = match &project {
+            Some(project) => self.needs_of(project, &id)?,
+            None => Vec::new(),
+        };
+        Ok(Chosen {
+            id,
+            checksum: Some(checksum),
+            project,
+            entry: None,
+            needs,
+        })
+    }
+
+    fn git_package(
+        &self,
+        need: &Need,
+        url: &str,
+        reference: &GitReference,
+    ) -> Result<Chosen, String> {
+        let pin = self.sources.pin_git(&need.name, url, reference)?;
+        let id = PackageId {
+            name: need.name.clone(),
+            version: pin.version.clone(),
+            source: pin.source.clone(),
+        };
+        let project = self.materialize(&id, &pin.checksum)?;
+        if project.name != id.name || project.version != id.version {
+            return Err(format!(
+                "`{url}` at {} is `{} v{}`, but it was resolved as `{id}`",
+                pin.source, project.name, project.version
+            ));
+        }
+        let needs = self.needs_of(&project, &id)?;
+        Ok(Chosen {
+            id,
+            checksum: Some(pin.checksum),
+            project: Some(project),
+            entry: None,
+            needs,
+        })
+    }
+
+    /// A registry package the lockfile already pinned.
+    ///
+    /// Its requirements come from its own manifest rather than from the index,
+    /// because the index is what a *new* resolution reads and this one is not
+    /// new — the archive is in the store, or vendored, and either way it is
+    /// here.
+    fn registry_package_from_lock(&self, need: &Need, pin: &Pin) -> Result<Chosen, String> {
+        let checksum = pin.checksum.ok_or_else(|| {
+            format!(
+                "`{}` records `{}` as a registry package with no checksum; delete it and resolve again",
+                crate::lock::LOCK_FILE,
+                need.name
+            )
+        })?;
+        let id = PackageId {
+            name: need.name.clone(),
+            version: pin.version.clone(),
+            source: pin.source.clone(),
+        };
+        let project = self.materialize(&id, &checksum)?;
+        let needs = self.needs_of(&project, &id)?;
+        Ok(Chosen {
+            id,
+            checksum: Some(checksum),
+            project: Some(project),
+            entry: None,
+            needs,
+        })
+    }
+
+    /// A registry package the index offered, not yet downloaded.
+    fn registry_package(
+        &self,
+        need: &Need,
+        index: &str,
+        entry: IndexEntry,
+    ) -> Result<Chosen, String> {
+        let id = PackageId {
+            name: need.name.clone(),
+            version: entry.version.clone(),
+            source: SourceId::Registry {
+                index: index.to_owned(),
+            },
+        };
+        let needs = entry
+            .dependencies
+            .iter()
+            .map(|dependency| Need {
+                dependent: id.name.clone(),
+                name: dependency.name.clone(),
+                requirement: dependency.requirement.clone(),
+                want: match dependency.source {
+                    IndexSource::SameIndex => Want::Registry {
+                        index: index.to_owned(),
+                    },
+                    IndexSource::Toolchain => Want::Toolchain,
+                },
+            })
+            .collect();
+        Ok(Chosen {
+            id,
+            checksum: Some(entry.checksum),
+            project: None,
+            entry: Some(entry),
+            needs,
+        })
+    }
+
+    /// The tree of a fetched package: a vendored copy if one stands in for it,
+    /// and the store otherwise. Both are checked against the checksum first.
+    fn materialize(&self, id: &PackageId, checksum: &Digest) -> Result<Project, String> {
+        match replacement(self.workspace, id, checksum)? {
+            Some(project) => Ok(project),
+            None => {
+                let root = self.sources.checkout(id, checksum)?;
+                load_project(Some(root.join(MANIFEST_FILE)))
+            }
+        }
+    }
+
+    /// Download what the search selected from an index, and check that what
+    /// arrives is what the index said it would be (`D-055`).
+    ///
+    /// Only what an index offered is downloaded here. The bundled library also
+    /// reaches this point without a project, and deliberately: it lives inside
+    /// the compiler, so unpacking it into the store would be fetching something
+    /// the toolchain is already holding.
+    fn settle(&self, chosen: BTreeMap<String, Chosen>) -> Result<BTreeMap<String, Chosen>, String> {
+        let mut settled = BTreeMap::new();
+        for (name, mut package) in chosen {
+            if package.project.is_none() && package.entry.is_some() {
+                let checksum = package
+                    .checksum
+                    .ok_or_else(|| format!("`{name}` was resolved without a checksum"))?;
+                let project = self.materialize(&package.id, &checksum)?;
+                if project.name != package.id.name || project.version != package.id.version {
+                    return Err(format!(
+                        "SL1033: the index offered `{}`, but the archive it points at is `{} v{}`",
+                        package.id, project.name, project.version
+                    ));
+                }
+                let declared = self.needs_of(&project, &package.id)?;
+                check_against_index(&package, &declared)?;
+                package.needs = declared;
+                package.project = Some(project);
+            }
+            settled.insert(name, package);
+        }
+        Ok(settled)
+    }
+
+    /// Every dependency a manifest declares, as requirements to satisfy.
+    fn needs_of(&self, project: &Project, id: &PackageId) -> Result<Vec<Need>, String> {
+        let mut needs = Vec::new();
+        for (declared, spec) in &project.dependencies {
+            validate_package_name(declared)?;
+            needs.push(Need {
+                dependent: project.name.clone(),
+                name: declared.clone(),
+                requirement: spec.requirement(),
+                want: self.want(declared, spec.source(declared)?, project, id)?,
+            });
+        }
+        Ok(needs)
+    }
+
+    /// What a written source means to the package that wrote it.
+    fn want(
+        &self,
+        declared: &str,
+        spec: SourceSpec,
+        project: &Project,
+        id: &PackageId,
+    ) -> Result<Want, String> {
+        let dependent = &project.name;
+        match spec {
+            SourceSpec::Toolchain => Ok(Want::Toolchain),
+            SourceSpec::Path(relative) => match &id.source {
+                // `D-051`: a git package is unpacked into the store, so a
+                // relative path from one either escapes the package or names a
+                // directory whose absolute path a lock must not record. Both
+                // have answers; neither is in this release.
+                SourceId::Git { .. } => Err(format!(
+                    "`{dependent}` comes from git and declares the `path` dependency `{declared}`; a package fetched from a repository cannot have one yet, because there is no way to write where it lives into a lockfile that another machine could read"
+                )),
+                SourceId::Registry { .. } => Err(format!(
+                    "SL1032: `{dependent} v{}` came from a registry and declares the `path` dependency `{declared}`; a published package depends only on its own registry and the toolchain (`D-054`)",
+                    id.version
+                )),
+                _ => Ok(Want::Path(project.root.join(relative))),
+            },
+            SourceSpec::Git { url, reference } => match &id.source {
+                SourceId::Registry { .. } => Err(format!(
+                    "SL1032: `{dependent} v{}` came from a registry and declares the `git` dependency `{declared}`; a published package depends only on its own registry and the toolchain (`D-054`)",
+                    id.version
+                )),
+                _ => Ok(Want::Git { url, reference }),
+            },
+            SourceSpec::Registry { registry } => match &id.source {
+                // A fetched manifest's registry names are its author's local
+                // nicknames and mean nothing here, so the only one a published
+                // package may write is the one that means "mine" (`D-054`).
+                SourceId::Registry { index } if registry == DEFAULT_REGISTRY => {
+                    Ok(Want::Registry {
+                        index: index.clone(),
+                    })
+                }
+                SourceId::Registry { .. } => Err(format!(
+                    "SL1032: `{dependent} v{}` came from a registry and takes `{declared}` from the registry it calls `{registry}`; a name written in a published manifest means nothing on the machine that fetched it (`D-054`)",
+                    id.version
+                )),
+                _ => Ok(Want::Registry {
+                    index: self.sources.registries().named(&registry)?.index().to_owned(),
+                }),
+            },
+        }
+    }
+
+    /// Load a `path` dependency.
+    ///
+    /// A path that lands on a workspace member resolves to that member rather
+    /// than being read again as a stranger: a member's manifest may inherit
+    /// fields from the workspace, and re-reading it from here would either miss
+    /// them or have to rediscover the workspace to find them.
+    fn load_path_dependency(&self, root: &Path) -> Result<Project, String> {
+        if let Ok(canonical) = root.canonicalize() {
+            if let Some(member) = self.workspace.member_at(&canonical) {
+                return Ok(member.clone());
+            }
+        }
+        let manifest = if root.is_dir() {
+            root.join(MANIFEST_FILE)
+        } else {
+            root.to_path_buf()
+        };
+        load_project(Some(manifest))
+    }
+
+    /// Why a name already chosen is not what this requirement asked for.
+    fn disagreement(
+        &self,
+        need: &Need,
+        existing: &Chosen,
+        options: &Options,
+    ) -> Result<String, String> {
+        let Some(best) = self.matching(need, options).first().copied() else {
+            return Ok(self.no_candidate(need, options));
+        };
+        if best.id.source != existing.id.source {
+            return Ok(format!(
+                "SL1031: `{}` is required from two sources: `{}` and {}. A package name resolves from one source in a graph (`D-038`)",
+                need.name, existing.id.source, need.want
+            ));
+        }
+        Ok(format!(
+            "`{}` is required at two versions: {} and {}. Two incompatible versions of one package cannot coexist in a graph",
+            need.name, existing.id.version, best.id.version
+        ))
+    }
+
+    /// Why nothing a source offers satisfies a requirement.
+    fn no_candidate(&self, need: &Need, options: &Options) -> String {
+        let asked = format!(
+            "cannot select a version of `{}`: `{}` requires {}",
+            need.name, need.dependent, need.requirement
+        );
+        // A yanked version that would otherwise have been the answer is the
+        // useful thing to say — "the only candidate is 1.0.0" hides it.
+        let withdrawn: Vec<Version> = options
+            .yanked
+            .iter()
+            .filter(|version| need.requirement.matches(version))
+            .cloned()
+            .collect();
+        if !withdrawn.is_empty() {
+            return format!(
+                "SL1035: {asked}, and every version that would satisfy it is yanked ({})",
+                versions(&withdrawn)
+            );
+        }
+        match options.all.as_slice() {
+            [] => format!("{asked}, but {} offers no `{}`", need.want, need.name),
+            [only] => format!("{asked}, but the only candidate is {}", only.id.version),
+            many => format!(
+                "{asked}, but {} publishes {}",
+                need.want,
+                versions(
+                    &many
+                        .iter()
+                        .map(|candidate| candidate.id.version.clone())
+                        .collect::<Vec<_>>()
+                )
+            ),
+        }
+    }
+}
+
+fn versions(versions: &[Version]) -> String {
+    versions
+        .iter()
+        .map(|version| version.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// `D-055`: the index makes resolution fast and is trusted for nothing else,
+/// so what the archive turns out to declare has to be what selected it.
+fn check_against_index(package: &Chosen, declared: &[Need]) -> Result<(), String> {
+    let Some(entry) = &package.entry else {
+        return Ok(());
+    };
+    let mut published: Vec<(String, String)> = entry
+        .dependencies
+        .iter()
+        .map(|dependency| (dependency.name.clone(), dependency.requirement.to_string()))
+        .collect();
+    let mut actual: Vec<(String, String)> = declared
+        .iter()
+        .map(|need| (need.name.clone(), need.requirement.to_string()))
+        .collect();
+    published.sort();
+    actual.sort();
+    if published == actual {
+        return Ok(());
+    }
+    let render = |entries: &[(String, String)]| {
+        if entries.is_empty() {
+            "nothing".to_owned()
+        } else {
+            entries
+                .iter()
+                .map(|(name, requirement)| format!("`{name}` {requirement}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    };
+    Err(format!(
+        "SL1033: the index says `{}` requires {}, but its manifest requires {}. The index is what selected it, so the two have to agree",
+        package.id,
+        render(&published),
+        render(&actual)
+    ))
 }
 
 /// A vendored copy standing in for a package, if one is configured.
@@ -377,31 +941,6 @@ fn replacement(
     Ok(Some(project))
 }
 
-/// Load a `path` dependency.
-///
-/// A path that lands on a workspace member resolves to that member rather than
-/// being read again as a stranger: a member's manifest may inherit fields from
-/// the workspace, and re-reading it from here would either miss them or have to
-/// rediscover the workspace to find them.
-fn load_path_dependency(
-    dependent: &Project,
-    workspace: &Workspace,
-    relative: &PathBuf,
-) -> Result<Project, String> {
-    let root = dependent.root.join(relative);
-    if let Ok(canonical) = root.canonicalize() {
-        if let Some(member) = workspace.member_at(&canonical) {
-            return Ok(member.clone());
-        }
-    }
-    let manifest = if root.is_dir() {
-        root.join(MANIFEST_FILE)
-    } else {
-        root
-    };
-    load_project(Some(manifest))
-}
-
 /// Language items come from whichever direct dependency declares them.
 ///
 /// This used to key off the alias `std`, so a replacement library had to be
@@ -432,40 +971,6 @@ fn collect_language_items(
     }
     *source = Some(declared.to_owned());
     *items = contributed;
-    Ok(())
-}
-
-/// Every requirement recorded on a name must accept the version selected for it.
-fn check_requirements(
-    packages: &BTreeMap<String, ResolvedPackage>,
-    requirements: &BTreeMap<String, Vec<Requirement>>,
-) -> Result<(), String> {
-    for (name, requests) in requirements {
-        let Some(package) = packages.get(name) else {
-            continue;
-        };
-        let unsatisfied = requests
-            .iter()
-            .filter(|requirement| !requirement.request.matches(&package.id.version))
-            .collect::<Vec<_>>();
-        if unsatisfied.is_empty() {
-            continue;
-        }
-        let complaints = unsatisfied
-            .iter()
-            .map(|requirement| {
-                format!(
-                    "`{}` requires {}",
-                    requirement.requested_by, requirement.request
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        return Err(format!(
-            "cannot select a version of `{name}`: {complaints}, but the only candidate is {}",
-            package.id.version
-        ));
-    }
     Ok(())
 }
 
@@ -571,13 +1076,84 @@ mod tests {
         }
 
         /// A store inside the scratch directory, so a test never writes to the
-        /// developer's own — and never has to be told to clean it up.
+        /// developer's own — and never has to be told to clean it up. The
+        /// registry beside it is a directory, which is all a registry is.
         fn sources(&self) -> Sources {
+            let mut config = crate::manifest::LocalConfig::default();
+            config.registry.insert(
+                "default".to_owned(),
+                crate::manifest::RegistryConfig {
+                    index: Some(self.root.join("registry").display().to_string()),
+                },
+            );
             Sources::new(
                 crate::store::Store::at(self.root.join(".store")),
                 crate::store::Access::Online,
                 false,
             )
+            .with_registries(crate::registry::Registries::from_config(&config, &self.root).unwrap())
+        }
+
+        /// Publish a package into that registry: an archive under `packages/`
+        /// and a line under `index/`, exactly as `docs/packaging.md` says.
+        fn publish(&self, name: &str, version: &str, dependencies: &[(&str, &str)]) -> Digest {
+            let version = Version::parse(version).unwrap();
+            let table = dependencies
+                .iter()
+                .map(|(name, requirement)| format!("{name} = \"{requirement}\"\n"))
+                .collect::<String>();
+            let root = self
+                .root
+                .join("published")
+                .join(format!("{name}-{version}"));
+            fs::create_dir_all(root.join("src")).unwrap();
+            fs::write(
+                root.join(MANIFEST_FILE),
+                format!(
+                    "[package]\nname = \"{name}\"\nversion = \"{version}\"\nsource = \"src\"\nentry = \"src/lib.slp\"\n\n[dependencies]\n{table}"
+                ),
+            )
+            .unwrap();
+            fs::write(root.join("src/lib.slp"), "(fn unused () -> i32 0)\n").unwrap();
+
+            let (bytes, checksum) =
+                crate::archive::directory_archive(&root, &prefix_for(name, &version)).unwrap();
+            self.serve(
+                name,
+                crate::registry::IndexEntry {
+                    name: name.to_owned(),
+                    version,
+                    dependencies: dependencies
+                        .iter()
+                        .map(|(name, requirement)| crate::registry::IndexDependency {
+                            name: (*name).to_owned(),
+                            requirement: VersionReq::parse(requirement).unwrap(),
+                            source: IndexSource::SameIndex,
+                        })
+                        .collect(),
+                    checksum,
+                    yanked: false,
+                },
+                &bytes,
+            );
+            checksum
+        }
+
+        /// Put one entry and its archive where a registry keeps them.
+        fn serve(&self, name: &str, entry: crate::registry::IndexEntry, archive: &[u8]) {
+            let registry = self.root.join("registry");
+            let index = registry
+                .join(crate::registry::INDEX_DIRECTORY)
+                .join(crate::registry::index_path(name).unwrap());
+            fs::create_dir_all(index.parent().unwrap()).unwrap();
+            let mut lines = fs::read_to_string(&index).unwrap_or_default();
+            lines.push_str(&entry.render().unwrap());
+            lines.push('\n');
+            fs::write(&index, lines).unwrap();
+
+            let archive_path = registry.join(crate::registry::archive_path(name, &entry.version));
+            fs::create_dir_all(archive_path.parent().unwrap()).unwrap();
+            fs::write(archive_path, archive).unwrap();
         }
 
         fn write_manifest(&self, relative: &str, contents: &str) {
@@ -611,6 +1187,27 @@ mod tests {
         let (_, digest) = std_archive(&Version::new(0, 3, 7)).unwrap();
         assert_eq!(resolution.packages["std"].checksum, Some(digest));
         assert_eq!(resolution.packages["application"].checksum, None);
+    }
+
+    /// The bundled library ships inside the compiler, so resolving it must not
+    /// put it in the store — a store nobody can write to is exactly the
+    /// situation a language server on a locked-down machine is in.
+    #[test]
+    fn the_bundled_library_is_not_fetched_into_the_store() {
+        let workspace = Workspace::new("toolchain-unfetched");
+        workspace.package("application", "1.0.0", "std = { toolchain = true }\n");
+        let manifest = workspace.root.join("application").join(MANIFEST_FILE);
+        let loaded = crate::workspace::load_workspace(Some(manifest)).unwrap();
+        let project = loaded.select(None, false).unwrap()[0].clone();
+        let sources = Sources::new(
+            crate::store::Store::at("/nonexistent"),
+            crate::store::Access::Offline,
+            false,
+        );
+        let resolution =
+            super::resolve(&project, &loaded, &Version::new(0, 3, 7), &sources).unwrap();
+        assert_eq!(names(&resolution), vec!["std"]);
+        assert!(resolution.packages["std"].project.is_none());
     }
 
     /// Vendoring may change where bytes are read from and nothing else: the
@@ -808,8 +1405,11 @@ mod tests {
         assert_eq!(names(&resolution), vec!["foundation", "mathlib"]);
     }
 
+    /// `D-038`: one name comes from one place. Two directories that both call
+    /// themselves `shared` are two sources, and saying so names the thing to
+    /// fix — which directory the graph was not expecting.
     #[test]
-    fn two_versions_of_one_name_are_rejected() {
+    fn one_name_from_two_directories_is_rejected() {
         let workspace = Workspace::new("two-versions");
         fs::create_dir_all(workspace.root.join("old")).unwrap();
         workspace.package("shared", "2.0.0", "");
@@ -832,8 +1432,9 @@ mod tests {
         );
 
         let error = workspace.resolve("application").unwrap_err();
-        assert!(error.contains("two versions"), "{error}");
-        assert!(error.contains("shared"), "{error}");
+        assert!(error.contains("SL1031"), "{error}");
+        assert!(error.contains("two sources"), "{error}");
+        assert!(error.contains("old-shared"), "{error}");
     }
 
     #[test]
@@ -999,6 +1600,219 @@ mod tests {
             names(resolved.member("application").unwrap()),
             vec!["helper"]
         );
+    }
+
+    /// Maximal selection, finally with something to select from: two versions
+    /// are published and the newer compatible one is what the graph gets.
+    #[test]
+    fn a_registry_dependency_takes_the_newest_compatible_version() {
+        let workspace = Workspace::new("registry");
+        workspace.publish("geometry", "1.0.0", &[]);
+        let checksum = workspace.publish("geometry", "1.2.0", &[]);
+        workspace.publish("geometry", "2.0.0", &[]);
+        workspace.package("application", "1.0.0", "geometry = \"^1\"\n");
+
+        let resolution = workspace.resolve("application").unwrap();
+        let geometry = &resolution.packages["geometry"];
+        assert_eq!(geometry.id.version, Version::new(1, 2, 0));
+        assert_eq!(geometry.checksum, Some(checksum));
+        assert_eq!(
+            geometry.id.source,
+            SourceId::Registry {
+                index: workspace.root.join("registry").display().to_string(),
+            }
+        );
+        // The archive was downloaded and unpacked, so the compiler is handed a
+        // directory like it is for every other source.
+        assert!(geometry
+            .project
+            .as_ref()
+            .is_some_and(|project| project.root.join(MANIFEST_FILE).is_file()));
+    }
+
+    /// The patch that finally puts weight on backtracking. Greedy selection
+    /// takes `left 1.1.0`, which needs `shared ^2`, and then cannot satisfy
+    /// `right`; the answer is the older `left`, which no amount of ordering
+    /// finds without going back.
+    #[test]
+    fn a_diamond_backtracks_to_an_older_dependent() {
+        let workspace = Workspace::new("backtrack");
+        workspace.publish("shared", "1.0.0", &[]);
+        workspace.publish("shared", "2.0.0", &[]);
+        workspace.publish("left", "1.0.0", &[("shared", "^1")]);
+        workspace.publish("left", "1.1.0", &[("shared", "^2")]);
+        workspace.publish("right", "1.0.0", &[("shared", "^1")]);
+        workspace.package("application", "1.0.0", "left = \"^1\"\nright = \"^1\"\n");
+
+        let resolution = workspace.resolve("application").unwrap();
+        assert_eq!(names(&resolution), vec!["left", "right", "shared"]);
+        assert_eq!(
+            resolution.packages["left"].id.version,
+            Version::new(1, 0, 0)
+        );
+        assert_eq!(
+            resolution.packages["shared"].id.version,
+            Version::new(1, 0, 0)
+        );
+    }
+
+    /// `D-036`: when backtracking cannot make one name work at one version,
+    /// that is the answer, and the message says which two versions were wanted.
+    #[test]
+    fn two_versions_of_one_name_are_rejected() {
+        let workspace = Workspace::new("two-registry-versions");
+        workspace.publish("shared", "1.0.0", &[]);
+        workspace.publish("shared", "2.0.0", &[]);
+        workspace.publish("left", "1.0.0", &[("shared", "^2")]);
+        workspace.package("application", "1.0.0", "left = \"^1\"\nshared = \"^1\"\n");
+
+        let error = workspace.resolve("application").unwrap_err();
+        assert!(error.contains("two versions"), "{error}");
+        assert!(error.contains("shared"), "{error}");
+    }
+
+    /// `D-055`: yanking is a statement about new resolutions, so a yanked
+    /// version is skipped — and a requirement that has nothing else says so.
+    #[test]
+    fn a_yanked_version_is_not_selected() {
+        let workspace = Workspace::new("yanked");
+        workspace.publish("geometry", "1.0.0", &[]);
+        let (bytes, checksum) = published_bytes(&workspace, "geometry", "1.1.0");
+        workspace.serve(
+            "geometry",
+            crate::registry::IndexEntry {
+                name: "geometry".to_owned(),
+                version: Version::new(1, 1, 0),
+                dependencies: Vec::new(),
+                checksum,
+                yanked: true,
+            },
+            &bytes,
+        );
+        workspace.package("application", "1.0.0", "geometry = \"^1\"\n");
+        assert_eq!(
+            workspace.resolve("application").unwrap().packages["geometry"]
+                .id
+                .version,
+            Version::new(1, 0, 0)
+        );
+
+        workspace.package("application", "1.0.0", "geometry = \"^1.1\"\n");
+        let error = workspace.resolve("application").unwrap_err();
+        assert!(error.contains("SL1035"), "{error}");
+        assert!(error.contains("yanked"), "{error}");
+    }
+
+    /// `D-055`: the index makes resolution fast and is trusted for nothing
+    /// else, so an entry that misdescribes its own archive is caught.
+    #[test]
+    fn an_index_that_disagrees_with_its_archive_is_refused() {
+        let workspace = Workspace::new("lying-index");
+        workspace.publish("units", "1.0.0", &[]);
+        // The archive requires `units`; the index says it requires nothing.
+        let (bytes, checksum) = published_with(&workspace, "geometry", "1.0.0", "units = \"^1\"\n");
+        workspace.serve(
+            "geometry",
+            crate::registry::IndexEntry {
+                name: "geometry".to_owned(),
+                version: Version::new(1, 0, 0),
+                dependencies: Vec::new(),
+                checksum,
+                yanked: false,
+            },
+            &bytes,
+        );
+        workspace.package("application", "1.0.0", "geometry = \"^1\"\n");
+
+        let error = workspace.resolve("application").unwrap_err();
+        assert!(error.contains("SL1033"), "{error}");
+        assert!(error.contains("`units`"), "{error}");
+    }
+
+    /// `D-054`: a published package depends on its own registry and the
+    /// toolchain, because nothing else survives being read on another machine.
+    #[test]
+    fn a_published_package_may_not_declare_a_path_dependency() {
+        let workspace = Workspace::new("published-path");
+        let (bytes, checksum) = published_with(
+            &workspace,
+            "geometry",
+            "1.0.0",
+            "helper = { path = \"../helper\" }\n",
+        );
+        workspace.serve(
+            "geometry",
+            crate::registry::IndexEntry {
+                name: "geometry".to_owned(),
+                version: Version::new(1, 0, 0),
+                dependencies: Vec::new(),
+                checksum,
+                yanked: false,
+            },
+            &bytes,
+        );
+        workspace.package("application", "1.0.0", "geometry = \"^1\"\n");
+
+        let error = workspace.resolve("application").unwrap_err();
+        assert!(error.contains("SL1032"), "{error}");
+        assert!(error.contains("`helper`"), "{error}");
+    }
+
+    /// `D-053`: there is no built-in registry, so a name nobody configured is
+    /// an error rather than a download from wherever.
+    #[test]
+    fn an_unconfigured_registry_is_refused() {
+        let workspace = Workspace::new("unconfigured");
+        workspace.package(
+            "application",
+            "1.0.0",
+            "geometry = { version = \"^1\", registry = \"internal\" }\n",
+        );
+        let error = workspace.resolve("application").unwrap_err();
+        assert!(error.contains("SL1030"), "{error}");
+        assert!(error.contains("internal"), "{error}");
+    }
+
+    /// A registry publishing nothing under a name is not a mystery, and the
+    /// message says which registry was asked.
+    #[test]
+    fn a_name_the_registry_does_not_publish_is_reported() {
+        let workspace = Workspace::new("unpublished");
+        workspace.package("application", "1.0.0", "geometry = \"^1\"\n");
+        let error = workspace.resolve("application").unwrap_err();
+        assert!(
+            error.contains("cannot select a version of `geometry`"),
+            "{error}"
+        );
+        assert!(error.contains("offers no"), "{error}");
+    }
+
+    /// The bytes and digest of a package as a registry would hold it.
+    fn published_bytes(workspace: &Workspace, name: &str, version: &str) -> (Vec<u8>, Digest) {
+        published_with(workspace, name, version, "")
+    }
+
+    fn published_with(
+        workspace: &Workspace,
+        name: &str,
+        version: &str,
+        dependencies: &str,
+    ) -> (Vec<u8>, Digest) {
+        let parsed = Version::parse(version).unwrap();
+        let root = workspace
+            .root
+            .join("published")
+            .join(format!("{name}-{version}"));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(
+            root.join(MANIFEST_FILE),
+            format!(
+                "[package]\nname = \"{name}\"\nversion = \"{version}\"\nsource = \"src\"\nentry = \"src/lib.slp\"\n\n[dependencies]\n{dependencies}"
+            ),
+        )
+        .unwrap();
+        fs::write(root.join("src/lib.slp"), "(fn unused () -> i32 0)\n").unwrap();
+        crate::archive::directory_archive(&root, &prefix_for(name, &parsed)).unwrap()
     }
 
     #[test]

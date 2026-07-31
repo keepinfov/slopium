@@ -310,7 +310,7 @@ mod tests {
     #[test]
     fn an_unknown_source_is_refused() {
         let error = Lockfile::parse(
-            "version = 2\n\n[[package]]\nname = \"x\"\nversion = \"1.0.0\"\nsource = \"registry+https://example\"\ndependencies = []\n",
+            "version = 2\n\n[[package]]\nname = \"x\"\nversion = \"1.0.0\"\nsource = \"packages+https://example\"\ndependencies = []\n",
         )
         .unwrap_err();
         assert!(error.contains("unknown package source"), "{error}");
