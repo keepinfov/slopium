@@ -59,7 +59,7 @@ Flake отдаёт overlay и два модуля, поэтому toolchain ст
 ```nix
 {
   inputs.slopium = {
-    url = "git+file:///home/x/dev/slopium";
+    url = "github:keepinfov/slopium";
     inputs.nixpkgs.follows = "nixpkgs";
   };
 
