@@ -1,0 +1,2 @@
+(extern "hal_identity" (hal-identity (T) (value T)) -> T)
+(fn main () -> i32 0)

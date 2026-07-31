@@ -9,9 +9,19 @@ pub type BindingId = u32;
 #[derive(Clone, Debug, Serialize)]
 pub struct TypedProgram {
     pub functions: Vec<TypedFunction>,
+    pub externs: Vec<TypedExtern>,
     pub tests: Vec<TypedTest>,
     pub structs: Vec<TypedStruct>,
     pub enums: Vec<TypedEnum>,
+}
+
+/// A checked `extern`: the Slopium name calls use, and the C symbol they reach.
+#[derive(Clone, Debug, Serialize)]
+pub struct TypedExtern {
+    pub name: String,
+    pub symbol: String,
+    pub params: Vec<Type>,
+    pub result: Type,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -634,9 +644,24 @@ impl<'a> Analyzer<'a> {
         structs.sort_by(|left, right| left.name.cmp(&right.name));
         enums.sort_by(|left, right| left.name.cmp(&right.name));
 
+        let externs = program
+            .externs
+            .iter()
+            .filter_map(|declaration| {
+                let signature = self.signatures.get(&declaration.name)?;
+                Some(TypedExtern {
+                    name: declaration.name.clone(),
+                    symbol: declaration.symbol.clone(),
+                    params: signature.params.clone(),
+                    result: signature.result.clone(),
+                })
+            })
+            .collect();
+
         if self.diagnostics.is_empty() {
             Ok(TypedProgram {
                 functions,
+                externs,
                 tests,
                 structs,
                 enums,
@@ -666,6 +691,35 @@ impl<'a> Analyzer<'a> {
                 function.name.clone(),
                 Signature {
                     type_params: function.type_params.clone(),
+                    params,
+                    result,
+                },
+            );
+        }
+        for declaration in &program.externs {
+            if self.signatures.contains_key(&declaration.name) {
+                self.error(
+                    declaration.span,
+                    format!("`{}` is defined more than once", declaration.name),
+                );
+                continue;
+            }
+            self.active_type_params.clear();
+            let params = declaration
+                .params
+                .iter()
+                .map(|param| self.normalize_type(&param.ty, param.span))
+                .collect();
+            let result = self.normalize_type(&declaration.return_type, declaration.span);
+            // An `extern` shares the function namespace, so a call to one is an
+            // ordinary call the moment its signature is here. It needs no
+            // ownership rule of its own either: every type the C boundary
+            // accepts is a scalar or a shared borrow (`D-065`), so there is no
+            // argument a call site could move in the first place.
+            self.signatures.insert(
+                declaration.name.clone(),
+                Signature {
+                    type_params: Vec::new(),
                     params,
                     result,
                 },
@@ -738,6 +792,37 @@ impl<'a> Analyzer<'a> {
             }
         }
         self.active_type_params.clear();
+        for declaration in &program.externs {
+            for param in &declaration.params {
+                self.validate_type(&param.ty, param.span);
+                let ty = self.normalize_type(&param.ty, param.span);
+                if !extern_parameter_is_expressible(&ty) {
+                    let diagnostic = Diagnostic::error(
+                        codes::NAME_OR_TYPE,
+                        self.file,
+                        param.span,
+                        format!(
+                            "`{ty}` cannot cross the C boundary as the parameter `{}`",
+                            param.name
+                        ),
+                    )
+                    .with_help(EXTERN_PARAMETER_HELP);
+                    self.diagnostics.push(diagnostic);
+                }
+            }
+            self.validate_type(&declaration.return_type, declaration.span);
+            let result = self.normalize_type(&declaration.return_type, declaration.span);
+            if !extern_result_is_expressible(&result) {
+                let diagnostic = Diagnostic::error(
+                    codes::NAME_OR_TYPE,
+                    self.file,
+                    declaration.span,
+                    format!("`{result}` cannot cross the C boundary as a return type"),
+                )
+                .with_help(EXTERN_RESULT_HELP);
+                self.diagnostics.push(diagnostic);
+            }
+        }
     }
 
     fn validate_fields(&mut self, fields: &[crate::ast::Param]) {
@@ -2968,6 +3053,44 @@ fn contains_parameter(ty: &Type, parameters: &HashSet<String>) -> bool {
             .any(|argument| contains_parameter(argument, parameters)),
         _ => false,
     }
+}
+
+const EXTERN_PARAMETER_HELP: &str =
+    "an `extern` parameter is `i32`, `i64`, `f64`, `bool`, `(& String)` or `(& (Slice T))`";
+
+const EXTERN_RESULT_HELP: &str =
+    "an `extern` returns `unit`, `i32`, `i64`, `f64`, `bool` or an owned `String`";
+
+/// Whether a parameter type is one the C boundary can carry (`D-065`).
+///
+/// The list is short because the language has no `u8`, no `char` and no
+/// unsigned types, and it is closed on purpose: a type that is not here has no
+/// agreed C spelling, and guessing one is how an FFI starts lying.
+fn extern_parameter_is_expressible(ty: &Type) -> bool {
+    match ty {
+        Type::I32 | Type::I64 | Type::F64 | Type::Bool => true,
+        // A borrow is the only way a non-scalar crosses: an `extern` may not
+        // take ownership, because the drop glue would then run where the
+        // compiler cannot see it.
+        Type::Ref {
+            mutable: false,
+            inner,
+        } => {
+            matches!(inner.as_ref(), Type::String | Type::Slice(_))
+        }
+        _ => false,
+    }
+}
+
+/// Whether a return type is one the C boundary can carry (`D-065`).
+///
+/// A returned `String` is owned by the caller, so C must have allocated it
+/// through `sl_rt_string_new`. Everything else is a scalar or nothing.
+fn extern_result_is_expressible(ty: &Type) -> bool {
+    matches!(
+        ty,
+        Type::Unit | Type::Bool | Type::I32 | Type::I64 | Type::F64 | Type::String
+    )
 }
 
 fn contains_borrowed_type(ty: &Type) -> bool {

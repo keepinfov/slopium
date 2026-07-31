@@ -1,0 +1,45 @@
+; Every shape the C boundary allows, in one project: stack arguments in both
+; classes, a narrow return, a borrowed string, a borrowed slice, and a `String`
+; C allocated and the caller now owns (`D-065`).
+
+(extern "hal_sum_ten" (hal-sum-ten (a i64) (b i64) (c i64) (d i64) (e i64) (f i64) (g
+      i64) (h i64) (i i64) (j i64)) -> i64)
+
+(extern "hal_sum_ten_doubles" (hal-sum-ten-doubles (a f64) (b f64) (c f64) (d f64) (e
+      f64) (f f64) (g f64) (h f64) (i f64) (j f64)) -> f64)
+
+(extern "hal_narrow" (hal-narrow (value i32)) -> i32)
+
+(extern "hal_is_positive" (hal-is-positive (value i64)) -> bool)
+
+(extern "hal_strlen" (hal-strlen (text (& String))) -> i64)
+
+(extern "hal_slice_sum" (hal-slice-sum (values (& (Slice i64)))) -> i64)
+
+(extern "hal_greeting" (hal-greeting) -> String)
+
+(fn doubled ((value i32)) -> i32
+  (hal-narrow value))
+
+(fn main () -> i32
+  (println (hal-sum-ten 1 2 3 4 5 6 7 8 9 10))
+  (let total (hal-sum-ten-doubles 1.0 2.0 3.0 4.0 5.0 6.0 7.0 8.0 9.0 10.0))
+  (println (= total 55.0))
+  (println (hal-is-positive 7))
+  (println (hal-is-positive -7))
+  (let text "borrowed")
+  (println (hal-strlen (& text)))
+  (let values (array 10 20 30 40))
+  (let view (slice (& values) 1 4))
+  (println (hal-slice-sum (& view)))
+  (let greeting (hal-greeting))
+  (println (& greeting))
+  (println (= (doubled 21) 42))
+  0)
+
+(test "a narrow return is sign-extended before Slopium sees it"
+  (= (doubled 21) 42))
+
+(test "a borrowed string reaches C as a NUL-terminated pointer"
+  (let text "twelve chars")
+  (= (hal-strlen (& text)) 12))

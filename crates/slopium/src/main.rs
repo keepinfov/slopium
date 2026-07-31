@@ -898,6 +898,40 @@ fn build(
         }
         objects.push(object);
     }
+    // The C an `extern` names, compiled with the same `cc` the link uses so
+    // there is no second toolchain to configure or disagree with (`D-075`).
+    // These are not cached per file: they are already inputs to `cache_key`, so
+    // reaching here at all means one of them may have changed.
+    let c_sources: Vec<PathBuf> = c_source_paths(project)
+        .into_iter()
+        .chain(dependencies.c_sources.iter().cloned())
+        .collect();
+    for (index, c_source) in c_sources.iter().enumerate() {
+        if !c_source.is_file() {
+            return Err(format!(
+                "`c-sources` names `{}`, which is not a file",
+                c_source.display()
+            ));
+        }
+        // Indexed, because two packages may each carry a `hal.c`.
+        let name = c_source.file_name().unwrap_or_default().to_string_lossy();
+        let object = object_dir.join(format!("c-{index}-{}.o", encode_file_name(&name)));
+        let status = Command::new(&cc)
+            .arg("-c")
+            .arg(c_source)
+            .arg("-o")
+            .arg(&object)
+            .args(slopic_core::cc_compile_flags())
+            .status()
+            .map_err(|error| {
+                format!(
+                    "cannot compile `{}` with `{cc}`: {error}",
+                    c_source.display()
+                )
+            })?;
+        status_result(status, &format!("compile of `{}`", c_source.display()))?;
+        objects.push(object);
+    }
     let status = Command::new(&cc)
         .arg("-o")
         .arg(&artifact)
@@ -1045,6 +1079,24 @@ fn module_interface(file: &str, source: &str) -> Result<(String, bool), String> 
         }
         interface.push_str("->");
         interface.push_str(&function.return_type.to_string());
+        interface.push('\n');
+    }
+    // An extern is callable from another module, so its signature is interface
+    // in exactly the way a `fn`'s is — and the C symbol belongs here too, since
+    // changing it changes what every caller's object asks the linker for.
+    for declaration in &program.externs {
+        interface.push_str("extern|");
+        interface.push_str(&declaration.name);
+        interface.push('|');
+        interface.push_str(&declaration.symbol);
+        for parameter in &declaration.params {
+            interface.push('|');
+            interface.push_str(&parameter.name);
+            interface.push(':');
+            interface.push_str(&parameter.ty.to_string());
+        }
+        interface.push_str("->");
+        interface.push_str(&declaration.return_type.to_string());
         interface.push('\n');
     }
     for structure in &program.structs {
@@ -1721,6 +1773,10 @@ struct ResolvedDependency {
 struct Dependencies {
     packages: Vec<ResolvedDependency>,
     language_items: Vec<(String, String)>,
+    /// Every dependency's `c-sources`, made absolute. A library that declares
+    /// an `extern` carries the C that defines it, and the link that consumes
+    /// the library is the one that has to compile it (`D-075`).
+    c_sources: Vec<PathBuf>,
 }
 
 /// Turn one member's resolved graph into what its build consumes.
@@ -1728,7 +1784,11 @@ fn dependencies_of(project: &Project, resolution: &Resolution) -> Result<Depende
     reject_namespace_collisions(project, resolution)?;
 
     let mut packages = Vec::new();
+    let mut c_sources = Vec::new();
     for package in resolution.dependencies() {
+        if let Some(project) = &package.project {
+            c_sources.extend(c_source_paths(project));
+        }
         let source = match (&package.id.source, &package.project) {
             // A vendored copy of the bundled library is an ordinary directory
             // of sources, and the compiler is handed it as one. What makes it
@@ -1764,7 +1824,20 @@ fn dependencies_of(project: &Project, resolution: &Resolution) -> Result<Depende
     Ok(Dependencies {
         packages,
         language_items: resolution.language_items.clone(),
+        c_sources,
     })
+}
+
+/// A package's `c-sources`, resolved against its root.
+///
+/// The manifest holds them relative and refuses anything that leaves the
+/// package, so joining is the whole of it.
+fn c_source_paths(project: &Project) -> Vec<PathBuf> {
+    project
+        .c_sources
+        .iter()
+        .map(|path| project.root.join(path))
+        .collect()
 }
 
 /// The name `slopium vendor` gives the replacement source it writes.
@@ -2466,6 +2539,19 @@ fn cache_key(input: CacheInputs<'_>) -> Result<String, String> {
         &fs::read(input.runtime)
             .map_err(|error| format!("cannot hash `{}`: {error}", input.runtime.display()))?,
     );
+    // The manifest is hashed above, so *declaring* a `c-sources` entry already
+    // invalidates the artifact. Their contents are hashed here so that editing
+    // one does too — `collect_cache_sources` walks only `.slp` (`D-075`).
+    for c_source in c_source_paths(input.project)
+        .into_iter()
+        .chain(input.dependencies.c_sources.iter().cloned())
+    {
+        hasher.write(c_source.display().to_string().as_bytes());
+        hasher.write(
+            &fs::read(&c_source)
+                .map_err(|error| format!("cannot hash `{}`: {error}", c_source.display()))?,
+        );
+    }
     hasher.write(input.cc.as_bytes());
     Ok(format!("{:016x}", hasher.finish()))
 }

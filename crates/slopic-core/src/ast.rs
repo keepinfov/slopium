@@ -68,6 +68,7 @@ pub struct Program {
     pub exports: Vec<ExportDecl>,
     pub takes: Vec<TakeDecl>,
     pub functions: Vec<Function>,
+    pub externs: Vec<ExternDecl>,
     pub tests: Vec<Test>,
     pub structs: Vec<StructDecl>,
     pub enums: Vec<EnumDecl>,
@@ -101,6 +102,26 @@ pub struct Function {
     pub return_type: Type,
     pub body: Expr,
     pub span: Span,
+}
+
+/// A function this package does not define, reached by its C symbol.
+///
+/// The symbol is written out because it is not derivable: a C name is whatever
+/// the library chose, and the Slopium name is whatever reads well here. The
+/// rest is a function declaration without a body, and is checked like one
+/// (`D-065`).
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternDecl {
+    /// The unmangled symbol the linker resolves.
+    pub symbol: String,
+    /// The name calls in this package use.
+    pub name: String,
+    pub params: Vec<Param>,
+    pub return_type: Type,
+    pub span: Span,
+    /// The span of the symbol literal, for diagnostics that are about the C
+    /// side rather than the declaration as a whole.
+    pub symbol_span: Span,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -231,6 +252,7 @@ pub fn build_program(file: &str, forms: &[SExpr]) -> CompileResult<Program> {
         exports: Vec::new(),
         takes: Vec::new(),
         functions: Vec::new(),
+        externs: Vec::new(),
         tests: Vec::new(),
         structs: Vec::new(),
         enums: Vec::new(),
@@ -258,6 +280,11 @@ pub fn build_program(file: &str, forms: &[SExpr]) -> CompileResult<Program> {
             "fn" => {
                 if let Some(function) = builder.function(form.span, items) {
                     program.functions.push(function);
+                }
+            }
+            "extern" => {
+                if let Some(declaration) = builder.extern_decl(form.span, items) {
+                    program.externs.push(declaration);
                 }
             }
             "test" => {
@@ -395,6 +422,57 @@ impl AstBuilder<'_> {
         })
     }
 
+    fn extern_decl(&mut self, span: Span, items: &[SExpr]) -> Option<ExternDecl> {
+        const SYNTAX: &str = "extern syntax is `(extern \"symbol\" (name (arg type) ...) -> type)`";
+        if items.len() != 5 {
+            self.error(span, SYNTAX);
+            return None;
+        }
+        let SExprKind::String(symbol) = &items[1].kind else {
+            self.error(items[1].span, "the C symbol must be a string literal");
+            return None;
+        };
+        if symbol.is_empty() {
+            self.error(items[1].span, "the C symbol cannot be empty");
+            return None;
+        }
+        let signature = self.list(&items[2], "extern signature")?;
+        let Some((head, rest)) = signature.split_first() else {
+            self.error(items[2].span, SYNTAX);
+            return None;
+        };
+        let name = self.required_atom(head, "extern name")?.to_owned();
+        // `(name (T) (value T))` is the generic `fn` shape. There is nothing a
+        // type parameter could be instantiated to here — the C vocabulary is
+        // closed (`D-065`) — so say that instead of complaining that `(T)` is
+        // not a `(name type)` pair.
+        if let Some(first) = rest.first() {
+            if matches!(&first.kind, SExprKind::List(items)
+                if items.len() == 1 && atom(&items[0]).is_some())
+            {
+                self.error(
+                    first.span,
+                    "an `extern` cannot be generic: the C boundary has a closed set of types",
+                );
+                return None;
+            }
+        }
+        let params = self.param_pairs(rest)?;
+        if atom(&items[3]) != Some("->") {
+            self.error(items[3].span, "expected `->` before the return type");
+            return None;
+        }
+        let return_type = self.ty(&items[4])?;
+        Some(ExternDecl {
+            symbol: symbol.clone(),
+            name,
+            params,
+            return_type,
+            span,
+            symbol_span: items[1].span,
+        })
+    }
+
     fn test(&mut self, span: Span, items: &[SExpr]) -> Option<Test> {
         if items.len() < 3 {
             self.error(span, "test syntax is `(test \"name\" expression...)`");
@@ -486,6 +564,14 @@ impl AstBuilder<'_> {
 
     fn params(&mut self, form: &SExpr) -> Option<Vec<Param>> {
         let items = self.list(form, "parameter or field list")?;
+        self.param_pairs(items)
+    }
+
+    /// The `(name type)` pairs themselves, without the list that holds them.
+    ///
+    /// An `extern` keeps its name and its parameters in one list, so it has the
+    /// pairs but no list of its own to hand to `params`.
+    fn param_pairs(&mut self, items: &[SExpr]) -> Option<Vec<Param>> {
         let mut params = Vec::new();
         for item in items {
             let Some(pair) = self.list(item, "name/type pair") else {

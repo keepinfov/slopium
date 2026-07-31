@@ -12,9 +12,22 @@ pub type BlockId = usize;
 #[derive(Clone, Debug, Serialize)]
 pub struct MirModule {
     pub functions: Vec<MirFunction>,
+    /// The C functions this module calls. A call to one is an ordinary
+    /// `Instruction::Call`; what this table decides is that the symbol is not
+    /// mangled and the arguments are expanded rather than passed whole
+    /// (`D-073`).
+    pub externs: Vec<MirExtern>,
     pub tests: Vec<MirTest>,
     pub structs: Vec<MirStruct>,
     pub enums: Vec<MirEnum>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct MirExtern {
+    pub name: String,
+    pub symbol: String,
+    pub params: Vec<Type>,
+    pub result: Type,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -214,6 +227,16 @@ pub enum Terminator {
 pub fn lower(program: &TypedProgram) -> MirModule {
     MirModule {
         functions: program.functions.iter().map(lower_function).collect(),
+        externs: program
+            .externs
+            .iter()
+            .map(|declaration| MirExtern {
+                name: declaration.name.clone(),
+                symbol: declaration.symbol.clone(),
+                params: declaration.params.clone(),
+                result: declaration.result.clone(),
+            })
+            .collect(),
         tests: program
             .tests
             .iter()

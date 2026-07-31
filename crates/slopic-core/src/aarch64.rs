@@ -20,9 +20,10 @@ use crate::cfg::Cfg;
 use crate::codegen::{align_to, Backend, CodegenOptions, TargetSpec, AARCH64_LINUX_GNU};
 use crate::diagnostic::{codes, CompileResult, Diagnostic, Span};
 use crate::lowering::{
-    address_taken, clone_function, drop_function, enum_clone_size, enum_clone_symbol,
-    enum_drop_symbol, enum_size, function_symbol, is_pointer_like, struct_clone_symbol,
-    struct_drop_symbol, struct_size, trap_usage, Argument, Step, Tail, TrapUsage,
+    address_taken, call_symbol, call_words, clone_function, drop_function, enum_clone_size,
+    enum_clone_symbol, enum_drop_symbol, enum_size, extern_declaration, function_symbol,
+    is_pointer_like, struct_clone_symbol, struct_drop_symbol, struct_size, trap_usage, Argument,
+    ExternClass, ExternWord, Step, Tail, TrapUsage,
 };
 use crate::mir::{BasicBlock, BinaryOp, Instruction, LocalId, MirFunction, MirModule, Terminator};
 use crate::regalloc::{allocate, Allocation, Location};
@@ -582,7 +583,7 @@ impl<'a> Generator<'a> {
         // The frame is addressed upward from `sp`, so the outgoing-argument
         // area has to come first: a callee reads its stack arguments at `sp`
         // and would otherwise be reading this function's locals.
-        let outgoing = align_to(outgoing_bytes(function), 16);
+        let outgoing = align_to(outgoing_bytes(self.module, function), 16);
         self.slot_base = outgoing;
         let saved: Vec<usize> = self
             .alloc
@@ -1111,6 +1112,25 @@ impl<'a> Generator<'a> {
                 self.inst(Inst::Fmov { dst: X16, src: D0 });
                 self.write(dst, X16);
             }
+            // C leaves the upper half of `x0` undefined for a narrow return,
+            // and Slopium keeps an `i32` sign-extended everywhere else
+            // (`D-074`).
+            Type::I32 if extern_declaration(self.module, callee).is_some() => {
+                self.inst(Inst::Sxtw {
+                    dst: RESULT,
+                    src: Reg("w0"),
+                });
+                self.write(dst, RESULT);
+            }
+            // A move into a 32-bit register zeroes the upper half, which is the
+            // whole of what a `bool` needs on the way back from C.
+            Type::Bool if extern_declaration(self.module, callee).is_some() => {
+                self.inst(Inst::Mov {
+                    dst: Reg("w0"),
+                    src: Reg("w0"),
+                });
+                self.write(dst, RESULT);
+            }
             _ => self.write(dst, RESULT),
         }
     }
@@ -1214,48 +1234,75 @@ impl<'a> Generator<'a> {
     /// to stay 16-byte aligned and pointing at the frame the locals are
     /// addressed from.
     fn ordinary_call(&mut self, callee: &str, args: &[LocalId], arg_types: &[Type]) {
+        let words = call_words(self.module, callee, args, arg_types);
         let mut integers = 0;
         let mut floats = 0;
         let mut stack = 0;
-        for (arg, ty) in args.iter().zip(arg_types) {
-            if *ty == Type::F64 {
-                if floats >= FLOAT_ARGUMENTS.len() {
-                    let source = self.read(*arg, 1);
-                    self.inst(Inst::Store {
-                        src: source,
-                        base: SP,
-                        offset: Some((stack * 8) as u32),
-                    });
-                    stack += 1;
-                } else {
-                    let source = self.read(*arg, 1);
+        for (word, class) in &words {
+            match class {
+                ExternClass::Float if floats < FLOAT_ARGUMENTS.len() => {
+                    let source = self.word_register(*word, 1);
                     self.inst(Inst::Fmov {
                         dst: FLOAT_ARGUMENTS[floats],
                         src: source,
                     });
                     floats += 1;
                 }
-            } else if integers >= INTEGER_ARGUMENTS.len() {
-                let source = self.read(*arg, 1);
-                self.inst(Inst::Store {
-                    src: source,
-                    base: SP,
-                    offset: Some((stack * 8) as u32),
-                });
-                stack += 1;
-            } else {
-                let source = self.read(*arg, 1);
-                let register = INTEGER_ARGUMENTS[integers];
-                if source != register {
-                    self.inst(Inst::Mov {
-                        dst: register,
-                        src: source,
-                    });
+                ExternClass::Integer if integers < INTEGER_ARGUMENTS.len() => {
+                    let register = INTEGER_ARGUMENTS[integers];
+                    match *word {
+                        ExternWord::Value(local) => {
+                            let source = self.read(local, 1);
+                            if source != register {
+                                self.inst(Inst::Mov {
+                                    dst: register,
+                                    src: source,
+                                });
+                            }
+                        }
+                        // An argument register is never an allocated local, so
+                        // the load can land straight in it.
+                        ExternWord::Indirect { base, offset } => {
+                            let source = self.read(base, 1);
+                            self.inst(Inst::Load {
+                                dst: register,
+                                base: source,
+                                offset: Some(offset as u32),
+                            });
+                        }
+                    }
+                    integers += 1;
                 }
-                integers += 1;
+                _ => {
+                    let source = self.word_register(*word, 1);
+                    self.inst(Inst::Store {
+                        src: source,
+                        base: SP,
+                        offset: Some((stack * 8) as u32),
+                    });
+                    stack += 1;
+                }
             }
         }
-        self.inst(Inst::Bl(function_symbol(callee, false)));
+        self.inst(Inst::Bl(call_symbol(self.module, callee)));
+    }
+
+    /// A register holding one argument word, loading an indirect one through
+    /// the given scratch register.
+    fn word_register(&mut self, word: ExternWord, scratch: usize) -> Reg {
+        match word {
+            ExternWord::Value(local) => self.read(local, scratch),
+            ExternWord::Indirect { base, offset } => {
+                let source = self.read(base, scratch);
+                let (wide, _) = SCRATCH[scratch];
+                self.inst(Inst::Load {
+                    dst: wide,
+                    base: source,
+                    offset: Some(offset as u32),
+                });
+                wide
+            }
+        }
     }
 
     // ----- generated glue --------------------------------------------------
@@ -1563,16 +1610,29 @@ fn calls_something(module: &MirModule, function: &MirFunction) -> bool {
 /// Reserved once in the prologue rather than adjusted per call, because `sp`
 /// also anchors every local: moving it between two statements would move the
 /// frame out from under them.
-fn outgoing_bytes(function: &MirFunction) -> usize {
+fn outgoing_bytes(module: &MirModule, function: &MirFunction) -> usize {
     function
         .blocks
         .iter()
         .flat_map(|block| block.instructions())
         .map(|instruction| match instruction {
-            // Builtins never take more arguments than there are registers.
-            Instruction::Call { arg_types, .. } => {
-                let floats = arg_types.iter().filter(|ty| **ty == Type::F64).count();
-                let integers = arg_types.len() - floats;
+            // Builtins never take more arguments than there are registers. An
+            // `extern` can, and it can also turn one argument into two words,
+            // so the count comes from the same expansion the call site uses —
+            // reserving less than the call stores would write into the locals
+            // that sit directly above this area.
+            Instruction::Call {
+                callee,
+                args,
+                arg_types,
+                ..
+            } => {
+                let words = call_words(module, callee, args, arg_types);
+                let floats = words
+                    .iter()
+                    .filter(|(_, class)| *class == ExternClass::Float)
+                    .count();
+                let integers = words.len() - floats;
                 let stacked = integers.saturating_sub(INTEGER_ARGUMENTS.len())
                     + floats.saturating_sub(FLOAT_ARGUMENTS.len());
                 stacked * 8

@@ -3,9 +3,10 @@ use crate::ast::Type;
 use crate::cfg::Cfg;
 use crate::diagnostic::{codes, CompileResult, Diagnostic, SourceMap, Span};
 use crate::lowering::{
-    address_taken, clone_function, drop_function, enum_clone_size, enum_clone_symbol,
-    enum_drop_symbol, enum_size, function_symbol, is_pointer_like, struct_clone_symbol,
-    struct_drop_symbol, struct_size, trap_usage, Argument, Step, Tail, TrapUsage,
+    address_taken, call_symbol, call_words, clone_function, drop_function, enum_clone_size,
+    enum_clone_symbol, enum_drop_symbol, enum_size, extern_declaration, function_symbol,
+    is_pointer_like, struct_clone_symbol, struct_drop_symbol, struct_size, trap_usage, Argument,
+    ExternClass, ExternWord, Step, Tail, TrapUsage,
 };
 use crate::mir::{BasicBlock, BinaryOp, Instruction, LocalId, MirFunction, MirModule, Terminator};
 use crate::regalloc::{allocate, Allocation, Location};
@@ -1197,12 +1198,21 @@ impl<'a> Generator<'a> {
             Type::Unit => {}
             Type::F64 => {
                 let destination = operand(&self.alloc, self.registers, dst);
-                let Operand::Reg(destination) = destination else {
-                    unreachable!("a double is returned into a register")
-                };
-                self.inst(Inst::Movq(destination, Reg("xmm0")))
+                self.store_double(destination, "xmm0");
             }
             _ => {
+                // C only defines the low half of the result register for a
+                // narrow return, and a Slopium `i32` is sign-extended
+                // everywhere else, so the extension happens here (`D-074`).
+                // Slopium callees already return an extended value, so this
+                // costs one instruction on an FFI call and nothing elsewhere.
+                if extern_declaration(self.module, callee).is_some() {
+                    match result {
+                        Type::I32 => self.inst(Inst::Movsxd(Reg("rax"), Reg("eax"))),
+                        Type::Bool => self.inst(Inst::Movzx(Reg("rax"), Reg("al"))),
+                        _ => {}
+                    }
+                }
                 let destination = operand(&self.alloc, self.registers, dst);
                 self.inst(Inst::Mov(destination, reg("rax")))
             }
@@ -1310,46 +1320,74 @@ impl<'a> Generator<'a> {
 
     /// A call to a Slopium function, by the platform calling convention.
     fn ordinary_call(&mut self, callee: &str, args: &[LocalId], arg_types: &[Type]) {
+        let words = call_words(self.module, callee, args, arg_types);
         let mut integers = 0;
         let mut floats = 0;
-        let mut stack_args = Vec::new();
-        for (arg, ty) in args.iter().zip(arg_types) {
-            if *ty == Type::F64 {
-                if floats >= FLOAT_ARGUMENTS.len() {
-                    stack_args.push((*arg, ty));
-                } else {
-                    let source = operand(&self.alloc, self.registers, *arg);
+        let mut stack_words = Vec::new();
+        for (word, class) in &words {
+            match class {
+                ExternClass::Float if floats < FLOAT_ARGUMENTS.len() => {
+                    let source = self.word_operand(*word);
                     self.load_double_into(Reg(FLOAT_ARGUMENTS[floats]), source);
                     floats += 1;
                 }
-            } else {
-                if integers >= INTEGER_ARGUMENTS.len() {
-                    stack_args.push((*arg, ty));
-                } else {
-                    let source = operand(&self.alloc, self.registers, *arg);
-                    self.inst(Inst::Mov(
-                        Operand::Reg(Reg(INTEGER_ARGUMENTS[integers])),
-                        source,
-                    ));
+                ExternClass::Integer if integers < INTEGER_ARGUMENTS.len() => {
+                    let target = Reg(INTEGER_ARGUMENTS[integers]);
+                    match *word {
+                        ExternWord::Value(local) => {
+                            let source = operand(&self.alloc, self.registers, local);
+                            self.inst(Inst::Mov(Operand::Reg(target), source));
+                        }
+                        // The pointer first, then the word it points at — the
+                        // argument register is its own scratch here.
+                        ExternWord::Indirect { base, offset } => {
+                            let source = operand(&self.alloc, self.registers, base);
+                            self.inst(Inst::Mov(Operand::Reg(target), source));
+                            self.inst(Inst::Mov(
+                                Operand::Reg(target),
+                                Operand::slot(Size::Qword, target, offset),
+                            ));
+                        }
+                    }
                     integers += 1;
                 }
+                _ => stack_words.push(*word),
             }
         }
-        let padding = usize::from(stack_args.len() % 2 != 0);
+        let padding = usize::from(stack_words.len() % 2 != 0);
         if padding != 0 {
             self.inst(Inst::Alu(AluOp::Sub, reg("rsp"), Operand::Imm(8)));
         }
-        for (arg, _) in stack_args.iter().rev() {
-            self.inst(Inst::Push(operand(&self.alloc, self.registers, *arg)));
+        for word in stack_words.iter().rev() {
+            let source = self.word_operand(*word);
+            self.inst(Inst::Push(source));
         }
         self.inst(Inst::Call(self.symbol(callee, false)));
-        let cleanup = (stack_args.len() + padding) * 8;
+        let cleanup = (stack_words.len() + padding) * 8;
         if cleanup != 0 {
             self.inst(Inst::Alu(
                 AluOp::Add,
                 reg("rsp"),
                 Operand::Imm(cleanup as i64),
             ));
+        }
+    }
+
+    /// The operand holding one argument word, materializing an indirect one
+    /// into `rax` — a scratch register of this generator, never an allocated
+    /// local and never an argument register.
+    fn word_operand(&mut self, word: ExternWord) -> Operand {
+        match word {
+            ExternWord::Value(local) => operand(&self.alloc, self.registers, local),
+            ExternWord::Indirect { base, offset } => {
+                let source = operand(&self.alloc, self.registers, base);
+                self.inst(Inst::Mov(reg("rax"), source));
+                self.inst(Inst::Mov(
+                    reg("rax"),
+                    Operand::slot(Size::Qword, Reg("rax"), offset),
+                ));
+                reg("rax")
+            }
         }
     }
 
@@ -1759,8 +1797,14 @@ impl<'a> Generator<'a> {
         clone_function(self.module, ty)
     }
 
+    /// A callee's object-file name. Tests are always Slopium's own; anything
+    /// else may be an `extern`, whose symbol is C's rather than ours.
     fn symbol(&self, name: &str, is_test: bool) -> String {
-        function_symbol(name, is_test)
+        if is_test {
+            function_symbol(name, true)
+        } else {
+            call_symbol(self.module, name)
+        }
     }
 }
 
@@ -1986,6 +2030,7 @@ mod tests {
 
         let module = MirModule {
             functions: Vec::new(),
+            externs: Vec::new(),
             tests: Vec::new(),
             structs: Vec::new(),
             enums: Vec::new(),

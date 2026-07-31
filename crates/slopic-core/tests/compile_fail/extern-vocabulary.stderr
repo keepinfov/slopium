@@ -1,0 +1,5 @@
+extern-vocabulary.slp:1:30: error[SL0200]: `List<i64>` cannot cross the C boundary as the parameter `values`
+  |
+ 1 | (extern "hal_take" (hal-take (values (List i64))) -> i64)
+  |                              ^^^^^^^^^^^^^^^^^^^
+  = help: an `extern` parameter is `i32`, `i64`, `f64`, `bool`, `(& String)` or `(& (Slice T))`

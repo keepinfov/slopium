@@ -11,7 +11,7 @@
 //! So it lives here, and the backends read it.
 
 use crate::ast::Type;
-use crate::mir::{Instruction, LocalId, MirFunction, MirModule};
+use crate::mir::{Instruction, LocalId, MirExtern, MirFunction, MirModule};
 
 /// The object-file name of a Slopium function.
 ///
@@ -25,6 +25,126 @@ pub fn function_symbol(name: &str, is_test: bool) -> String {
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     format!("{prefix}_{encoded}")
+}
+
+/// The declaration behind a callee, when the callee is an `extern`.
+pub fn extern_declaration<'a>(module: &'a MirModule, callee: &str) -> Option<&'a MirExtern> {
+    module
+        .externs
+        .iter()
+        .find(|declaration| declaration.name == callee)
+}
+
+/// What the linker is asked for when this callee is called.
+///
+/// A Slopium function is hex-encoded under `sl_fn_`; a C function is asked for
+/// by the name C gave it, because that is the only name it has. Both backends
+/// come here rather than deciding it twice (`D-073`).
+pub fn call_symbol(module: &MirModule, callee: &str) -> String {
+    match extern_declaration(module, callee) {
+        Some(declaration) => declaration.symbol.clone(),
+        None => function_symbol(callee, false),
+    }
+}
+
+/// Where the pointer sits inside a borrowed `String` or `Slice`.
+///
+/// `SlString` is `{len, cap, ptr}` and `SlSlice` is `{len, elem_size, ptr}`
+/// (`runtime/slop_rt.c`), so both keep their length first and their pointer two
+/// words in. This is an ABI fact rather than a convenience, which is why it is
+/// written down once and tested rather than spelled twice in two backends.
+pub const RUNTIME_POINTER_OFFSET: i64 = 16;
+/// Where the length sits inside a borrowed `Slice`.
+pub const RUNTIME_LENGTH_OFFSET: i64 = 0;
+
+/// Where one machine word of an `extern` call's argument list comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExternWord {
+    /// The local's own value: a scalar, or a pointer C is given as-is.
+    Value(LocalId),
+    /// The word `offset` bytes into what the local points at.
+    Indirect { base: LocalId, offset: i64 },
+}
+
+/// Which of the two argument sequences a word is placed in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExternClass {
+    Integer,
+    Float,
+}
+
+/// A call's arguments, one machine word at a time, in the order the target's
+/// argument sequences take them.
+///
+/// A Slopium callee takes each local whole, so this is the identity on its
+/// arguments. An `extern` is where the vocabulary of `D-065` turns into words:
+/// a borrowed `String` becomes the `const char *` inside it, and a borrowed
+/// `Slice` becomes the pointer and the length C expects as two consecutive
+/// arguments.
+///
+/// The words are handed to the backend's ordinary calling-convention code
+/// rather than to the builtin plan, because only the former knows about the
+/// float sequence and the stack.
+pub fn call_words(
+    module: &MirModule,
+    callee: &str,
+    args: &[LocalId],
+    arg_types: &[Type],
+) -> Vec<(ExternWord, ExternClass)> {
+    match extern_declaration(module, callee) {
+        Some(declaration) => extern_arguments(declaration, args),
+        None => args
+            .iter()
+            .zip(arg_types)
+            .map(|(arg, ty)| {
+                let class = if *ty == Type::F64 {
+                    ExternClass::Float
+                } else {
+                    ExternClass::Integer
+                };
+                (ExternWord::Value(*arg), class)
+            })
+            .collect(),
+    }
+}
+
+fn extern_arguments(declaration: &MirExtern, args: &[LocalId]) -> Vec<(ExternWord, ExternClass)> {
+    let mut words = Vec::new();
+    for (index, ty) in declaration.params.iter().enumerate() {
+        let Some(&arg) = args.get(index) else {
+            break;
+        };
+        match ty {
+            Type::F64 => words.push((ExternWord::Value(arg), ExternClass::Float)),
+            Type::Ref { inner, .. } if matches!(inner.as_ref(), Type::String) => {
+                words.push((
+                    ExternWord::Indirect {
+                        base: arg,
+                        offset: RUNTIME_POINTER_OFFSET,
+                    },
+                    ExternClass::Integer,
+                ));
+            }
+            Type::Ref { inner, .. } if matches!(inner.as_ref(), Type::Slice(_)) => {
+                words.push((
+                    ExternWord::Indirect {
+                        base: arg,
+                        offset: RUNTIME_POINTER_OFFSET,
+                    },
+                    ExternClass::Integer,
+                ));
+                words.push((
+                    ExternWord::Indirect {
+                        base: arg,
+                        offset: RUNTIME_LENGTH_OFFSET,
+                    },
+                    ExternClass::Integer,
+                ));
+            }
+            _ => words.push((ExternWord::Value(arg), ExternClass::Integer)),
+        }
+    }
+    words
 }
 
 pub fn struct_drop_symbol(name: &str) -> String {
@@ -304,6 +424,12 @@ pub fn builtin(
     arg_types: &[Type],
     result: &Type,
 ) -> Option<Vec<Step>> {
+    // An `extern` is an ordinary call, and it is checked here first because a
+    // declaration is free to take a builtin's name in a package that never
+    // reaches the builtin — the arms below match on the name alone.
+    if extern_declaration(module, callee).is_some() {
+        return None;
+    }
     let call = |symbol: &str, arguments: Vec<Argument>| Step::Invoke {
         arguments,
         tail: Tail::Call(symbol.to_owned()),
@@ -449,6 +575,7 @@ mod tests {
     fn module() -> MirModule {
         MirModule {
             functions: Vec::new(),
+            externs: Vec::new(),
             tests: Vec::new(),
             structs: Vec::new(),
             enums: vec![MirEnum {

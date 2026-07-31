@@ -112,6 +112,9 @@ for profile in dev release; do
     # different inputs.
     [[ -f "$project/run.args" || -f "$project/run.stdin" || -f "$project/run.env" ]] &&
       continue
+    # A fixture with `c-sources` needs objects `slopic` alone does not link;
+    # the FFI section below builds that shape itself, on both targets.
+    grep -q '^c-sources' "$project/Slopium.toml" && continue
     if ! "$compiler" "$entry" --source-root "$project/src" --toolchain-dependency std \
       --emit check >/dev/null 2>&1; then
       continue
@@ -232,7 +235,143 @@ done
 echo "cross-check: $float_count float-comparison comparisons ... ok"
 
 # ---------------------------------------------------------------------------
-# ABI conformance: the platform toolchain calls Slopium code and is called back.
+# ABI conformance, outward: Slopium calls C through `extern`.
+#
+# The section after this one proves the toolchain can call us. This one proves
+# we can call it, which is a different set of code — the argument classification
+# and the stack spill in each backend's `ordinary_call`, not the prologue. Same
+# reason for ten of each kind: two of each land on the stack.
+#
+# It also pins the two runtime layout facts `extern_arguments` encodes and
+# nothing else tests — a `String`'s pointer and a `Slice`'s pointer and length
+# are read at fixed byte offsets, and C here reads them as ordinary arguments.
+# ---------------------------------------------------------------------------
+
+ffi_dir="$result_dir/ffi"
+mkdir -p "$ffi_dir"
+
+cat >"$ffi_dir/callee.c" <<'EOF'
+/* Unmangled names, because that is the whole point: an `extern` asks the
+   linker for the name C gave the function, not for `sl_fn_<hex>`. */
+#include <stdint.h>
+#include <string.h>
+
+typedef struct { uint64_t len; uint64_t cap; char *ptr; } SlString;
+SlString *sl_rt_string_new(const char *bytes, uint64_t len);
+
+int64_t probe_ten(int64_t a, int64_t b, int64_t c, int64_t d, int64_t e,
+                  int64_t f, int64_t g, int64_t h, int64_t i, int64_t j) {
+    return a + b + c + d + e + f + g + h + i + j;
+}
+
+double probe_ten_doubles(double a, double b, double c, double d, double e,
+                         double f, double g, double h, double i, double j) {
+    return a + b + c + d + e + f + g + h + i + j;
+}
+
+/* Ten of each, interleaved: the two sequences fill independently, so reading
+   them as one is invisible to every other case here. */
+int64_t probe_mixed(int64_t a1, double d1, int64_t a2, double d2,
+                    int64_t a3, double d3, int64_t a4, double d4,
+                    int64_t a5, double d5, int64_t a6, double d6,
+                    int64_t a7, double d7, int64_t a8, double d8,
+                    int64_t a9, double d9, int64_t a10, double d10) {
+    double floats = d1 + d2 + d3 + d4 + d5 + d6 + d7 + d8 + d9 + d10;
+    int64_t integers = a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8 + a9 + a10;
+    return integers * 100 + (int64_t)floats;
+}
+
+/* A narrow return leaves the upper half of the result register undefined. */
+int32_t probe_narrow(int32_t value) { return -value; }
+
+int64_t probe_strlen(const char *text) { return (int64_t)strlen(text); }
+
+int64_t probe_slice(const int64_t *values, int64_t len) {
+    int64_t total = 0;
+    for (int64_t index = 0; index < len; index++) {
+        total += values[index] * (index + 1);
+    }
+    return total;
+}
+
+SlString *probe_string(void) { return sl_rt_string_new("from C", 6); }
+EOF
+
+cat >"$ffi_dir/ffi.slp" <<'EOF'
+(extern "probe_ten" (probe-ten (a i64) (b i64) (c i64) (d i64) (e i64) (f i64) (g i64) (h i64) (i i64) (j i64)) -> i64)
+
+(extern "probe_ten_doubles" (probe-ten-doubles (a f64) (b f64) (c f64) (d f64) (e f64) (f f64) (g f64) (h f64) (i f64) (j f64)) -> f64)
+
+(extern "probe_mixed" (probe-mixed (a1 i64) (d1 f64) (a2 i64) (d2 f64) (a3 i64) (d3 f64) (a4 i64) (d4 f64) (a5 i64) (d5 f64) (a6 i64) (d6 f64) (a7 i64) (d7 f64) (a8 i64) (d8 f64) (a9 i64) (d9 f64) (a10 i64) (d10 f64)) -> i64)
+
+(extern "probe_narrow" (probe-narrow (value i32)) -> i32)
+
+(extern "probe_strlen" (probe-strlen (text (& String))) -> i64)
+
+(extern "probe_slice" (probe-slice (values (& (Slice i64)))) -> i64)
+
+(extern "probe_string" (probe-string) -> String)
+
+(fn main () -> i32
+  (println (probe-ten 1 2 3 4 5 6 7 8 9 10))
+  (let total (probe-ten-doubles 1.5 2.5 3.5 4.5 5.5 6.5 7.5 8.5 9.5 10.5))
+  (println (= total 60.0))
+  (println (probe-mixed 1 1.5 2 2.5 3 3.5 4 4.5 5 5.5 6 6.5 7 7.5 8 8.5 9 9.5 10 10.5))
+  (println (probe-narrow 2000000000))
+  (let text "borrowed")
+  (println (probe-strlen (& text)))
+  (let values (array 10 20 30 40))
+  (let view (slice (& values) 1 4))
+  (println (probe-slice (& view)))
+  (let greeting (probe-string))
+  (println (& greeting))
+  0)
+EOF
+
+cat >"$ffi_dir/expected.stdout" <<'EOF'
+55
+1
+5560
+-2000000000
+8
+200
+from C
+exit status: 0
+EOF
+
+ffi_count=0
+for target in host "$cross_target"; do
+  for profile in dev release; do
+    opt=()
+    [ "$profile" = release ] && opt=(--optimize)
+    prefix="$ffi_dir/$target-$profile"
+    if [[ "$target" == host ]]; then
+      "$compiler" "$ffi_dir/ffi.slp" --emit obj "${opt[@]}" --output "$prefix.o" >/dev/null
+      cc "$prefix.o" "$ffi_dir/callee.c" "$workspace_dir/runtime/slop_rt.c" \
+        -o "$prefix" >"$prefix.link" 2>&1 ||
+        fail "the host FFI program did not link ($profile)"
+      capture "$prefix.out" "$prefix"
+    else
+      "$compiler" "$ffi_dir/ffi.slp" --emit obj "${opt[@]}" --target "$target" \
+        --cc "$cross_cc" --output "$prefix.o" >/dev/null
+      "$cross_cc" "$prefix.o" "$ffi_dir/callee.c" "$workspace_dir/runtime/slop_rt.c" \
+        -o "$prefix" >"$prefix.link" 2>&1 ||
+        fail "the $target FFI program did not link ($profile)"
+      capture "$prefix.out" "$qemu" "$prefix"
+    fi
+    if ! cmp --silent "$ffi_dir/expected.stdout" "$prefix.out"; then
+      echo "cross-check: FFI mismatch on $target ($profile)" >&2
+      diff -u "$ffi_dir/expected.stdout" "$prefix.out" >&2 || true
+      exit 1
+    fi
+    ffi_count=$((ffi_count + 1))
+  done
+done
+
+echo "cross-check: $ffi_count FFI conformance programs ... ok"
+
+# ---------------------------------------------------------------------------
+# ABI conformance, inward: the platform toolchain calls Slopium code.
 #
 # Everything here is deliberately past a register boundary. Ten integers so two
 # arrive on the stack, ten doubles so two do, and a mixture, because AAPCS64
@@ -367,4 +506,5 @@ for target in host "$cross_target"; do
 done
 
 echo "cross-check: $abi_count ABI conformance programs ... ok"
+
 echo "cross-check: all cross-backend checks passed"

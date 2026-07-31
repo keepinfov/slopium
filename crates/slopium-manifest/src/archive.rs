@@ -381,6 +381,20 @@ pub fn package_entries(project: &Project) -> Result<Vec<Entry>, String> {
             "`{MANIFEST_FILE}` is excluded from the package, but an archive without a manifest is not a package"
         ));
     }
+    // The default walk carries `c-sources` because it carries everything, but
+    // an explicit `include` can leave them out, and the result would be a
+    // package whose every consumer fails at the link with an undefined symbol
+    // (`D-075`). Say it here, where the author is the one reading.
+    for c_source in &project.c_sources {
+        let path = format!("{prefix}/{}", c_source.display());
+        if !entries.iter().any(|entry| entry.path == path) {
+            return Err(format!(
+                "`c-sources` names `{}`, which the package does not carry; \
+                 add it to `include`",
+                c_source.display()
+            ));
+        }
+    }
     entries.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(entries)
 }

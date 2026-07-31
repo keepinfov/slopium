@@ -1,0 +1,2 @@
+(extern "hal_take" (hal-take (values (List i64))) -> i64)
+(fn main () -> i32 0)

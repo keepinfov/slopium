@@ -508,7 +508,7 @@ dependencies = [
 
 [[package]]
 name = "slopic"
-version = "0.4.6"
+version = "0.5.0"
 dependencies = [
  "clap",
  "clap_complete",
@@ -518,7 +518,7 @@ dependencies = [
 
 [[package]]
 name = "slopic-core"
-version = "0.4.6"
+version = "0.5.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -526,7 +526,7 @@ dependencies = [
 
 [[package]]
 name = "slopium"
-version = "0.4.6"
+version = "0.5.0"
 dependencies = [
  "clap",
  "clap_complete",
@@ -539,7 +539,7 @@ dependencies = [
 
 [[package]]
 name = "slopium-lsp"
-version = "0.4.6"
+version = "0.5.0"
 dependencies = [
  "crossbeam-channel",
  "lsp-server",
@@ -553,7 +553,7 @@ dependencies = [
 
 [[package]]
 name = "slopium-manifest"
-version = "0.4.6"
+version = "0.5.0"
 dependencies = [
  "ed25519-dalek",
  "serde",

@@ -51,6 +51,12 @@ The manifest and the source tree. Left out, always:
   graph and its own lock says nothing about how it will resolve there
   (`D-044`). An executable keeps its lock.
 
+Everything else travels, which includes the C a package's `extern` declarations
+need. `[package] c-sources` names those files, they are relative to the package
+root and may not leave it (`SL1100`), and the default walk therefore always
+carries them. An `include` that leaves one out is refused rather than published:
+a package missing its C fails at every consumer's link, not at its author's.
+
 `[package] exclude` adds to that list; `[package] include` replaces the whole
 question with an explicit answer. Giving both is an error — `include` already
 says what the package is. `Slopium.toml` is always packaged; an archive without

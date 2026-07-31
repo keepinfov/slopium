@@ -1,0 +1,2 @@
+Build and execute this fixture with the release MIR pass too: the inliner must
+leave an extern call alone at every optimization level.

@@ -1,0 +1,4 @@
+extern-arity.slp:3:12: error[SL0200]: `hal-add` expects 2 arguments, found 1
+  |
+ 3 |   (println (hal-add 1))
+  |            ^^^^^^^^^^^

@@ -133,11 +133,8 @@ pub struct CompilerInfo {
 /// trampolines the compiler emits under the same option, so a `panic = "abort"`
 /// binary carries no error strings at all.
 pub fn cc_flags(strip: bool, panic_abort: bool) -> Vec<&'static str> {
-    let mut flags = vec![
-        "-ffunction-sections",
-        "-fdata-sections",
-        "-Wl,--gc-sections",
-    ];
+    let mut flags = cc_compile_flags();
+    flags.push("-Wl,--gc-sections");
     if strip {
         flags.push("-Wl,--strip-all");
     }
@@ -145,6 +142,16 @@ pub fn cc_flags(strip: bool, panic_abort: bool) -> Vec<&'static str> {
         flags.push("-DSLOPIUM_PANIC_ABORT");
     }
     flags
+}
+
+/// The half of [`cc_flags`] that survives `cc -c`.
+///
+/// A package's `c-sources` are compiled to objects of their own and handed to
+/// the same link, so they need the per-function sections `--gc-sections` prunes
+/// against — but not the `-Wl,` flags, which a compile-only invocation has no
+/// linker to pass on to (`D-075`).
+pub fn cc_compile_flags() -> Vec<&'static str> {
+    vec!["-ffunction-sections", "-fdata-sections"]
 }
 
 pub fn compiler_info() -> CompilerInfo {

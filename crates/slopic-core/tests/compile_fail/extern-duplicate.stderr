@@ -1,0 +1,4 @@
+extern-duplicate.slp:2:1: error[SL0200]: `hal-add` is defined more than once
+  |
+ 2 | (extern "hal_add" (hal-add (a i64) (b i64)) -> i64)
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

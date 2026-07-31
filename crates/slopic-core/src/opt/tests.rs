@@ -230,6 +230,31 @@ fn inlines_a_small_leaf_function() {
 }
 
 #[test]
+fn does_not_inline_an_extern_even_when_a_body_appears_under_its_name() {
+    // Opacity today rests on an extern having no `MirFunction`. Planting one
+    // under its name is the future this guards against: the body a later pass
+    // might find is not the body the linker will call (`D-073`).
+    let source = r#"
+        (extern "hal_double" (hal-double (n i64)) -> i64)
+        (fn probe ((n i64)) -> i64 (hal-double n))
+        (fn main () -> i32 0)
+    "#;
+    let mut module = release(source);
+    let name = module.externs[0].name.clone();
+    let mut impostor = function(&module, "probe").clone();
+    impostor.name = name.clone();
+    module.functions.push(impostor);
+
+    optimize("test.slp", &mut module).unwrap();
+    let probe = function(&module, "probe");
+    assert!(
+        calls(probe, &name),
+        "an extern call must survive inlining: {:#?}",
+        instructions(probe)
+    );
+}
+
+#[test]
 fn does_not_inline_a_recursive_function() {
     let source = r#"
         (fn countdown ((n i64)) -> i64

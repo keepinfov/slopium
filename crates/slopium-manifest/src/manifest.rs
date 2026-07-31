@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::marker::PhantomData;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// The name of a manifest file, everywhere it is looked for.
 pub const MANIFEST_FILE: &str = "Slopium.toml";
@@ -59,6 +59,13 @@ pub struct Package {
     /// What the archive leaves out, on top of what it never carries.
     #[serde(default)]
     pub exclude: Vec<String>,
+    /// C files compiled and linked with this package, for the `extern`
+    /// declarations its modules make. Paths are relative to the package root
+    /// and must stay inside it (`D-075`). Not inheritable: they are the
+    /// package's own files, and a workspace has no root to resolve them
+    /// against.
+    #[serde(default, rename = "c-sources")]
+    pub c_sources: Vec<PathBuf>,
 }
 
 /// `[workspace]`: the packages that share one lock, one `target/`, and one
@@ -551,6 +558,8 @@ impl RawManifest {
             );
         }
         let config = load_local_config(&self.root)?;
+        let c_sources = validate_c_sources(&package.c_sources)
+            .map_err(|error| format!("`{}`: {error}", self.manifest_path.display()))?;
         Ok(Project {
             root: self.root,
             manifest_path: self.manifest_path,
@@ -561,9 +570,42 @@ impl RawManifest {
             version,
             entry: package.entry,
             source: package.source,
+            c_sources,
             dependencies,
         })
     }
+}
+
+/// Checks that every `c-sources` path names a file inside the package.
+///
+/// The check is lexical and happens at parse time rather than at build time,
+/// because a path that leaves the package is a packaging bug — the archive
+/// walks the package root and would ship a manifest naming a file it does not
+/// carry, which is a build that works for its author and nobody else
+/// (`D-075`).
+fn validate_c_sources(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
+    for path in paths {
+        let display = path.display();
+        if path.is_absolute() {
+            return Err(format!(
+                "SL1100: `c-sources` entry `{display}` is absolute; \
+                 it must be relative to the package root"
+            ));
+        }
+        if path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
+        {
+            return Err(format!(
+                "SL1100: `c-sources` entry `{display}` leaves the package; \
+                 a package may only compile its own files"
+            ));
+        }
+        if path.as_os_str().is_empty() {
+            return Err("SL1100: `c-sources` holds an empty path".into());
+        }
+    }
+    Ok(paths.to_vec())
 }
 
 /// A package: its manifest, where it was read from, and `[package]` normalized.
@@ -579,6 +621,8 @@ pub struct Project {
     pub version: Version,
     pub entry: Option<PathBuf>,
     pub source: Option<PathBuf>,
+    /// C files this package compiles and links, relative to [`Self::root`].
+    pub c_sources: Vec<PathBuf>,
     /// `[dependencies]` with workspace inheritance applied.
     pub dependencies: BTreeMap<String, DependencySpec>,
 }
@@ -741,6 +785,32 @@ mod tests {
             package.version.resolve("version", None).unwrap(),
             &Version::new(0, 1, 0)
         );
+    }
+
+    #[test]
+    fn c_sources_are_read_and_kept_inside_the_package() {
+        let parsed = manifest(
+            r#"
+                [package]
+                name = "hello"
+                version = "0.1.0"
+                entry = "src/main.slp"
+                c-sources = ["c/hal.c"]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            parsed.package.unwrap().c_sources,
+            [PathBuf::from("c/hal.c")]
+        );
+
+        // A path that leaves the package would name a file the archive does not
+        // carry, so the build would work for its author and nobody else
+        // (`D-075`).
+        for escape in ["../elsewhere/hal.c", "/etc/hal.c"] {
+            let error = validate_c_sources(&[PathBuf::from(escape)]).unwrap_err();
+            assert!(error.starts_with("SL1100"), "{escape}: {error}");
+        }
     }
 
     #[test]

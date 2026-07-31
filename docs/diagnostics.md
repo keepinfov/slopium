@@ -97,7 +97,8 @@ The manifest, the workspace, the graph, the lock and the build:
 - `SL1080`: `Slopium.lock` is malformed;
 - `SL1081`: `Slopium.lock` is a format version this toolchain does not write;
 - `SL1082`: `--locked` was given and the lock would have to change;
-- `SL1090`: the compiler and the manager disagree about the protocol version.
+- `SL1090`: the compiler and the manager disagree about the protocol version;
+- `SL1100`: a `c-sources` entry is absolute or leaves the package.
 
 Resolution is spread over two families: `SL103x` keeps the registry errors that
 happen during resolution, because a stable code that moves is not stable

@@ -1,0 +1,4 @@
+extern-generic.slp:1:38: error[SL0100]: an `extern` cannot be generic: the C boundary has a closed set of types
+  |
+ 1 | (extern "hal_identity" (hal-identity (T) (value T)) -> T)
+  |                                      ^^^

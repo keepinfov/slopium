@@ -888,7 +888,7 @@ fn index_workspace_symbols(
         };
         for declaration in &module.declarations {
             let kind = match declaration.kind {
-                DeclarationKind::Function => AnalysisSymbolKind::Function,
+                DeclarationKind::Function | DeclarationKind::Extern => AnalysisSymbolKind::Function,
                 DeclarationKind::Struct => AnalysisSymbolKind::Struct,
                 DeclarationKind::Enum => AnalysisSymbolKind::Enum,
             };

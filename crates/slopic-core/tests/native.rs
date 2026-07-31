@@ -581,6 +581,114 @@ fn mixed_register_and_stack_arguments_round_trip() {
 }
 
 #[test]
+fn a_double_result_survives_a_spilled_destination() {
+    // Ten double arguments hold enough locals live that the result has nowhere
+    // to live but the frame, which is the one case the `xmm0` unload used to
+    // assume away.
+    let (directory, executable) = native_program(
+        r#"
+        (fn total ((a f64) (b f64) (c f64) (d f64) (e f64)
+                   (f f64) (g f64) (h f64) (i f64) (j f64)) -> f64
+          (+ (+ (+ (+ a b) (+ c d)) (+ (+ e f) (+ g h))) (+ i j)))
+        (fn main () -> i32
+          (let sum (total 1.0 2.0 3.0 4.0 5.0 6.0 7.0 8.0 9.0 10.0))
+          (if (= sum 55.0) (println 1) (println 0))
+          0)
+        "#,
+    );
+    let output = Command::new(executable).output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "1\n");
+    fs::remove_dir_all(directory).unwrap();
+}
+
+/// The reverse of [`c_caller_agrees_with_slopium_stack_parameter_layout`]:
+/// Slopium calls C, and the two runtime layout facts `extern_arguments`
+/// encodes — a `String`'s pointer and a `Slice`'s pointer and length, read at
+/// fixed byte offsets — are checked by C reading them as ordinary arguments.
+#[test]
+fn an_extern_call_reaches_c_with_the_arguments_it_declared() {
+    let id = NEXT_TEST.fetch_add(1, Ordering::Relaxed);
+    let directory = std::env::temp_dir().join(format!("slopic-ffi-{}-{id}", std::process::id()));
+    if directory.exists() {
+        fs::remove_dir_all(&directory).unwrap();
+    }
+    fs::create_dir_all(&directory).unwrap();
+    let source = r#"
+        (extern "probe_narrow" (probe-narrow (value i32)) -> i32)
+        (extern "probe_strlen" (probe-strlen (text (& String))) -> i64)
+        (extern "probe_slice" (probe-slice (values (& (Slice i64)))) -> i64)
+        (extern "probe_string" (probe-string) -> String)
+        (fn main () -> i32
+          (println (probe-narrow 2000000000))
+          (let text "borrowed")
+          (println (probe-strlen (& text)))
+          (let values (array 10 20 30 40))
+          (let view (slice (& values) 1 4))
+          (println (probe-slice (& view)))
+          (let greeting (probe-string))
+          (println (& greeting))
+          0)
+    "#;
+    let module = compile_to_mir("ffi.slp", source, &CompileOptions::default()).unwrap();
+    let assembly = emit_assembly(
+        "ffi.slp",
+        &module,
+        &CodegenOptions {
+            target: DEFAULT_TARGET.into(),
+            test_harness: false,
+            emit_entrypoint: true,
+            debug: None,
+            panic_abort: false,
+        },
+    )
+    .unwrap();
+    let assembly_path = directory.join("ffi.s");
+    let runtime_path = directory.join("runtime.c");
+    let callee_path = directory.join("callee.c");
+    let executable = directory.join("ffi");
+    fs::write(&assembly_path, assembly).unwrap();
+    fs::write(&runtime_path, RUNTIME_SOURCE).unwrap();
+    fs::write(
+        &callee_path,
+        r#"
+        #include <stdint.h>
+        #include <string.h>
+        typedef struct { uint64_t len; uint64_t cap; char *ptr; } SlString;
+        SlString *sl_rt_string_new(const char *bytes, uint64_t len);
+
+        int32_t probe_narrow(int32_t value) { return -value; }
+        int64_t probe_strlen(const char *text) { return (int64_t)strlen(text); }
+        int64_t probe_slice(const int64_t *values, int64_t len) {
+            int64_t total = 0;
+            for (int64_t index = 0; index < len; index++) {
+                total += values[index] * (index + 1);
+            }
+            return total;
+        }
+        SlString *probe_string(void) { return sl_rt_string_new("from C", 6); }
+        "#,
+    )
+    .unwrap();
+    let status = Command::new("cc")
+        .arg("-o")
+        .arg(&executable)
+        .arg(&assembly_path)
+        .arg(&runtime_path)
+        .arg(&callee_path)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let output = Command::new(&executable).output().unwrap();
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "-2000000000\n8\n200\nfrom C\n"
+    );
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn c_caller_agrees_with_slopium_stack_parameter_layout() {
     let id = NEXT_TEST.fetch_add(1, Ordering::Relaxed);
     let directory = std::env::temp_dir().join(format!("slopic-c-abi-{}-{id}", std::process::id()));

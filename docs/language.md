@@ -174,3 +174,49 @@ environment variable into an owned `String`.
 `args-len` excludes the executable name; `arg` returns an owned argument copy.
 Unrecoverable runtime errors print a normalized message and exit with status
 101.
+
+## Calling C
+
+An `extern` declaration names a C function and gives it a Slopium signature.
+The string is the symbol the linker is asked for; the name after it is the one
+Slopium calls, and it is an ordinary module-level item — private by default,
+`export`able, `take`able, and canonicalized to `module:name`.
+
+```lisp
+(extern "strlen" (c-strlen (text (& String))) -> i64)
+(extern "hal_scale" (hal-scale (value f64) (factor f64)) -> f64)
+
+(fn main () -> i32
+  (let text "borrowed")
+  (println (c-strlen (& text)))
+  0)
+```
+
+The type vocabulary is closed. A parameter is `i32`, `i64`, `f64`, `bool`,
+`(& String)`, or `(& (Slice T))`. A return is `unit`, one of those scalars, or
+an owned `String`. Anything else is refused at the declaration, and an `extern`
+cannot be generic: there is nothing a type parameter could stand for.
+
+An `extern` borrows and never moves. A `(& String)` arrives as a
+NUL-terminated `const char *`; a `(& (Slice T))` arrives as two arguments, the
+element pointer and then the element count. The borrow ends when the call
+returns, so C must copy anything it intends to keep. To return a `String`, C
+allocates one with the runtime's `sl_rt_string_new(const char *, uint64_t)`;
+the caller owns it and drops it as it would any other.
+
+Two things the vocabulary does not say for you. C's `size_t`, `unsigned` and
+`long` have no Slopium spelling: they are declared as `i64` (or `i32`), and a
+value that does not fit is your mistake to avoid, not one the compiler can
+catch. And a variadic C function may not be declared at all — the System V ABI
+wants the vector-register count in `al` for one, and nothing here sets it.
+
+The C itself is the package's, listed in `Slopium.toml`:
+
+```toml
+[package]
+c-sources = ["c/hal.c"]
+```
+
+Those paths are relative to the package root and may not leave it. They are
+compiled with the same `cc` the link uses, ship in the package archive, and
+their contents are part of the build cache key, so editing one rebuilds.

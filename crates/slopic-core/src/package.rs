@@ -57,6 +57,7 @@ pub enum DeclarationKind {
     Function,
     Struct,
     Enum,
+    Extern,
 }
 
 #[derive(Clone, Debug)]
@@ -232,12 +233,14 @@ pub fn analyze_package(input: &PackageInput, options: &CompileOptions) -> Packag
         exports: Vec::new(),
         takes: Vec::new(),
         functions: Vec::new(),
+        externs: Vec::new(),
         tests: Vec::new(),
         structs: Vec::new(),
         enums: Vec::new(),
     };
     for (unit, source) in units.iter_mut().zip(&input.files) {
         merged.functions.append(&mut unit.program.functions);
+        merged.externs.append(&mut unit.program.externs);
         // A dependency's tests belong to the dependency. Collecting them here
         // would run another package's suite from this one's binary, and — since
         // codegen only emits the test bodies owned by the module it is
@@ -353,7 +356,25 @@ fn collect_declarations(
                     .iter()
                     .map(|item| (&item.name, DeclarationKind::Enum, item.span)),
             )
+            .chain(
+                unit.program
+                    .externs
+                    .iter()
+                    .map(|item| (&item.name, DeclarationKind::Extern, item.span)),
+            )
         {
+            // A builtin name is never rewritten to a canonical one, so a call
+            // to it reaches the builtin and the declaration below it is
+            // unreachable. For an `extern` that is worth refusing: the whole
+            // point of the declaration is the call.
+            if kind == DeclarationKind::Extern && is_builtin(name) {
+                diagnostics.push(Diagnostic::error(
+                    codes::MODULE,
+                    &unit.path,
+                    span,
+                    format!("`{name}` is a builtin, and an `extern` cannot take its name"),
+                ));
+            }
             let canonical =
                 if module == entry_module && name == "main" && kind == DeclarationKind::Function {
                     "main".to_owned()
@@ -644,6 +665,14 @@ impl Resolver<'_> {
             }
             self.rewrite_type(&mut function.return_type, function.span, diagnostics);
             self.rewrite_expr(&mut function.body, diagnostics);
+        }
+        for declaration in &mut program.externs {
+            let original = declaration.name.clone();
+            declaration.name = self.unit.declarations[&original].canonical.clone();
+            for parameter in &mut declaration.params {
+                self.rewrite_type(&mut parameter.ty, parameter.span, diagnostics);
+            }
+            self.rewrite_type(&mut declaration.return_type, declaration.span, diagnostics);
         }
         for test in &mut program.tests {
             test.name = format!("{}:{}", self.unit.module, test.name);
@@ -964,6 +993,13 @@ fn collect_qualified_names<'a>(program: &'a Program, output: &mut Vec<&'a str>) 
                 .for_each(|field| ty(&field.ty, output));
         }
     }
+    for declaration in &program.externs {
+        declaration
+            .params
+            .iter()
+            .for_each(|parameter| ty(&parameter.ty, output));
+        ty(&declaration.return_type, output);
+    }
     for test in &program.tests {
         expr(&test.body, output);
     }
@@ -1121,6 +1157,13 @@ fn shift_program(program: &mut Program, base: usize) {
         }
         shift_type(&mut function.return_type, base);
         shift_expr(&mut function.body, base);
+    }
+    for declaration in &mut program.externs {
+        shift_span(&mut declaration.span, base);
+        shift_span(&mut declaration.symbol_span, base);
+        for parameter in &mut declaration.params {
+            shift_span(&mut parameter.span, base);
+        }
     }
     for test in &mut program.tests {
         shift_span(&mut test.span, base);

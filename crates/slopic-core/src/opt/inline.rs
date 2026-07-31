@@ -14,6 +14,13 @@
 //!
 //! Runtime builtins (`println`, `push`, …) have no `MirFunction` at all; they
 //! are lowered directly by the backend and are skipped here by lookup failure.
+//!
+//! An `extern` is body-less for a stronger reason: its body is in another
+//! language, in another object, and this compiler will never see it. Lookup
+//! failure would skip it too, but that is an accident of where the bodies come
+//! from, and `D-073` makes it a rule instead — a declared extern is refused by
+//! name, so nothing a later change does to `collect_candidates` can start
+//! inlining across the C boundary.
 
 use crate::mir::{
     BasicBlock, BlockId, Instruction, LocalId, MirFunction, MirLocal, MirModule, Statement,
@@ -37,15 +44,21 @@ pub(crate) fn run(module: &mut MirModule) -> bool {
         return false;
     }
 
+    let opaque: HashSet<String> = module
+        .externs
+        .iter()
+        .map(|declaration| declaration.name.clone())
+        .collect();
+
     let mut changed = false;
     for index in 0..module.functions.len() {
         let mut function = std::mem::replace(&mut module.functions[index], placeholder());
-        changed |= inline_into(&mut function, &candidates);
+        changed |= inline_into(&mut function, &candidates, &opaque);
         module.functions[index] = function;
     }
     for index in 0..module.tests.len() {
         let mut function = std::mem::replace(&mut module.tests[index].function, placeholder());
-        changed |= inline_into(&mut function, &candidates);
+        changed |= inline_into(&mut function, &candidates, &opaque);
         module.tests[index].function = function;
     }
     changed
@@ -141,14 +154,19 @@ fn recursive_functions(module: &MirModule) -> HashSet<String> {
     recursive
 }
 
-fn inline_into(caller: &mut MirFunction, candidates: &HashMap<String, MirFunction>) -> bool {
+fn inline_into(
+    caller: &mut MirFunction,
+    candidates: &HashMap<String, MirFunction>,
+    opaque: &HashSet<String>,
+) -> bool {
     let mut changed = false;
     let mut growth = 0usize;
 
     // One call site per sweep: splicing renumbers nothing but does append
     // blocks, so re-scanning keeps the logic simple and obviously correct.
     loop {
-        let Some((block, position, callee_name)) = find_call_site(caller, candidates) else {
+        let Some((block, position, callee_name)) = find_call_site(caller, candidates, opaque)
+        else {
             return changed;
         };
         let callee = &candidates[&callee_name];
@@ -164,6 +182,7 @@ fn inline_into(caller: &mut MirFunction, candidates: &HashMap<String, MirFunctio
 fn find_call_site(
     caller: &MirFunction,
     candidates: &HashMap<String, MirFunction>,
+    opaque: &HashSet<String>,
 ) -> Option<(BlockId, usize, String)> {
     for (block, basic) in caller.blocks.iter().enumerate() {
         for (position, statement) in basic.statements.iter().enumerate() {
@@ -171,6 +190,11 @@ fn find_call_site(
                 continue;
             };
             if callee == &caller.name {
+                continue;
+            }
+            // The body is in C. There is nothing here to splice, and saying so
+            // by name does not depend on `candidates` staying body-only.
+            if opaque.contains(callee) {
                 continue;
             }
             if owner(callee) != owner(&caller.name) {

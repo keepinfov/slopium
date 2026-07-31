@@ -44,7 +44,106 @@ fn verify_module_after(file: &str, module: &MirModule, phase: Option<&str>) -> V
     for test in &module.tests {
         verify_function(file, &test.function, phase, &mut errors);
     }
+    for function in module
+        .functions
+        .iter()
+        .chain(module.tests.iter().map(|test| &test.function))
+    {
+        verify_extern_calls(file, module, function, phase, &mut errors);
+    }
     errors
+}
+
+/// Checks every call that crosses into C.
+///
+/// Sema already refuses a declaration outside the vocabulary and an argument
+/// that would move (`D-065`), but sema is one pass and this is the invariant
+/// the backends actually rely on: `extern_arguments` reads a `String` or a
+/// `Slice` through a fixed offset and hands the words to the C ABI, so a
+/// mismatched or owned argument type here is a wrong call, not a type error.
+fn verify_extern_calls(
+    file: &str,
+    module: &MirModule,
+    function: &MirFunction,
+    phase: Option<&str>,
+    errors: &mut Vec<Diagnostic>,
+) {
+    let after = phase.map_or(String::new(), |phase| format!(" after {phase}"));
+    let mut report = |message: String| {
+        errors.push(Diagnostic::error(
+            codes::INTERNAL,
+            file,
+            function.span,
+            format!(
+                "internal compiler error: MIR verification failed{after} in `{}`: {message}; \
+                 this is a compiler bug",
+                function.name
+            ),
+        ));
+    };
+
+    for (index, block) in function.blocks.iter().enumerate() {
+        for (position, instruction) in block.instructions().enumerate() {
+            let Instruction::Call {
+                callee,
+                arg_types,
+                result,
+                ..
+            } = instruction
+            else {
+                continue;
+            };
+            let Some(declaration) = crate::lowering::extern_declaration(module, callee) else {
+                continue;
+            };
+            let where_ = format!("block {index} instruction {position} calls extern `{callee}`");
+            if arg_types.len() != declaration.params.len() {
+                report(format!(
+                    "{where_} with {} arguments but it is declared with {}",
+                    arg_types.len(),
+                    declaration.params.len()
+                ));
+                continue;
+            }
+            for (argument, (actual, declared)) in
+                arg_types.iter().zip(&declaration.params).enumerate()
+            {
+                if actual != declared {
+                    report(format!(
+                        "{where_} passing `{actual:?}` as argument {argument}, declared \
+                         `{declared:?}`"
+                    ));
+                }
+                if !crossable_argument(actual) {
+                    report(format!(
+                        "{where_} passing `{actual:?}` as argument {argument}, which the C \
+                         boundary cannot express, or which would move an owned value into C"
+                    ));
+                }
+            }
+            if result != &declaration.result {
+                report(format!(
+                    "{where_} taking `{result:?}` as the result, declared `{:?}`",
+                    declaration.result
+                ));
+            }
+        }
+    }
+}
+
+/// The argument types an extern call may carry: the `D-065` vocabulary, which
+/// is every type that is either `Copy` or already a borrow.
+fn crossable_argument(ty: &Type) -> bool {
+    match ty {
+        Type::I32 | Type::I64 | Type::F64 | Type::Bool => true,
+        Type::Ref {
+            mutable: false,
+            inner,
+        } => {
+            matches!(inner.as_ref(), Type::String | Type::Slice(_))
+        }
+        _ => false,
+    }
 }
 
 fn verify_function(
@@ -365,6 +464,7 @@ mod tests {
     fn module_with(function: MirFunction) -> MirModule {
         MirModule {
             functions: vec![function],
+            externs: Vec::new(),
             tests: Vec::new(),
             structs: Vec::new(),
             enums: Vec::new(),
@@ -414,6 +514,27 @@ mod tests {
         "#;
         let mir = compile_to_mir("test.slp", source, &CompileOptions::default()).unwrap();
         assert_eq!(verify_module("test.slp", &mir), Vec::new());
+    }
+
+    #[test]
+    fn an_extern_call_must_agree_with_its_declaration() {
+        let source = r#"
+            (extern "hal_add" (hal-add (a i64) (b i64)) -> i64)
+            (fn main () -> i32 (println (hal-add 20 22)) 0)
+        "#;
+        let mut mir = compile_to_mir("test.slp", source, &CompileOptions::default()).unwrap();
+        assert_eq!(verify_module("test.slp", &mir), Vec::new());
+
+        // An owned `String` is outside the vocabulary and would move into C,
+        // which is exactly what the backends must never be handed (`D-065`).
+        mir.externs[0].params[1] = Type::String;
+        let errors = verify_module("test.slp", &mir);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("declared")),
+            "a mismatched extern argument must be reported: {errors:?}"
+        );
     }
 
     /// The verifier's real risk is a false positive on valid code, so check it

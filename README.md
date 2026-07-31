@@ -330,6 +330,7 @@ source = "src"
 entry = "src/main.slp"
 # exclude = ["benchmarks", "**/*.png"]   # что не попадёт в архив
 # include = ["src/**/*.slp"]             # или наоборот: только это
+# c-sources = ["c/hal.c"]                # C для объявлений `extern`
 
 [dependencies]
 std = { toolchain = true }
