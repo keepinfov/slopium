@@ -107,7 +107,7 @@ assert_patterns \
   <(printf '%s\n' "$host_target (installed, default)" "$cross_target (installed)") \
   "$result_dir/targets.stdout"
 env SLOPIC="$compiler" "$manager" compiler >"$result_dir/compiler.stdout"
-assert_patterns <(printf '%s\n' '"protocol": 7') "$result_dir/compiler.stdout"
+assert_patterns <(printf '%s\n' '"protocol": 8') "$result_dir/compiler.stdout"
 
 generated_project="$result_dir/generated-project"
 env SLOPIC="$compiler" "$manager" new generated-project --path "$generated_project" \

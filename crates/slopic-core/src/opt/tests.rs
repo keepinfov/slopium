@@ -349,7 +349,7 @@ fn the_shipped_fixture_corpus_still_optimizes_cleanly() {
             optimize: true,
             ..CompileOptions::default()
         };
-        for (item, path) in crate::std_language_items() {
+        for (item, path) in crate::language_items_of(crate::STD_PACKAGE) {
             let slot = match item.as_str() {
                 "option" => &mut options.language_items.option,
                 "result" => &mut options.language_items.result,

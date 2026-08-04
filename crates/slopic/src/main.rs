@@ -29,6 +29,13 @@ struct Cli {
     #[arg(long)]
     no_std: bool,
 
+    /// Build for a target with no C library under it: no `main` wrapper, only
+    /// the core half of the runtime, and `core` as the default library for a
+    /// lone file. The program supplies `sl_rt_alloc`, `sl_rt_free`,
+    /// `sl_rt_abort` and `sl_rt_panic` itself (`D-080`, `D-081`).
+    #[arg(long)]
+    freestanding: bool,
+
     #[arg(long = "language-item", value_name = "NAME=PATH")]
     language_items: Vec<String>,
 
@@ -71,8 +78,10 @@ struct Cli {
     #[arg(long)]
     strip: bool,
 
-    #[arg(long)]
-    runtime: Option<PathBuf>,
+    /// Link this C file as the runtime instead of the bundled one. Repeatable:
+    /// the runtime is more than one translation unit since `D-066`.
+    #[arg(long = "runtime", value_name = "FILE")]
+    runtimes: Vec<PathBuf>,
 
     #[arg(long, default_value = "cc")]
     cc: String,
@@ -171,9 +180,29 @@ fn main() {
     }
     // The language items the bundled library supplies are filled in by the
     // compiler, from the library, for whoever asked for it.
+    let options = CompileOptions {
+        target: cli.target,
+        test_harness: cli.test,
+        optimize: cli.optimize,
+        codegen_module: cli.codegen_module,
+        language_items,
+        validate_entry_point: !cli.library,
+        debug: cli.debug,
+        panic_abort: cli.panic_abort,
+        strip: cli.strip,
+        environment: cli
+            .freestanding
+            .then_some(slopic_core::codegen::Environment::Freestanding),
+    };
     let mut toolchain_dependencies = cli.toolchain_dependencies;
     if cli.source_root.is_none() && !cli.no_std && toolchain_dependencies.is_empty() {
-        toolchain_dependencies.push(slopic_core::STD_PACKAGE.to_owned());
+        // Which library a lone file gets is the environment's to say: a
+        // freestanding one has no `std` to offer (`D-081`).
+        toolchain_dependencies.push(
+            slopic_core::request_environment(&options)
+                .default_library()
+                .to_owned(),
+        );
     }
     let request = CompileRequest {
         input,
@@ -190,18 +219,8 @@ fn main() {
             Emit::Obj => EmitKind::Object,
             Emit::Exe => EmitKind::Executable,
         },
-        options: CompileOptions {
-            target: cli.target,
-            test_harness: cli.test,
-            optimize: cli.optimize,
-            codegen_module: cli.codegen_module,
-            language_items,
-            validate_entry_point: !cli.library,
-            debug: cli.debug,
-            panic_abort: cli.panic_abort,
-            strip: cli.strip,
-        },
-        runtime: cli.runtime,
+        options,
+        runtimes: cli.runtimes,
         cc: cli.cc,
     };
     if let Err(diagnostics) = compile(&request) {

@@ -140,10 +140,10 @@ Linking is still the system linker's. It is what knows where the C runtime
 lives, which dynamic loader to name, and how the platform starts a process —
 none of which is a code generation question.
 
-The link is asked to keep only what a program uses. The runtime is one C file
-of every helper the language might call, so it is compiled with a section per
-function and linked with `--gc-sections`: a program that never touches a slice
-does not carry `sl_rt_slice_*`. That only ever removes unreferenced code, so it
+The link is asked to keep only what a program uses. The runtime is two C files
+of every helper the language might call, so they are compiled with a section
+per function and linked with `--gc-sections`: a program that never touches a
+slice does not carry `sl_rt_slice_*`. That only ever removes unreferenced code, so it
 is unconditional. Stripping the symbol table is a choice, because it removes
 the mangled `sl_fn_*` and runtime names a debugger needs — so it is a flag
 (`slopic --strip`), not something the compiler decides. A test body is code
@@ -223,7 +223,11 @@ editor and the build cannot namespace a module differently. The bundled library
 itself lives one level lower again, in `slopium-std`: the sources are ordinary
 `.slp` files under `std/`, and the compiler hands them to name resolution while
 the manager hashes them into the lock, so those two cannot disagree about what
-`std` contains (`D-076`). The language server
+the library contains (`D-076`). There are two bundled packages — `core`, which
+carries `Option`, `Result` and the language items, and `std`, which carries
+`io` and `process`, depends on `core`, and re-exports its language items
+through a `prelude` module so that exactly one direct dependency ever declares
+them (`D-082`). The language server
 analyzes an open file as the member that owns it. `slopic` still types
 and lowers the package as one semantic unit, then emits only the selected
 owner module for each object invocation. Generated function/type/drop/clone
@@ -291,14 +295,40 @@ graph.
 
 ## Runtime boundary
 
-Generated programs link a small C runtime through the stable `sl_rt_*` ABI.
-The runtime provides allocation, strings, owned lists/arrays, borrowed slice
-descriptors, printing, input, and process arguments. It does not evaluate
-source or own language semantics. Generated clone/drop helpers recursively
-copy and destroy collection elements, structs, and enum payloads.
+Generated programs link a small C runtime through the stable `sl_rt_*` ABI. It
+provides allocation, strings, owned lists/arrays, borrowed slice descriptors,
+printing, input, and process arguments. It does not evaluate source or own
+language semantics. Generated clone/drop helpers recursively copy and destroy
+collection elements, structs, and enum payloads.
 
-Generated executables use a small C ABI `main(argc, argv)` wrapper. Language
-functions, including the user `main`, retain compiler-mangled symbols.
+It is two translation units, and the seam between them is the boundary a
+freestanding program would sit on (`D-066`).
+
+`runtime/slop_rt_core.c` is the strings, the lists, the slices and the failure
+paths. It includes no hosted header and calls exactly four symbols it does not
+define: `sl_rt_alloc`, `sl_rt_free`, `sl_rt_abort` and `sl_rt_panic`
+(`D-080`). The split is deliberately not "core never allocates" — a kernel has
+an allocator; what it does not have is libc. So core is the code and hosted is
+the providers.
+
+`runtime/slop_rt_hosted.c` defines those four over `malloc`, `free`, `exit` and
+`fprintf`, and adds stdio, `argv` and `getenv`.
+
+Which units link is the environment's to say, and the environment is the
+target's default overridden by `slopic --freestanding` (`D-081`). It decides
+three things and no others: the runtime units, whether the `main(argc, argv)`
+wrapper is emitted at all, and whether a lone file's default library is `std`
+or `core`. Both targets are hosted today; the override is what exercises the
+freestanding half before a `-none` triple exists.
+
+`scripts/core-check.sh` is the check that makes this real rather than
+aspirational. It builds a `core`-only program, links it against
+`slop_rt_core.o` with `-nostdlib` and a supplied `_start`, requires `nm -u` to
+show nothing but the four hooks, and runs it. The runtime ABI freezes at v0.8,
+and freezing a half nothing had ever linked would be freezing a guess.
+
+Generated hosted executables use a small C ABI `main(argc, argv)` wrapper.
+Language functions, including the user `main`, retain compiler-mangled symbols.
 Unrecoverable runtime errors print a normalized message and exit with status
 101.
 

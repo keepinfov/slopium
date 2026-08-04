@@ -149,7 +149,7 @@ std = { toolchain = true }
 ```
 
 ```lisp
-(take std:result Result)
+(take std:prelude Result)
 
 (fn forward () -> (Result i64 String)
   (let value (try (produce)))

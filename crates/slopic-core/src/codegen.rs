@@ -11,6 +11,7 @@ use crate::lowering::{
 use crate::mir::{BasicBlock, BinaryOp, Instruction, LocalId, MirFunction, MirModule, Terminator};
 use crate::regalloc::{allocate, Allocation, Location};
 use crate::x86_64_inst::{AluOp, Cond, Inst, Mem, Operand, Reg, Size, SseOp};
+use serde::Serialize;
 use std::collections::HashMap;
 
 /// The registers one function may allocate locals to, in the order the
@@ -54,6 +55,43 @@ const LEAF: RegisterFile = RegisterFile {
     volatile: 2,
 };
 
+/// What a program can assume is under it.
+///
+/// It decides exactly three things (`D-066`, `D-081`): which runtime units are
+/// materialized, whether the `main(argc, argv)` wrapper is emitted at all, and
+/// which toolchain library a lone file gets by default. Anything a triple
+/// decides — the calling convention, the object format — is not this.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Environment {
+    /// A C library and an operating system: the runtime brings its own
+    /// allocator, `main` runs before the program does, and `std` is available.
+    #[default]
+    Hosted,
+    /// Neither. The program supplies `sl_rt_alloc`, `sl_rt_free`,
+    /// `sl_rt_abort` and `sl_rt_panic` (`D-080`), starts itself, and has
+    /// `core` and nothing above it.
+    Freestanding,
+}
+
+impl Environment {
+    /// Whether a `main` the C runtime can call is emitted around the program's
+    /// `main`. A freestanding program has no `argv` to record and no libc
+    /// start-up to be called from, so the wrapper would only be an undefined
+    /// reference to `sl_rt_args_init`.
+    pub fn emits_entrypoint(self) -> bool {
+        matches!(self, Self::Hosted)
+    }
+
+    /// The toolchain library a lone file gets when nothing names one.
+    pub fn default_library(self) -> &'static str {
+        match self {
+            Self::Hosted => slopium_std::STD_PACKAGE,
+            Self::Freestanding => slopium_std::CORE_PACKAGE,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct TargetSpec {
     pub triple: &'static str,
@@ -61,6 +99,10 @@ pub struct TargetSpec {
     pub abi: &'static str,
     pub object_format: &'static str,
     pub default_cc: &'static str,
+    /// The environment this target implies when the command line does not
+    /// override it. Both targets are hosted today; a `-none` triple at v0.7 is
+    /// then a row in this table and not a new mechanism (`D-081`).
+    pub environment: Environment,
 }
 
 pub const X86_64_LINUX_GNU: TargetSpec = TargetSpec {
@@ -69,6 +111,7 @@ pub const X86_64_LINUX_GNU: TargetSpec = TargetSpec {
     abi: "System V AMD64",
     object_format: "ELF",
     default_cc: "cc",
+    environment: Environment::Hosted,
 };
 
 pub const AARCH64_LINUX_GNU: TargetSpec = TargetSpec {
@@ -80,6 +123,7 @@ pub const AARCH64_LINUX_GNU: TargetSpec = TargetSpec {
     // the host `cc` would silently produce host objects, so there is no
     // sensible bare fallback here the way there is for the host target.
     default_cc: "aarch64-unknown-linux-gnu-cc",
+    environment: Environment::Hosted,
 };
 
 /// Every target this compiler emits for.

@@ -23,7 +23,7 @@ use crate::registry::{IndexEntry, IndexSource};
 use crate::sha256::Digest;
 use crate::source::{GitReference, SourceId, SourceSpec, DEFAULT_REGISTRY};
 use crate::sources::{Pin, Sources};
-use crate::std_library::{std_archive, std_language_items, STD_PACKAGE};
+use crate::std_library::{language_items_of, std_archive, toolchain_package};
 use crate::store::verify_tree;
 use crate::version::{Version, VersionReq};
 use crate::workspace::{load_project, Workspace};
@@ -330,10 +330,11 @@ pub fn resolve(
     let mut language_items = Vec::new();
     let mut language_item_source = None;
     for need in &needs {
-        let project = solved[&need.name].project.as_ref();
+        let chosen = &solved[&need.name];
         collect_language_items(
             &need.name,
-            project,
+            &chosen.id,
+            chosen.project.as_ref(),
             &mut language_items,
             &mut language_item_source,
         )?;
@@ -540,22 +541,42 @@ impl Context<'_> {
     }
 
     fn toolchain_package(&self, need: &Need) -> Result<Chosen, String> {
-        if need.name != STD_PACKAGE {
+        let Some(bundled) = toolchain_package(&need.name) else {
+            let names: Vec<&str> = crate::std_library::TOOLCHAIN_PACKAGES
+                .iter()
+                .map(|package| package.name)
+                .collect();
             return Err(format!(
-                "SL1077: dependency `{}` cannot use the toolchain source; the bundled package is named `{STD_PACKAGE}`",
-                need.name
+                "SL1077: dependency `{}` cannot use the toolchain source; the bundled packages are {}",
+                need.name,
+                names.join(" and ")
             ));
-        }
-        let (_, checksum) = std_archive(self.toolchain_version)?;
+        };
+        let (_, checksum) = std_archive(bundled, self.toolchain_version)?;
         let id = PackageId {
-            name: STD_PACKAGE.to_owned(),
+            name: bundled.name.to_owned(),
             version: self.toolchain_version.clone(),
             source: SourceId::Toolchain,
         };
         let project = replacement(self.workspace, &id, &checksum)?;
+        // A bundled package may depend on another bundled package (`D-082`).
+        // A replacement declares its own needs; the bundled copy's are the
+        // table's.
         let needs = match &project {
             Some(project) => self.needs_of(project, &id)?,
-            None => Vec::new(),
+            None => bundled
+                .dependencies
+                .iter()
+                .map(|name| Need {
+                    dependent: bundled.name.to_owned(),
+                    name: (*name).to_owned(),
+                    // The same as what the generated manifest writes —
+                    // `core = { toolchain = true }`, no version. `Want` pins
+                    // the source, and the toolchain has exactly one of these.
+                    requirement: VersionReq::any(),
+                    want: Want::Toolchain,
+                })
+                .collect(),
         };
         Ok(Chosen {
             id,
@@ -949,12 +970,17 @@ fn replacement(
 /// the language items, not what it is named.
 fn collect_language_items(
     declared: &str,
+    id: &PackageId,
     dependency: Option<&Project>,
     items: &mut Vec<(String, String)>,
     source: &mut Option<String>,
 ) -> Result<(), String> {
     let contributed = match dependency {
-        None => std_language_items(),
+        // A bundled package with no vendored copy standing in for it: what it
+        // declares is in the table, not on disk. `core` and `std` declare
+        // different paths for the same items (`D-082`), so it is the package's
+        // name that decides and not the fact that it is bundled.
+        None => language_items_of(&id.name),
         Some(project) if !project.manifest.language_items.is_empty() => project
             .manifest
             .language_items
@@ -964,6 +990,9 @@ fn collect_language_items(
             .collect(),
         Some(_) => return Ok(()),
     };
+    if contributed.is_empty() {
+        return Ok(());
+    }
     if let Some(previous) = source {
         return Err(format!(
             "SL1074: `{previous}` and `{declared}` both define `[language-items]`; a package graph has one standard library"
@@ -1225,7 +1254,8 @@ mod tests {
         let workspace = Workspace::new("toolchain-checksum");
         workspace.package("application", "1.0.0", "std = { toolchain = true }\n");
         let resolution = workspace.resolve("application").unwrap();
-        let (_, digest) = std_archive(&Version::new(0, 3, 7)).unwrap();
+        let std = toolchain_package("std").expect("the std package");
+        let (_, digest) = std_archive(std, &Version::new(0, 3, 7)).unwrap();
         assert_eq!(resolution.packages["std"].checksum, Some(digest));
         assert_eq!(resolution.packages["application"].checksum, None);
     }
@@ -1247,8 +1277,10 @@ mod tests {
         );
         let resolution =
             super::resolve(&project, &loaded, &Version::new(0, 3, 7), &sources).unwrap();
-        assert_eq!(names(&resolution), vec!["std"]);
+        // `std` depends on `core`, so asking for one resolves both (`D-082`).
+        assert_eq!(names(&resolution), vec!["core", "std"]);
         assert!(resolution.packages["std"].project.is_none());
+        assert!(resolution.packages["core"].project.is_none());
     }
 
     /// Vendoring may change where bytes are read from and nothing else: the
@@ -1258,8 +1290,16 @@ mod tests {
         let workspace = Workspace::new("replacement");
         workspace.package("application", "1.0.0", "std = { toolchain = true }\n");
         let version = Version::new(0, 3, 7);
-        let entries = crate::std_library::std_entries(&version);
-        crate::store::unpack(&entries, &workspace.root.join("application/vendor/std")).unwrap();
+        let std = toolchain_package("std").expect("the std package");
+        // Replacing the toolchain source replaces all of it, so `core` has to
+        // be vendored beside `std` (`D-082`).
+        for bundled in crate::std_library::TOOLCHAIN_PACKAGES {
+            let entries = crate::std_library::std_entries(bundled, &version);
+            let root = workspace
+                .root
+                .join(format!("application/vendor/{}", bundled.name));
+            crate::store::unpack(&entries, &root).unwrap();
+        }
         workspace.write_manifest(
             "application/.slopium/config.toml",
             "[source.toolchain]\nreplace-with = \"vendored\"\n\n[source.vendored]\ndirectory = \"vendor\"\n",
@@ -1268,7 +1308,10 @@ mod tests {
         let resolution = workspace.resolve("application").unwrap();
         let standard = &resolution.packages["std"];
         assert_eq!(standard.id.source, SourceId::Toolchain);
-        assert_eq!(standard.checksum, Some(std_archive(&version).unwrap().1));
+        assert_eq!(
+            standard.checksum,
+            Some(std_archive(std, &version).unwrap().1)
+        );
         assert_eq!(
             standard
                 .project
@@ -1276,10 +1319,7 @@ mod tests {
                 .map(|project| project.root.clone()),
             Some(workspace.root.join("application/vendor/std"))
         );
-        assert_eq!(
-            resolution.language_items,
-            crate::std_library::std_language_items()
-        );
+        assert_eq!(resolution.language_items, language_items_of("std"));
 
         // The whole point of the checksum: an edited copy is not the package.
         fs::write(
@@ -1542,10 +1582,13 @@ mod tests {
         workspace.package("application", "1.0.0", "std = { toolchain = true }\n");
 
         let resolution = workspace.resolve("application").unwrap();
-        assert_eq!(names(&resolution), vec!["std"]);
+        assert_eq!(names(&resolution), vec!["core", "std"]);
+        // The root depends on `std` directly and on `core` only through it, so
+        // it is `std` that declares the items — through its own `prelude`,
+        // which re-exports `core`'s (`D-082`).
         assert!(resolution
             .language_items
-            .contains(&("option".to_owned(), "std:option:Option".to_owned())));
+            .contains(&("option".to_owned(), "std:prelude:Option".to_owned())));
     }
 
     /// `D-011` says the standard library is an ordinary dependency. What makes

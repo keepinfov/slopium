@@ -1,7 +1,6 @@
 (take std:io println println-i64)
 
-(take std:option Option)
-(take std:result Result)
+(take std:prelude Option Result)
 
 (fn identity (T) ((value T)) -> T value)
 

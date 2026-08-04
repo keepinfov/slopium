@@ -1,4 +1,4 @@
-(take std:result Result)
+(take std:prelude Result)
 
 (fn produce () -> (Result i64 String)
   (Result:Ok 42))

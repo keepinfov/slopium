@@ -1,7 +1,7 @@
 (take std:io println println-i64)
 
 (take geometry Point (distance :as length))
-(take std:option Option)
+(take std:prelude Option)
 
 (fn identity (T) ((value T)) -> T value)
 

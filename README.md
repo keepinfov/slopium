@@ -203,11 +203,24 @@ slopic examples/fibonacci.slp --emit exe -o /tmp/fibonacci
 ```
 
 `slopic` автоматически материализует встроенный C runtime рядом с временным
-assembly и удаляет временные файлы после линковки. Другую реализацию runtime
-можно передать явно:
+assembly и удаляет временные файлы после линковки. Runtime состоит из двух
+единиц трансляции — `slop_rt_core.c` и `slop_rt_hosted.c` (`D-066`), — поэтому
+`--runtime` повторяемый:
 
 ```sh
-slopic program.slp --emit exe --runtime /path/to/slop_rt.c -o program
+slopic program.slp --emit exe \
+  --runtime /path/to/slop_rt_core.c \
+  --runtime /path/to/slop_rt_hosted.c \
+  -o program
+```
+
+Собрать без C-библиотеки под программой: только core-половина runtime, без
+обёртки `main`, а библиотека по умолчанию — `core` вместо `std`. Четыре
+символа — `sl_rt_alloc`, `sl_rt_free`, `sl_rt_abort`, `sl_rt_panic` —
+предоставляет сама программа (`D-080`):
+
+```sh
+slopic program.slp --emit obj --freestanding --library -o program.o
 ```
 
 Запустить объявления `(test ...)` вместо обычного `main`:

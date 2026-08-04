@@ -1,6 +1,6 @@
 (take std:io println println-i64)
 
-(take std:option Option)
+(take std:prelude Option)
 
 (fn main () -> i32
   (let mut numbers (list 1 2))

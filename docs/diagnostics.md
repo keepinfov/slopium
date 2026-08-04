@@ -91,8 +91,8 @@ The manifest, the workspace, the graph, the lock and the build:
 - `SL1075`: a replaced or vendored package is missing, or is a different
   package;
 - `SL1076`: a git package declares a `path` dependency (`D-051`);
-- `SL1077`: the toolchain source is named for something other than the bundled
-  library;
+- `SL1077`: the toolchain source is named for something other than a bundled
+  package — they are `core` and `std` (`D-082`);
 - `SL1078`: a lock entry needs a checksum and has none;
 - `SL1080`: `Slopium.lock` is malformed;
 - `SL1081`: `Slopium.lock` is a format version this toolchain does not write;

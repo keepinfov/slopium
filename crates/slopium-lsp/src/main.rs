@@ -18,7 +18,7 @@ use slopium_manifest::manifest::Project;
 use slopium_manifest::resolve::{resolve, Resolution};
 use slopium_manifest::source::SourceId;
 use slopium_manifest::sources::Sources;
-use slopium_manifest::std_library::{std_module_path, STD_MODULES};
+use slopium_manifest::std_library::{toolchain_module_path, toolchain_package};
 use slopium_manifest::store::{Access, Store};
 use slopium_manifest::version::Version;
 use slopium_manifest::workspace::{load_project, load_workspace, Workspace as PackageWorkspace};
@@ -810,10 +810,15 @@ fn add_resolved_dependencies(
     for package in resolution.dependencies() {
         let namespace = package.namespace().to_owned();
         match (&package.id.source, &package.project) {
+            // A toolchain dependency's alias is its package name — `SL1077`
+            // refuses any other — so the namespace names the bundled package.
             (SourceId::Toolchain, _) => {
-                for (module, source) in STD_MODULES {
+                let Some(bundled) = toolchain_package(&package.id.name) else {
+                    continue;
+                };
+                for (module, source) in bundled.modules {
                     sources.push(PackageSource {
-                        path: std_module_path(module),
+                        path: toolchain_module_path(bundled.name, module),
                         namespace: Some(namespace.clone()),
                         module: (*module).into(),
                         source: (*source).into(),

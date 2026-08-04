@@ -11,6 +11,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "core"
+version = "0.5.2"
+source = "toolchain"
+checksum = "6848c3bfbcc3339ac67aff3607cb71985c9ed4ad846b0cad6f6e455fe7961e89"
+dependencies = []
+
+[[package]]
 name = "geometry"
 version = "1.0.0"
 source = "registry+../registry"
@@ -19,7 +26,9 @@ dependencies = []
 
 [[package]]
 name = "std"
-version = "0.5.1"
+version = "0.5.2"
 source = "toolchain"
-checksum = "ecbc2f08a57fc4f0e77477ea1fa8e843d36a1c893caf79434f1546f39dd44ede"
-dependencies = []
+checksum = "07ed727522a91da69923fab15e10bd0db7d198c4487164824f25406f4b4773ce"
+dependencies = [
+    "core",
+]

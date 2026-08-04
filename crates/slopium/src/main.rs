@@ -18,7 +18,7 @@ use slopium_manifest::sha256::Digest;
 use slopium_manifest::signature::PrivateKey;
 use slopium_manifest::source::{SourceId, SourceSpec, DEFAULT_REGISTRY};
 use slopium_manifest::sources::Sources;
-use slopium_manifest::std_library::{std_module_path, STD_MODULES};
+use slopium_manifest::std_library::{toolchain_module_path, toolchain_package};
 use slopium_manifest::store::{remove_tree, Access, Store};
 use slopium_manifest::version::Version;
 use slopium_manifest::workspace::{enclosing_workspace, load_workspace, Enclosing, Workspace};
@@ -823,7 +823,7 @@ fn build(
     let stamp = artifact.with_extension("slop-cache");
     let compiler = slopic_path()?;
     verify_compiler(&compiler, &target)?;
-    let runtime = materialize_runtime(&out_dir)?;
+    let runtimes = materialize_runtime(&out_dir)?;
     let cc = cc_for(project, &target, args.cc.clone());
     let cache_inputs = CacheInputs {
         project,
@@ -834,7 +834,7 @@ fn build(
         profile,
         test,
         compiler: &compiler,
-        runtime: &runtime,
+        runtimes: &runtimes,
         cc: &cc,
     };
     let cache_key = cache_key(cache_inputs)?;
@@ -944,7 +944,7 @@ fn build(
             panic_abort(profile),
         ))
         .args(&objects)
-        .arg(&runtime)
+        .args(&runtimes)
         .status()
         .map_err(|error| format!("cannot link package with `{cc}`: {error}"))?;
     status_result(status, "link")?;
@@ -1015,11 +1015,16 @@ fn codegen_module_units(
             ResolvedDependencySource::Path(root) => {
                 modules(root, Some(&dependency.namespace), &mut output)?;
             }
+            // A toolchain dependency's alias is its package name — `SL1077`
+            // refuses any other — so the namespace names the bundled package.
             ResolvedDependencySource::Toolchain => {
-                for (module, source) in STD_MODULES {
+                let Some(bundled) = toolchain_package(&dependency.namespace) else {
+                    continue;
+                };
+                for (module, source) in bundled.modules {
                     let name = format!("{}:{module}", dependency.namespace);
                     let (interface, has_generics) =
-                        module_interface(&std_module_path(module), source)?;
+                        module_interface(&toolchain_module_path(bundled.name, module), source)?;
                     output.push(ModuleCacheUnit {
                         name,
                         source: (*source).into(),
@@ -1722,14 +1727,23 @@ fn slopic_path() -> Result<PathBuf, String> {
     }
 }
 
-fn materialize_runtime(out_dir: &Path) -> Result<PathBuf, String> {
-    let runtime = out_dir.join("slop_rt.c");
-    let current = fs::read(&runtime).ok();
-    if current.as_deref() != Some(slopic_core::RUNTIME_SOURCE) {
-        fs::write(&runtime, slopic_core::RUNTIME_SOURCE)
-            .map_err(|error| format!("cannot materialize `{}`: {error}", runtime.display()))?;
+/// The runtime units this build links, written into `out_dir`.
+///
+/// There is more than one since `D-066` — a core half a freestanding program
+/// could have alone, and a hosted half that supplies what libc is behind — so
+/// this returns the set rather than the file. Each is rewritten only when its
+/// bytes differ, because the timestamps feed the artifact cache.
+fn materialize_runtime(out_dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut paths = Vec::new();
+    for (name, bytes) in slopic_core::runtime_sources(slopic_core::codegen::Environment::Hosted) {
+        let path = out_dir.join(name);
+        if fs::read(&path).ok().as_deref() != Some(bytes) {
+            fs::write(&path, bytes)
+                .map_err(|error| format!("cannot materialize `{}`: {error}", path.display()))?;
+        }
+        paths.push(path);
     }
-    Ok(runtime)
+    Ok(paths)
 }
 
 fn source_path(project: &Project) -> Result<PathBuf, String> {
@@ -2481,7 +2495,7 @@ struct CacheInputs<'a> {
     profile: Option<&'a Profile>,
     test: bool,
     compiler: &'a Path,
-    runtime: &'a Path,
+    runtimes: &'a [PathBuf],
     cc: &'a str,
 }
 
@@ -2537,10 +2551,12 @@ fn cache_key(input: CacheInputs<'_>) -> Result<String, String> {
             hasher.write(&duration.as_nanos().to_le_bytes());
         }
     }
-    hasher.write(
-        &fs::read(input.runtime)
-            .map_err(|error| format!("cannot hash `{}`: {error}", input.runtime.display()))?,
-    );
+    for runtime in input.runtimes {
+        hasher.write(
+            &fs::read(runtime)
+                .map_err(|error| format!("cannot hash `{}`: {error}", runtime.display()))?,
+        );
+    }
     // The manifest is hashed above, so *declaring* a `c-sources` entry already
     // invalidates the artifact. Their contents are hashed here so that editing
     // one does too — `collect_cache_sources` walks only `.slp` (`D-075`).
@@ -2865,7 +2881,7 @@ mod tests {
         let project = load_project(Some(root.join("Slopium.toml"))).unwrap();
         let source_root = project.source_root().unwrap();
         let compiler = root.join("Slopium.toml");
-        let runtime = root.join("src/main.slp");
+        let runtimes = vec![root.join("src/main.slp")];
         let inputs = CacheInputs {
             project: &project,
             source_root: &source_root,
@@ -2875,7 +2891,7 @@ mod tests {
             profile: project.manifest.profile.get("dev"),
             test: false,
             compiler: &compiler,
-            runtime: &runtime,
+            runtimes: &runtimes,
             cc: "cc",
         };
         let unit = |name: &str, source: &str| {

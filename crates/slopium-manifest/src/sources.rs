@@ -297,7 +297,12 @@ impl Sources {
         let described = id.to_string();
         if !self.store.holds(checksum) {
             let bytes = match &id.source {
-                SourceId::Toolchain => std_archive(&id.version)?.0,
+                SourceId::Toolchain => {
+                    let package = crate::std_library::toolchain_package(&id.name).ok_or_else(
+                        || format!("SL1077: `{described}` is not a bundled package"),
+                    )?;
+                    std_archive(package, &id.version)?.0
+                }
                 SourceId::Git { .. } => {
                     if self.access == Access::Offline {
                         return Err(format!(

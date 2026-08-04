@@ -375,11 +375,13 @@ mod tests {
     /// anybody's project. So it is checked here instead.
     #[test]
     fn the_bundled_library_is_canonically_formatted() {
-        for (module, source) in slopium_std::STD_MODULES {
-            let path = slopium_std::std_module_path(module);
-            let formatted = format_source(&path, source, &FormatOptions::default())
-                .expect("a bundled module parses");
-            assert_eq!(&formatted, source, "`{path}` is not canonically formatted");
+        for package in slopium_std::TOOLCHAIN_PACKAGES {
+            for (module, source) in package.modules {
+                let path = slopium_std::toolchain_source_path(package.name, module);
+                let formatted = format_source(&path, source, &FormatOptions::default())
+                    .expect("a bundled module parses");
+                assert_eq!(&formatted, source, "`{path}` is not canonically formatted");
+            }
         }
     }
 

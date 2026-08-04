@@ -1,11 +1,11 @@
 use slopic_core::codegen::{emit_assembly, CodegenOptions, DEFAULT_TARGET};
 use slopic_core::{
     compile, compile_to_mir, CompileOptions, CompileRequest, DependencySource, EmitKind,
-    LanguageItems, RUNTIME_SOURCE, STD_PACKAGE,
+    LanguageItems, STD_PACKAGE,
 };
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -19,6 +19,19 @@ const TAKES: &str = "\
   println-bool read-line read-i64 parse-i64)
 (take std:process env args-len arg)
 ";
+
+/// The bundled runtime written into `directory`, in link order. A hosted test
+/// links both halves, the way `slopic` does (`D-066`).
+fn write_runtime(directory: &Path) -> Vec<PathBuf> {
+    slopic_core::runtime_sources(slopic_core::codegen::Environment::Hosted)
+        .into_iter()
+        .map(|(name, bytes)| {
+            let path = directory.join(name);
+            fs::write(&path, bytes).unwrap();
+            path
+        })
+        .collect()
+}
 
 fn native_program(source: &str) -> (PathBuf, PathBuf) {
     let id = NEXT_TEST.fetch_add(1, Ordering::Relaxed);
@@ -38,7 +51,7 @@ fn native_program(source: &str) -> (PathBuf, PathBuf) {
         output: Some(output.clone()),
         emit: EmitKind::Executable,
         options: CompileOptions::default(),
-        runtime: None,
+        runtimes: Vec::new(),
         cc: "cc".into(),
     })
     .unwrap();
@@ -98,7 +111,7 @@ fn compiles_and_runs_multi_file_package() {
         output: Some(output.clone()),
         emit: EmitKind::Executable,
         options: CompileOptions::default(),
-        runtime: None,
+        runtimes: Vec::new(),
         cc: "cc".into(),
     })
     .unwrap();
@@ -143,7 +156,7 @@ fn compiles_path_dependency_under_manifest_alias() {
         output: Some(executable.clone()),
         emit: EmitKind::Executable,
         options: CompileOptions::default(),
-        runtime: None,
+        runtimes: Vec::new(),
         cc: "cc".into(),
     })
     .unwrap();
@@ -259,7 +272,7 @@ fn try_propagates_configured_result_errors() {
             },
             ..CompileOptions::default()
         },
-        runtime: None,
+        runtimes: Vec::new(),
         cc: "cc".into(),
     })
     .unwrap();
@@ -287,8 +300,7 @@ fn toolchain_std_supplies_option_result_and_language_items() {
         &input,
         r#"
         (take std:io println-i64)
-        (take std:result Result)
-        (take std:option Option)
+        (take std:prelude Result Option)
 
         (fn produce () -> (Result i64 String)
           (Result:Ok 42))
@@ -323,7 +335,7 @@ fn toolchain_std_supplies_option_result_and_language_items() {
         output: Some(executable.clone()),
         emit: EmitKind::Executable,
         options: CompileOptions::default(),
-        runtime: None,
+        runtimes: Vec::new(),
         cc: "cc".into(),
     })
     .unwrap();
@@ -666,11 +678,10 @@ fn an_extern_call_reaches_c_with_the_arguments_it_declared() {
     )
     .unwrap();
     let assembly_path = directory.join("ffi.s");
-    let runtime_path = directory.join("runtime.c");
+    let runtime_paths = write_runtime(&directory);
     let callee_path = directory.join("callee.c");
     let executable = directory.join("ffi");
     fs::write(&assembly_path, assembly).unwrap();
-    fs::write(&runtime_path, RUNTIME_SOURCE).unwrap();
     fs::write(
         &callee_path,
         r#"
@@ -696,7 +707,7 @@ fn an_extern_call_reaches_c_with_the_arguments_it_declared() {
         .arg("-o")
         .arg(&executable)
         .arg(&assembly_path)
-        .arg(&runtime_path)
+        .args(&runtime_paths)
         .arg(&callee_path)
         .status()
         .unwrap();
@@ -741,11 +752,10 @@ fn c_caller_agrees_with_slopium_stack_parameter_layout() {
     )
     .unwrap();
     let assembly_path = directory.join("abi.s");
-    let runtime_path = directory.join("runtime.c");
+    let runtime_paths = write_runtime(&directory);
     let oracle_path = directory.join("oracle.c");
     let executable = directory.join("oracle");
     fs::write(&assembly_path, assembly).unwrap();
-    fs::write(&runtime_path, RUNTIME_SOURCE).unwrap();
     fs::write(
         &oracle_path,
         r#"
@@ -768,7 +778,7 @@ fn c_caller_agrees_with_slopium_stack_parameter_layout() {
         .args(["-o"])
         .arg(&executable)
         .arg(&assembly_path)
-        .arg(&runtime_path)
+        .args(&runtime_paths)
         .arg(&oracle_path)
         .status()
         .unwrap();

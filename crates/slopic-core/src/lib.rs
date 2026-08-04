@@ -20,19 +20,66 @@ pub mod syntax;
 pub mod verify;
 pub mod x86_64_inst;
 
-use crate::codegen::{CodegenOptions, DEFAULT_TARGET, TARGET_TRIPLES};
+use crate::codegen::{CodegenOptions, Environment, DEFAULT_TARGET, TARGET_TRIPLES};
 use crate::diagnostic::{codes, CompileResult, Diagnostic, SourceMap};
 use crate::mir::MirModule;
 use crate::sema::TypedProgram;
 use serde::Serialize;
-pub use slopium_std::{std_language_items, STD_MODULES, STD_PACKAGE};
+pub use slopium_std::{language_items_of, CORE_PACKAGE, STD_PACKAGE, TOOLCHAIN_PACKAGES};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub const COMPILER_PROTOCOL: u32 = 7;
-pub const RUNTIME_SOURCE: &[u8] = include_bytes!("../../../runtime/slop_rt.c");
+pub const COMPILER_PROTOCOL: u32 = 8;
 pub const STANDARD_LIBRARY_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// The half of the runtime a freestanding program can have: strings, lists,
+/// slices, and the failure paths. It calls four symbols it does not define
+/// (`D-066`, `D-080`).
+pub const RUNTIME_CORE: (&str, &[u8]) = (
+    "slop_rt_core.c",
+    include_bytes!("../../../runtime/slop_rt_core.c"),
+);
+
+/// The half that defines those four over libc and adds stdio, `argv` and
+/// `getenv`.
+pub const RUNTIME_HOSTED: (&str, &[u8]) = (
+    "slop_rt_hosted.c",
+    include_bytes!("../../../runtime/slop_rt_hosted.c"),
+);
+
+/// The extra `cc` arguments a freestanding build is compiled with.
+///
+/// A compiler is free to recognize the byte loops in `slop_rt_core.c` and emit
+/// the `memcpy` they were written to avoid, which would be a libc symbol in the
+/// half that must not have one; `-ffreestanding -fno-builtin` discourage it.
+/// `-fno-stack-protector` is not an optimization question at all — a toolchain
+/// that turns the stack protector on by default (nixpkgs does) emits calls to
+/// `__stack_chk_fail`, which libc owns, and `core-check.sh` caught it.
+///
+/// A hosted build uses none of them. Core is linked beside libc there, so a
+/// `memcpy` call costs nothing and the hardening is worth keeping.
+pub const FREESTANDING_FLAGS: &[&str] = &["-ffreestanding", "-fno-builtin", "-fno-stack-protector"];
+
+/// The environment a build runs in: what the command line asked for, or the
+/// target's default when it asked for nothing (`D-081`).
+pub fn request_environment(options: &CompileOptions) -> Environment {
+    options.environment.unwrap_or_else(|| {
+        codegen::TARGETS
+            .iter()
+            .find(|spec| spec.triple == options.target)
+            .map(|spec| spec.environment)
+            .unwrap_or_default()
+    })
+}
+
+/// The runtime units an environment links, in link order.
+pub fn runtime_sources(environment: Environment) -> Vec<(&'static str, &'static [u8])> {
+    match environment {
+        Environment::Hosted => vec![RUNTIME_CORE, RUNTIME_HOSTED],
+        Environment::Freestanding => vec![RUNTIME_CORE],
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct CompileOptions {
@@ -53,6 +100,11 @@ pub struct CompileOptions {
     /// policy: the compiler strips when asked and does not decide when to ask.
     /// The manager does, from the profile — see `slopium`'s `strip_symbols`.
     pub strip: bool,
+    /// What the program can assume is under it. `None` takes the target's
+    /// default, which is what every target says today; `--freestanding` is the
+    /// override that makes the field load-bearing before a `-none` triple
+    /// exists (`D-081`).
+    pub environment: Option<Environment>,
 }
 
 impl Default for CompileOptions {
@@ -67,6 +119,7 @@ impl Default for CompileOptions {
             debug: false,
             panic_abort: false,
             strip: false,
+            environment: None,
         }
     }
 }
@@ -100,7 +153,10 @@ pub struct CompileRequest {
     pub output: Option<PathBuf>,
     pub emit: EmitKind,
     pub options: CompileOptions,
-    pub runtime: Option<PathBuf>,
+    /// The runtime units to link, replacing the ones bundled with the
+    /// compiler. Empty means the bundled ones for this environment; there is
+    /// more than one now, so this is a list rather than a path (`D-066`).
+    pub runtimes: Vec<PathBuf>,
     pub cc: String,
 }
 
@@ -222,7 +278,7 @@ pub fn compile_to_assembly(
         &CodegenOptions {
             target: options.target.clone(),
             test_harness: options.test_harness,
-            emit_entrypoint: true,
+            emit_entrypoint: request_environment(options).emits_entrypoint(),
             debug: options.debug.then(|| SourceMap::single(file)),
             panic_abort: options.panic_abort,
         },
@@ -241,7 +297,7 @@ pub fn compile_to_object(
         &CodegenOptions {
             target: options.target.clone(),
             test_harness: options.test_harness,
-            emit_entrypoint: true,
+            emit_entrypoint: request_environment(options).emits_entrypoint(),
             debug: None,
             panic_abort: options.panic_abort,
         },
@@ -253,10 +309,13 @@ pub fn compile_package_to_assembly(
     options: &CompileOptions,
 ) -> CompileResult<String> {
     let mir = compile_package_to_mir(input, options)?;
-    let emits_entrypoint = options
-        .codegen_module
-        .as_ref()
-        .is_none_or(|module| module == &input.entry_module);
+    // The root module emits the entrypoint, and only in an environment that
+    // has something to be entered from (`D-081`).
+    let emits_entrypoint = request_environment(options).emits_entrypoint()
+        && options
+            .codegen_module
+            .as_ref()
+            .is_none_or(|module| module == &input.entry_module);
     codegen::emit_assembly(
         &input.name,
         &mir,
@@ -275,10 +334,13 @@ pub fn compile_package_to_object(
     options: &CompileOptions,
 ) -> CompileResult<Vec<u8>> {
     let mir = compile_package_to_mir(input, options)?;
-    let emits_entrypoint = options
-        .codegen_module
-        .as_ref()
-        .is_none_or(|module| module == &input.entry_module);
+    // The root module emits the entrypoint, and only in an environment that
+    // has something to be entered from (`D-081`).
+    let emits_entrypoint = request_environment(options).emits_entrypoint()
+        && options
+            .codegen_module
+            .as_ref()
+            .is_none_or(|module| module == &input.entry_module);
     codegen::emit_object(
         &input.name,
         &mir,
@@ -425,15 +487,18 @@ fn compile_request_to_assembly(
 
 fn request_options(request: &CompileRequest) -> CompileOptions {
     let mut options = request.options.clone();
-    if request
+    // The manager sends these explicitly for a package it resolved; a lone file
+    // has no manifest to send them from, and both cases mean the same library,
+    // so the defaults come from the library itself (`D-076`). Exactly one
+    // direct dependency declares the items (`D-041`), so the first bundled
+    // package that has any is the one that supplies them (`D-082`).
+    let declared = request
         .toolchain_dependencies
         .iter()
-        .any(|namespace| namespace == STD_PACKAGE)
-    {
-        // The manager sends these explicitly for a package it resolved; a lone
-        // file has no manifest to send them from, and both cases mean the same
-        // library, so the defaults come from the library itself (`D-076`).
-        for (name, path) in std_language_items() {
+        .filter_map(|namespace| toolchain_package_named(namespace))
+        .find(|package| !package.language_items.is_empty());
+    if let Some(package) = declared {
+        for (name, path) in slopium_std::language_items_of(package.name) {
             let slot = match name.as_str() {
                 "option" => &mut options.language_items.option,
                 "result" => &mut options.language_items.result,
@@ -447,21 +512,51 @@ fn request_options(request: &CompileRequest) -> CompileOptions {
     options
 }
 
-/// The bundled library as package sources under `namespace`.
+/// The bundled package a toolchain dependency names, if there is one.
+///
+/// The manager may hand over a nested namespace, so it is the last segment that
+/// names the package.
+pub fn toolchain_package_named(namespace: &str) -> Option<&'static slopium_std::ToolchainPackage> {
+    namespace
+        .rsplit(':')
+        .next()
+        .and_then(slopium_std::toolchain_package)
+}
+
+/// The bundled library as package sources under `namespace`: the package that
+/// namespace names, and everything it depends on, dependencies first.
 ///
 /// The library ships inside the compiler, so there is no path to read it from
-/// and no version to resolve: a build that asked for the toolchain library gets
-/// these, and the manager hashes the same bytes into the lock (`D-076`).
+/// and no version to resolve: a build that asked for a toolchain library gets
+/// these, and the manager hashes the same bytes into the lock (`D-076`). A root
+/// that asks for `std` gets `core` without naming it — that dependency is the
+/// library's, not the program's (`D-082`).
 pub fn std_package_sources(namespace: &str) -> Vec<package::PackageSource> {
-    STD_MODULES
-        .iter()
-        .map(|(module, source)| package::PackageSource {
-            path: format!("<toolchain:{namespace}>/{module}.slp"),
-            namespace: Some(namespace.to_owned()),
-            module: (*module).into(),
-            source: (*source).into(),
-        })
-        .collect()
+    let Some(package) = toolchain_package_named(namespace) else {
+        return Vec::new();
+    };
+    let mut files: Vec<package::PackageSource> = Vec::new();
+    for dependency in package.dependencies {
+        for source in std_package_sources(dependency) {
+            if !files.iter().any(|existing| {
+                existing.namespace == source.namespace && existing.module == source.module
+            }) {
+                files.push(source);
+            }
+        }
+    }
+    files.extend(
+        package
+            .modules
+            .iter()
+            .map(|(module, source)| package::PackageSource {
+                path: format!("<toolchain:{namespace}>/{module}.slp"),
+                namespace: Some(namespace.to_owned()),
+                module: (*module).into(),
+                source: (*source).into(),
+            }),
+    );
+    files
 }
 
 fn package_input(request: &CompileRequest) -> CompileResult<Option<package::PackageInput>> {
@@ -604,7 +699,7 @@ fn package_input(request: &CompileRequest) -> CompileResult<Option<package::Pack
         }
     }
     for namespace in &request.toolchain_dependencies {
-        if namespace.rsplit(':').next() != Some(STD_PACKAGE) {
+        if toolchain_package_named(namespace).is_none() {
             return Err(vec![Diagnostic::error(
                 codes::DEPENDENCY,
                 request.input.display().to_string(),
@@ -612,7 +707,15 @@ fn package_input(request: &CompileRequest) -> CompileResult<Option<package::Pack
                 format!("toolchain dependency `{namespace}` is not available"),
             )]);
         }
-        files.extend(std_package_sources(namespace));
+        // A package pulls in what it depends on, and the manager also lists
+        // those dependencies itself, so the same module can arrive twice.
+        for source in std_package_sources(namespace) {
+            if !files.iter().any(|existing| {
+                existing.namespace == source.namespace && existing.module == source.module
+            }) {
+                files.push(source);
+            }
+        }
     }
     let entry_module = entry_module.ok_or_else(|| {
         vec![Diagnostic::error(
@@ -775,20 +878,27 @@ fn native_artifact(
     if request.emit == EmitKind::Object {
         command.arg("-c").arg(&input_path);
     } else {
-        let generated;
-        let runtime = if let Some(runtime) = request.runtime.as_ref() {
-            runtime
-        } else {
-            generated = scratch.path().join("slop_rt.c");
-            write_new(file, &generated, RUNTIME_SOURCE)?;
+        let environment = request_environment(&request.options);
+        let mut generated = Vec::new();
+        let runtimes: &[PathBuf] = if request.runtimes.is_empty() {
+            for (name, bytes) in runtime_sources(environment) {
+                let path = scratch.path().join(name);
+                write_new(file, &path, bytes)?;
+                generated.push(path);
+            }
             &generated
+        } else {
+            &request.runtimes
         };
-        // The runtime is one C file of every helper the language might call,
-        // and most programs call a handful. The shared flags put each function
-        // in its own section and let the linker drop what nothing reaches, then
+        // The runtime is C files of every helper the language might call, and
+        // most programs call a handful. The shared flags put each function in
+        // its own section and let the linker drop what nothing reaches, then
         // strip the symbol table when the caller asked for it.
         command.args(cc_flags(request.options.strip, request.options.panic_abort));
-        command.arg(&input_path).arg(runtime);
+        if environment == Environment::Freestanding {
+            command.args(FREESTANDING_FLAGS);
+        }
+        command.arg(&input_path).args(runtimes);
     }
     let result = command.output().map_err(|error| {
         vec![Diagnostic::error(

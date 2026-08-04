@@ -77,13 +77,15 @@ cargo run --quiet --manifest-path "$workspace_dir/Cargo.toml" -p slopic -- \
 
 cc -g -fsanitize=address -fno-omit-frame-pointer \
   -o "$check_dir/runtime-asan" \
-  "$check_dir/runtime.s" "$check_dir/probe.c" "$workspace_dir/runtime/slop_rt.c"
+  "$check_dir/runtime.s" "$check_dir/probe.c" "$workspace_dir/runtime/slop_rt_core.c" \
+    "$workspace_dir/runtime/slop_rt_hosted.c"
 printf '42\n' | ASAN_OPTIONS=detect_leaks="${SLOPIUM_ASAN_DETECT_LEAKS:-0}":halt_on_error=1 \
   "$check_dir/runtime-asan" argument >/dev/null
 
 if command -v valgrind >/dev/null 2>&1; then
   cc -g -o "$check_dir/runtime-valgrind" \
-    "$check_dir/runtime.s" "$check_dir/probe.c" "$workspace_dir/runtime/slop_rt.c"
+    "$check_dir/runtime.s" "$check_dir/probe.c" "$workspace_dir/runtime/slop_rt_core.c" \
+    "$workspace_dir/runtime/slop_rt_hosted.c"
   printf '42\n' | valgrind \
     --quiet --leak-check=full --show-leak-kinds=all --error-exitcode=99 \
     "$check_dir/runtime-valgrind" argument >/dev/null

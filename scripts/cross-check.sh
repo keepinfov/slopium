@@ -353,14 +353,16 @@ for target in host "$cross_target"; do
     prefix="$ffi_dir/$target-$profile"
     if [[ "$target" == host ]]; then
       "$compiler" "$ffi_dir/ffi.slp" --emit obj "${opt[@]}" --output "$prefix.o" >/dev/null
-      cc "$prefix.o" "$ffi_dir/callee.c" "$workspace_dir/runtime/slop_rt.c" \
+      cc "$prefix.o" "$ffi_dir/callee.c" "$workspace_dir/runtime/slop_rt_core.c" \
+    "$workspace_dir/runtime/slop_rt_hosted.c" \
         -o "$prefix" >"$prefix.link" 2>&1 ||
         fail "the host FFI program did not link ($profile)"
       capture "$prefix.out" "$prefix"
     else
       "$compiler" "$ffi_dir/ffi.slp" --emit obj "${opt[@]}" --target "$target" \
         --cc "$cross_cc" --output "$prefix.o" >/dev/null
-      "$cross_cc" "$prefix.o" "$ffi_dir/callee.c" "$workspace_dir/runtime/slop_rt.c" \
+      "$cross_cc" "$prefix.o" "$ffi_dir/callee.c" "$workspace_dir/runtime/slop_rt_core.c" \
+    "$workspace_dir/runtime/slop_rt_hosted.c" \
         -o "$prefix" >"$prefix.link" 2>&1 ||
         fail "the $target FFI program did not link ($profile)"
       capture "$prefix.out" "$qemu" "$prefix"
@@ -492,7 +494,8 @@ for target in host "$cross_target"; do
   if [[ "$target" == host ]]; then
     "$compiler" "$abi_dir/abi.slp" --emit obj --output "$abi_dir/host.o" >/dev/null
     "$host_objcopy" --redefine-sym main=sl_abi_unused_entry "$abi_dir/host.o"
-    cc "$abi_dir/caller.c" "$abi_dir/host.o" "$workspace_dir/runtime/slop_rt.c" \
+    cc "$abi_dir/caller.c" "$abi_dir/host.o" "$workspace_dir/runtime/slop_rt_core.c" \
+    "$workspace_dir/runtime/slop_rt_hosted.c" \
       -o "$abi_dir/host" >"$abi_dir/host.link" 2>&1 ||
       fail "the host ABI program did not link"
     capture "$abi_dir/host.out" "$abi_dir/host"
@@ -501,7 +504,8 @@ for target in host "$cross_target"; do
     "$compiler" "$abi_dir/abi.slp" --emit obj --target "$target" --cc "$cross_cc" \
       --output "$abi_dir/cross.o" >/dev/null
     "$cross_objcopy" --redefine-sym main=sl_abi_unused_entry "$abi_dir/cross.o"
-    "$cross_cc" "$abi_dir/caller.c" "$abi_dir/cross.o" "$workspace_dir/runtime/slop_rt.c" \
+    "$cross_cc" "$abi_dir/caller.c" "$abi_dir/cross.o" "$workspace_dir/runtime/slop_rt_core.c" \
+    "$workspace_dir/runtime/slop_rt_hosted.c" \
       -o "$abi_dir/cross" >"$abi_dir/cross.link" 2>&1 ||
       fail "the $target ABI program did not link"
     capture "$abi_dir/cross.out" "$qemu" "$abi_dir/cross"
