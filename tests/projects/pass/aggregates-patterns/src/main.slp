@@ -1,3 +1,5 @@
+(take std:io println println-i64)
+
 (struct Point ((x i64) (label String)))
 
 (enum Inner
@@ -33,11 +35,11 @@
 
 (fn main () -> i32
   (let point (Point :x 42 :label "field"))
-  (println (. point x))
-  (println (score (Outer:Wrap (Inner:Value 42))))
-  (println (score (Outer:Pointed (Point :x 7 :label "nested"))))
-  (println (boolean-score true))
-  (println (integer-score 9))
+  (println-i64 (. point x))
+  (println-i64 (score (Outer:Wrap (Inner:Value 42))))
+  (println-i64 (score (Outer:Pointed (Point :x 7 :label "nested"))))
+  (println-i64 (boolean-score true))
+  (println-i64 (integer-score 9))
   0)
 
 (test "nested enum pattern"

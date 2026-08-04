@@ -1,5 +1,7 @@
+(take std:io println-i64)
+
 (fn main () -> i32
   (let value "borrowed")
   (let values (list (& value)))
-  (println (len (& values)))
+  (println-i64 (len (& values)))
   0)

@@ -29,6 +29,9 @@ SlString *probe_string(void) { return sl_rt_string_new("from C", 6); }
 PROBE
 
 cat >"$check_dir/runtime.slp" <<'SLOPIUM'
+(take std:io println println-i64 parse-i64 read-line)
+(take std:process arg args-len)
+
 (struct Pair ((left String) (right String)))
 (enum Message Empty (Text ((value String))))
 
@@ -44,7 +47,7 @@ cat >"$check_dir/runtime.slp" <<'SLOPIUM'
   (let message (Message:Text "payload"))
   (let mut values (list number 2 3))
   (do (push (&mut values) 4))
-  (println (get (& values) 0))
+  (println-i64 (get (& values) 0))
   (let mut owned (list "one" "two"))
   (do (push (&mut owned) "three"))
   (let owned-first (get-ref (& owned) 0))
@@ -55,13 +58,13 @@ cat >"$check_dir/runtime.slp" <<'SLOPIUM'
   (let view (slice (& fixed) 1 3))
   (let viewed (get-ref (& view) 0))
   (println viewed)
-  (println (args-len))
+  (println-i64 (args-len))
   (let first (arg 0))
   (println (& first))
-  (println (probe-strlen (& first)))
+  (println-i64 (probe-strlen (& first)))
   (let numbers (array 10 20 30 40))
   (let number-view (slice (& numbers) 1 4))
-  (println (probe-slice (& number-view)))
+  (println-i64 (probe-slice (& number-view)))
   (let greeting (probe-string))
   (println (& greeting))
   (match message

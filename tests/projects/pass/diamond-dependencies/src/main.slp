@@ -1,10 +1,12 @@
+(take std:io println-i64)
+
 (take mathlib:lib answer)
 (take geometry:lib perimeter)
 
 (fn main () -> i32
-  (println (answer))
-  (println (perimeter))
-  (println (foundation:numbers:forty))
+  (println-i64 (answer))
+  (println-i64 (perimeter))
+  (println-i64 (foundation:numbers:forty))
   0)
 
 (test "both branches of a diamond reach the shared dependency"

@@ -662,13 +662,6 @@ impl Builder {
                         arg_types: arg_types.clone(),
                         result: expr.ty.clone(),
                     });
-                    if matches!(callee.as_str(), "print" | "println") {
-                        for (local, ty) in lowered.into_iter().zip(arg_types) {
-                            if ty == Type::String {
-                                self.emit(Instruction::Drop { local, ty });
-                            }
-                        }
-                    }
                 }
                 for value in cloned_temporaries {
                     self.drop_temporary(Some(value));
@@ -1247,11 +1240,13 @@ mod tests {
 
     #[test]
     fn inserts_string_drop() {
-        let source = r#"(fn main () -> i32 (let text "hello") (println (& text)) 0)"#;
+        let source = r#"(fn show ((text (& String))) -> unit ())
+            (fn main () -> i32 (let text "hello") (show (& text)) 0)"#;
         let mir = compile_to_mir("test.slp", source, &CompileOptions::default()).unwrap();
-        let has_drop = mir.functions[0]
-            .blocks
+        let has_drop = mir
+            .functions
             .iter()
+            .flat_map(|function| function.blocks.iter())
             .flat_map(|block| block.instructions())
             .any(|inst| {
                 matches!(

@@ -1,3 +1,4 @@
+(take mini-std:io println-i64)
 (take mini-std:option Option)
 (take mini-std:result Result)
 
@@ -10,11 +11,11 @@
 
 (fn main () -> i32
   (let mut values (list 7))
-  (println
+  (println-i64
     (match (pop (&mut values))
       ((Option:Some value) value)
       ((Option:None) 0)))
-  (println
+  (println-i64
     (match (forward)
       ((Result:Ok value) value)
       ((Result:Err error) 0)))

@@ -1,0 +1,14 @@
+; The process this program is: its arguments and its environment.
+
+(export env args-len arg)
+
+(extern "sl_rt_args_len" (args-len) -> i64)
+
+(extern "sl_rt_arg" (arg (index i64)) -> String)
+
+; The runtime refuses a name with an embedded NUL rather than looking up the
+; prefix `getenv` would stop at, and it needs the length to see one (`D-079`).
+(extern "sl_rt_env" (env-bytes (name (& String)) (length i64)) -> String)
+
+(fn env ((name (& String))) -> String
+  (env-bytes name (len name)))

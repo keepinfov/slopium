@@ -1,4 +1,4 @@
 (extern "hal_add" (hal-add (a i64) (b i64)) -> i64)
 (fn main () -> i32
-  (println (hal-add 1))
+  (let sum (hal-add 1))
   0)

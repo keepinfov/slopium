@@ -40,7 +40,7 @@ syntax keyword slopiumModuleKeyword export take
 syntax match slopiumParameter "\v<[a-z_][A-Za-z0-9_-]*>\ze\s+(&mut|&)?(unit|bool|i32|i64|f64|String|[A-Z][A-Za-z0-9_-]*)\s*\)"
 
 syntax match slopiumOwnership "&mut\|&"
-syntax keyword slopiumBuiltin clone list array slice len push get get-ref pop remove print println read-i64 read-line parse-i64 env args-len arg
+syntax keyword slopiumBuiltin clone list array slice len push get get-ref pop remove
 syntax match slopiumOperator "\%((\s*\)\@<=[-+*/<>=]"
 syntax keyword slopiumType unit bool i32 i64 f64 String List Array Slice
 syntax match slopiumEnumPath "\v<[A-Za-z_][A-Za-z0-9_-]*(:[A-Za-z_][A-Za-z0-9_-]*)+>"

@@ -1,3 +1,5 @@
+(take std:io println println-i64)
+
 (fn show ((value (& String))) -> unit
   (println value))
 
@@ -16,7 +18,7 @@
   (let first (get-ref (& values) 0))
   (println first)
   (append (&mut values))
-  (println (len (& values)))
+  (println-i64 (len (& values)))
   (let removed (remove (&mut values) 1))
   (show (& removed))
   0)

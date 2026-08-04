@@ -1,0 +1,47 @@
+; Standard input and output.
+;
+; There are no traits yet (`D-068`), so one name cannot print every printable
+; type. Until `std:string:from-i64` exists the widths are separate functions,
+; and `(println (from-i64 n))` replaces `println-i64` when it does (`D-078`).
+
+(export print println print-i32 println-i32 print-i64 println-i64 print-bool
+  println-bool read-line read-i64 parse-i64)
+
+; A `(& String)` crosses the boundary as a pointer with no length, and a
+; Slopium string may contain a NUL byte, so the length travels beside it
+; (`D-079`).
+(extern "sl_rt_print_bytes" (write-bytes (bytes (& String)) (length i64)) -> unit)
+
+(extern "sl_rt_println_bytes"
+  (write-line-bytes (bytes (& String)) (length i64)) -> unit)
+
+(extern "sl_rt_print_i32" (print-i32 (value i32)) -> unit)
+
+(extern "sl_rt_println_i32" (println-i32 (value i32)) -> unit)
+
+(extern "sl_rt_print_i64" (print-i64 (value i64)) -> unit)
+
+(extern "sl_rt_println_i64" (println-i64 (value i64)) -> unit)
+
+(extern "sl_rt_read_line" (read-line) -> String)
+
+(extern "sl_rt_read_i64" (read-i64) -> i64)
+
+(extern "sl_rt_parse_i64" (parse-bytes (text (& String)) (length i64)) -> i64)
+
+(fn print ((text (& String))) -> unit
+  (write-bytes text (len text)))
+
+(fn println ((text (& String))) -> unit
+  (write-line-bytes text (len text)))
+
+(fn print-bool ((flag bool)) -> unit
+  (print-i64 (if flag 1 0)))
+
+(fn println-bool ((flag bool)) -> unit
+  (println-i64 (if flag 1 0)))
+
+; Still C, because reading digits out of a string needs byte access on `String`
+; and that is v0.5.3.
+(fn parse-i64 ((text (& String))) -> i64
+  (parse-bytes text (len text)))

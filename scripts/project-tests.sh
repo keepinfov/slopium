@@ -107,7 +107,7 @@ assert_patterns \
   <(printf '%s\n' "$host_target (installed, default)" "$cross_target (installed)") \
   "$result_dir/targets.stdout"
 env SLOPIC="$compiler" "$manager" compiler >"$result_dir/compiler.stdout"
-assert_patterns <(printf '%s\n' '"protocol": 6') "$result_dir/compiler.stdout"
+assert_patterns <(printf '%s\n' '"protocol": 7') "$result_dir/compiler.stdout"
 
 generated_project="$result_dir/generated-project"
 env SLOPIC="$compiler" "$manager" new generated-project --path "$generated_project" \
@@ -312,18 +312,18 @@ basic_project="$projects_dir/pass/basics"
 basic_source="$basic_project/src/main.slp"
 emit_dir="$result_dir/emits"
 mkdir -p "$emit_dir"
-"$compiler" "$basic_source" --source-root "$basic_project/src" --emit check
-"$compiler" "$basic_source" --source-root "$basic_project/src" \
+"$compiler" "$basic_source" --source-root "$basic_project/src" --toolchain-dependency std --emit check
+"$compiler" "$basic_source" --source-root "$basic_project/src" --toolchain-dependency std \
   --emit hir --output "$emit_dir/basics.hir.json"
-"$compiler" "$basic_source" --source-root "$basic_project/src" \
+"$compiler" "$basic_source" --source-root "$basic_project/src" --toolchain-dependency std \
   --emit mir --output "$emit_dir/basics.mir.json"
-"$compiler" "$basic_source" --source-root "$basic_project/src" \
+"$compiler" "$basic_source" --source-root "$basic_project/src" --toolchain-dependency std \
   --emit mir-text --output "$emit_dir/basics.mir.txt"
-"$compiler" "$basic_source" --source-root "$basic_project/src" \
+"$compiler" "$basic_source" --source-root "$basic_project/src" --toolchain-dependency std \
   --emit asm --output "$emit_dir/basics-assembly.s"
-"$compiler" "$basic_source" --source-root "$basic_project/src" \
+"$compiler" "$basic_source" --source-root "$basic_project/src" --toolchain-dependency std \
   --emit obj --output "$emit_dir/basics-object.o"
-"$compiler" "$basic_source" --source-root "$basic_project/src" \
+"$compiler" "$basic_source" --source-root "$basic_project/src" --toolchain-dependency std \
   --emit exe --optimize --strip --output "$emit_dir/basics"
 "$emit_dir/basics" >"$emit_dir/basics.stdout"
 if ! cmp --silent "$basic_project/expected.stdout" "$emit_dir/basics.stdout"; then
@@ -331,7 +331,7 @@ if ! cmp --silent "$basic_project/expected.stdout" "$emit_dir/basics.stdout"; th
   diff -u "$basic_project/expected.stdout" "$emit_dir/basics.stdout" >&2 || true
   exit 1
 fi
-"$compiler" "$basic_source" --source-root "$basic_project/src" \
+"$compiler" "$basic_source" --source-root "$basic_project/src" --toolchain-dependency std \
   --emit exe --test --output "$emit_dir/basics-tests"
 "$emit_dir/basics-tests" >"$emit_dir/basics-tests.stdout"
 assert_patterns <(printf '%s\n' ' ... ok') "$emit_dir/basics-tests.stdout"
@@ -442,7 +442,7 @@ fi
 set +e
 "$compiler" "$projects_dir/compile-fail/ownership-move/src/main.slp" \
   --source-root "$projects_dir/compile-fail/ownership-move/src" \
-  --emit check --diagnostic-format json \
+  --toolchain-dependency std --emit check --diagnostic-format json \
   >"$emit_dir/diagnostic.stdout" 2>"$emit_dir/diagnostic.jsonl"
 diagnostic_status=$?
 set -e

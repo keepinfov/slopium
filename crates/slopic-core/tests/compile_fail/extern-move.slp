@@ -1,5 +1,5 @@
 (extern "hal_strlen" (hal-strlen (text (& String))) -> i64)
 (fn main () -> i32
   (let text "moved")
-  (println (hal-strlen text))
+  (let length (hal-strlen text))
   0)

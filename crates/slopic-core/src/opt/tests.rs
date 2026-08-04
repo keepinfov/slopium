@@ -160,10 +160,11 @@ fn every_block_stays_terminated_and_reachable_after_simplification() {
 #[test]
 fn dead_pure_instructions_are_removed_but_drops_are_kept() {
     let source = r#"
+        (extern "sl_rt_show" (show (text (& String))) -> unit)
         (fn probe () -> i64
           (let unused 7)
           (let text "kept")
-          (println (& text))
+          (show (& text))
           42)
         (fn main () -> i32 0)
     "#;
@@ -179,7 +180,7 @@ fn dead_pure_instructions_are_removed_but_drops_are_kept() {
     assert!(
         body.iter().any(|inst| matches!(
             inst,
-            Instruction::Call { callee, .. } if callee.contains("print")
+            Instruction::Call { callee, .. } if callee.contains("show")
         )),
         "the call must survive; it has side effects"
     );
@@ -194,7 +195,8 @@ fn dead_pure_instructions_are_removed_but_drops_are_kept() {
 #[test]
 fn a_call_is_never_removed_even_when_its_result_is_unused() {
     let source = r#"
-        (fn shout () -> i64 (println 1) 0)
+        (extern "sl_rt_note" (note (value i64)) -> unit)
+        (fn shout () -> i64 (note 1) 0)
         (fn probe () -> i64 (let ignored (shout)) 5)
         (fn main () -> i32 0)
     "#;
@@ -343,12 +345,34 @@ fn the_shipped_fixture_corpus_still_optimizes_cleanly() {
             continue;
         };
         let name = entry.display().to_string();
-        let options = CompileOptions {
+        let mut options = CompileOptions {
             optimize: true,
             ..CompileOptions::default()
         };
-        // Fixtures needing dependencies do not lower standalone; skip them.
-        let Ok(module) = compile_to_mir(&name, &source, &options) else {
+        for (item, path) in crate::std_language_items() {
+            let slot = match item.as_str() {
+                "option" => &mut options.language_items.option,
+                "result" => &mut options.language_items.result,
+                "result-ok" => &mut options.language_items.result_ok,
+                _ => &mut options.language_items.result_err,
+            };
+            *slot = Some(path);
+        }
+        // A fixture prints, so it needs the library; one that also needs a path
+        // dependency does not lower here at all, and is skipped.
+        let mut files = crate::std_package_sources(crate::STD_PACKAGE);
+        files.push(crate::package::PackageSource {
+            path: name.clone(),
+            namespace: None,
+            module: "main".into(),
+            source,
+        });
+        let input = crate::package::PackageInput {
+            name: "fixture".into(),
+            entry_module: "main".into(),
+            files,
+        };
+        let Ok(module) = crate::compile_package_to_mir(&input, &options) else {
             continue;
         };
         checked += 1;

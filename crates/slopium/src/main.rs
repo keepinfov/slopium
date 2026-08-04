@@ -570,6 +570,7 @@ fn create_project(name: &str, path: Option<PathBuf>, library: bool) -> Result<()
     };
     let manifest = format!(
         "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nsource = \"src\"\nentry = \"{entry}\"\n\n\
+         [dependencies]\nstd = {{ toolchain = true }}\n\n\
          {build}\
          [profile.dev]\nopt-level = 0\ndebug = true\nstrip = false\npanic = \"message\"\n\n\
          [profile.release]\nopt-level = 1\ndebug = false\nstrip = true\npanic = \"message\"\n"
@@ -581,7 +582,8 @@ fn create_project(name: &str, path: Option<PathBuf>, library: bool) -> Result<()
             .to_owned()
     } else {
         format!(
-            "(fn main () -> i32\n  (let message \"hello from {name}\")\n  (println (& message))\n  0)\n\n\
+            "(take std:io println)\n\n\
+             (fn main () -> i32\n  (let message \"hello from {name}\")\n  (println (& message))\n  0)\n\n\
              (test \"arithmetic\"\n  (= (+ 20 22) 42))\n"
         )
     };

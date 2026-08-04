@@ -21,6 +21,14 @@ struct Cli {
     #[arg(long = "toolchain-dependency", value_name = "ALIAS")]
     toolchain_dependencies: Vec<String>,
 
+    /// Compile a lone file without the bundled library. A file has no manifest
+    /// to declare a dependency in, so it gets the library by default (`D-077`);
+    /// this is for the object that must carry nothing but its own symbols. A
+    /// package is unaffected either way: `--source-root` means the manifest
+    /// decided.
+    #[arg(long)]
+    no_std: bool,
+
     #[arg(long = "language-item", value_name = "NAME=PATH")]
     language_items: Vec<String>,
 
@@ -161,29 +169,17 @@ fn main() {
         };
         *slot = Some(path.to_owned());
     }
-    if cli
-        .toolchain_dependencies
-        .iter()
-        .any(|namespace| namespace == "std")
-    {
-        language_items
-            .option
-            .get_or_insert_with(|| "std:option:Option".into());
-        language_items
-            .result
-            .get_or_insert_with(|| "std:result:Result".into());
-        language_items
-            .result_ok
-            .get_or_insert_with(|| "std:result:Ok".into());
-        language_items
-            .result_err
-            .get_or_insert_with(|| "std:result:Err".into());
+    // The language items the bundled library supplies are filled in by the
+    // compiler, from the library, for whoever asked for it.
+    let mut toolchain_dependencies = cli.toolchain_dependencies;
+    if cli.source_root.is_none() && !cli.no_std && toolchain_dependencies.is_empty() {
+        toolchain_dependencies.push(slopic_core::STD_PACKAGE.to_owned());
     }
     let request = CompileRequest {
         input,
         source_root: cli.source_root,
         dependencies,
-        toolchain_dependencies: cli.toolchain_dependencies,
+        toolchain_dependencies,
         output: cli.output,
         emit: match cli.emit {
             Emit::Check => EmitKind::Check,

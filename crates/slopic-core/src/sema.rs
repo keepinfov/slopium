@@ -1937,15 +1937,6 @@ impl<'a> Analyzer<'a> {
         if self.variants.contains_key(callee) {
             return self.enum_init(expr, callee, args, expected);
         }
-        if matches!(callee, "print" | "println") {
-            return self.print_call(expr, callee, args);
-        }
-        if matches!(
-            callee,
-            "read-i64" | "read-line" | "parse-i64" | "env" | "args-len" | "arg"
-        ) {
-            return self.runtime_io_call(expr, callee, args);
-        }
         if matches!(callee, "+" | "-" | "*" | "/" | "<" | ">" | "=") {
             return self.operator_call(expr, callee, args, expected);
         }
@@ -2543,6 +2534,22 @@ impl<'a> Analyzer<'a> {
             return self.typed(expr, Type::Unit, TExprKind::Unit);
         }
         let list = self.expr(&args[0], None);
+        // A string is not a collection — it has no element type and nothing
+        // else in this family applies to it — but its byte length is the one
+        // thing the library cannot compute for itself, because the boundary
+        // hands C a pointer and no length (`D-079`).
+        if callee == "len"
+            && matches!(&list.ty, Type::Ref { inner, .. } if inner.as_ref() == &Type::String)
+        {
+            return self.typed(
+                expr,
+                Type::I64,
+                TExprKind::Call {
+                    callee: callee.into(),
+                    args: vec![list],
+                },
+            );
+        }
         let (mutable, element, kind) = match &list.ty {
             Type::Ref { mutable, inner } => match inner.as_ref() {
                 Type::List(element) => (*mutable, element.as_ref().clone(), CollectionKind::List),
@@ -2681,114 +2688,6 @@ impl<'a> Analyzer<'a> {
                     args: typed,
                 },
             ),
-            _ => unreachable!(),
-        }
-    }
-
-    fn print_call(&mut self, expr: &Expr, callee: &str, args: &[Expr]) -> TExpr {
-        if args.len() != 1 {
-            self.error(expr.span, format!("`{callee}` expects one argument"));
-            return self.typed(expr, Type::Unit, TExprKind::Unit);
-        }
-        let arg = self.expr(&args[0], None);
-        let printable = match &arg.ty {
-            Type::I32 | Type::I64 | Type::Bool | Type::String => true,
-            Type::Ref { inner, .. } => matches!(inner.as_ref(), Type::String),
-            _ => false,
-        };
-        if !printable {
-            self.error(arg.span, format!("`{callee}` cannot print `{}`", arg.ty));
-        }
-        self.typed(
-            expr,
-            Type::Unit,
-            TExprKind::Call {
-                callee: callee.to_owned(),
-                args: vec![arg],
-            },
-        )
-    }
-
-    fn runtime_io_call(&mut self, expr: &Expr, callee: &str, args: &[Expr]) -> TExpr {
-        match callee {
-            "read-i64" | "args-len" => {
-                if !args.is_empty() {
-                    self.error(expr.span, format!("`{callee}` expects no arguments"));
-                }
-                self.typed(
-                    expr,
-                    Type::I64,
-                    TExprKind::Call {
-                        callee: callee.to_owned(),
-                        args: Vec::new(),
-                    },
-                )
-            }
-            "read-line" => {
-                if !args.is_empty() {
-                    self.error(expr.span, "`read-line` expects no arguments");
-                }
-                self.typed(
-                    expr,
-                    Type::String,
-                    TExprKind::Call {
-                        callee: callee.to_owned(),
-                        args: Vec::new(),
-                    },
-                )
-            }
-            "env" | "parse-i64" => {
-                if args.len() != 1 {
-                    self.error(
-                        expr.span,
-                        format!("`{callee}` expects one `&String` argument"),
-                    );
-                    return self.typed(expr, Type::Unit, TExprKind::Unit);
-                }
-                let arg = self.expr(&args[0], None);
-                let is_string_ref = matches!(
-                    &arg.ty,
-                    Type::Ref { inner, .. } if inner.as_ref() == &Type::String
-                );
-                if !is_string_ref {
-                    self.diagnostics.push(
-                        Diagnostic::error(
-                            codes::NAME_OR_TYPE,
-                            self.file,
-                            arg.span,
-                            format!("`{callee}` expects `&String`, found `{}`", arg.ty),
-                        )
-                        .with_help("store the string in a binding and pass `(& name)`"),
-                    );
-                }
-                self.typed(
-                    expr,
-                    if callee == "env" {
-                        Type::String
-                    } else {
-                        Type::I64
-                    },
-                    TExprKind::Call {
-                        callee: callee.to_owned(),
-                        args: vec![arg],
-                    },
-                )
-            }
-            "arg" => {
-                if args.len() != 1 {
-                    self.error(expr.span, "`arg` expects one i64 index");
-                    return self.typed(expr, Type::Unit, TExprKind::Unit);
-                }
-                let index = self.expr(&args[0], Some(&Type::I64));
-                self.typed(
-                    expr,
-                    Type::String,
-                    TExprKind::Call {
-                        callee: callee.to_owned(),
-                        args: vec![index],
-                    },
-                )
-            }
             _ => unreachable!(),
         }
     }
@@ -3390,7 +3289,7 @@ mod tests {
             (fn main () -> i32
               (let value "hello")
               (consume value)
-              (println value)
+              (consume value)
               0)
         "#;
         let errors = analyze_source(source).unwrap_err();
@@ -3460,15 +3359,16 @@ mod tests {
         // Popping the inner scope must decrement the borrow count, not clear
         // it: `view` still points into the buffer that `push` would realloc.
         let source = r#"
+            (fn show ((text (& String))) -> unit ())
             (fn main () -> i32
               (do
                 (let mut values (list "one" "two" "three" "four"))
                 (let view (slice (& values) 0 2))
                 (do
                   (let second (get-ref (& values) 1))
-                  (println second))
+                  (show second))
                 (do (push (&mut values) "five"))
-                (println (get-ref (& view) 0))
+                (show (get-ref (& view) 0))
                 0))
         "#;
         let errors = analyze_source(source).unwrap_err();
@@ -3480,9 +3380,10 @@ mod tests {
     #[test]
     fn accepts_borrowed_string() {
         let source = r#"
+            (fn show ((text (& String))) -> unit ())
             (fn main () -> i32
               (let value "hello")
-              (println (& value))
+              (show (& value))
               0)
         "#;
         analyze_source(source).unwrap();

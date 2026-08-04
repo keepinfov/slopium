@@ -83,16 +83,18 @@ source = "src"
 entry = "src/main.slp"
 
 [dependencies]
+std = { toolchain = true }
 geometry = { $spec }
 
 [build]
 target = "x86_64-unknown-linux-gnu"
 EOF
   cat >"$root/src/main.slp" <<'EOF'
+(take std:io println-i64)
 (take geometry:lib area)
 
 (fn main () -> i32
-  (println (area))
+  (println-i64 (area))
   0)
 EOF
 }

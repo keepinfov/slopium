@@ -1,6 +1,8 @@
+(take std:io println-i64)
+
 (fn double (T) ((value T)) -> T
   (+ value value))
 
 (fn main () -> i32
-  (println (double 21))
+  (println-i64 (double 21))
   0)

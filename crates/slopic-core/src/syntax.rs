@@ -370,6 +370,19 @@ mod tests {
     use super::*;
     use crate::{compile_to_hir, CompileOptions};
 
+    /// The bundled library is read by anyone who follows a diagnostic into it,
+    /// and it is the one package `fmt` will never be run on, because it is not
+    /// anybody's project. So it is checked here instead.
+    #[test]
+    fn the_bundled_library_is_canonically_formatted() {
+        for (module, source) in slopium_std::STD_MODULES {
+            let path = slopium_std::std_module_path(module);
+            let formatted = format_source(&path, source, &FormatOptions::default())
+                .expect("a bundled module parses");
+            assert_eq!(&formatted, source, "`{path}` is not canonically formatted");
+        }
+    }
+
     fn remove_spans(value: &mut serde_json::Value) {
         match value {
             serde_json::Value::Object(fields) => {

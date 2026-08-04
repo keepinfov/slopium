@@ -1,5 +1,7 @@
+(take std:io println-i64)
+
 (fn main () -> i32
-  (println (+ 9223372036854775807 1))
+  (println-i64 (+ 9223372036854775807 1))
   0)
 
 (test "fixture compiles" true)

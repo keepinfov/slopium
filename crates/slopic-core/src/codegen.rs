@@ -2156,8 +2156,10 @@ mod tests {
 (fn main () -> i32
   (let a 6)
   (let b (square a))
-  (println b)
+  (note b)
   0)
+
+(extern \"sl_rt_note\" (note (value i64)) -> unit)
 ";
 
     fn assemble_with_debug(file: &str, source: &str) -> String {
@@ -2269,7 +2271,7 @@ mod tests {
                 ),
                 source(
                     "main",
-                    "(take helper twice)\n(fn main () -> i32\n  (println (twice 21))\n  0)\n",
+                    "(take helper twice)\n(fn main () -> i32\n  (let doubled (twice 21))\n  0)\n",
                 ),
             ],
         };

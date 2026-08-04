@@ -1,6 +1,8 @@
 ; Scalar types, inference, mutation, control flow, recursion, and ABI stack
 ; arguments all live in one deliberately small project.
 
+(take std:io print println-bool println-i64)
+
 (fn factorial ((value i64)) -> i64
   (if (< value 2)
     1
@@ -16,10 +18,10 @@
   (set answer (+ answer 2))
   (let label "basics:")
   (print (& label))
-  (println answer)
-  (println true)
-  (println (factorial 6))
-  (println (sum-eight 1 2 3 4 5 6 7 8))
+  (println-i64 answer)
+  (println-bool true)
+  (println-i64 (factorial 6))
+  (println-i64 (sum-eight 1 2 3 4 5 6 7 8))
   (do ())
   0)
 

@@ -1,0 +1,6 @@
+; A library that replaces the toolchain's reaches the runtime the same way the
+; toolchain's does: through an `extern`. Nothing here is privileged.
+
+(export println-i64)
+
+(extern "sl_rt_println_i64" (println-i64 (value i64)) -> unit)

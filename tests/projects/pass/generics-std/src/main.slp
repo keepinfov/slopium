@@ -1,3 +1,5 @@
+(take std:io println println-i64)
+
 (take std:option Option)
 (take std:result Result)
 
@@ -30,21 +32,21 @@
         0))))
 
 (fn main () -> i32
-  (println (identity 42))
+  (println-i64 (identity 42))
   (let text (identity "generic"))
   (println (& text))
   (let wrapped (wrap "wrapped"))
   (let boxed (Box :value 7))
-  (println (. boxed value))
+  (println-i64 (. boxed value))
   (let maybe (Maybe:Some 40))
-  (println
+  (println-i64
     (match maybe
       ((Maybe:None) 0)
       ((Maybe:Some value) value)))
-  (println (show-result (forward true)))
-  (println (show-result (forward false)))
+  (println-i64 (show-result (forward true)))
+  (println-i64 (show-result (forward false)))
   (let mut values (list 9))
-  (println
+  (println-i64
     (match (pop (&mut values))
       ((Option:Some value) value)
       ((Option:None) 0)))

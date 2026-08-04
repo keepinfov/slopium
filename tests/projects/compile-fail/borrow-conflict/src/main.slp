@@ -1,6 +1,8 @@
+(take std:io println-i64)
+
 (fn main () -> i32
   (let mut values (list "one"))
   (let borrowed (get-ref (& values) 0))
   (do (push (&mut values) "two"))
-  (println borrowed)
+  (println-i64 borrowed)
   0)

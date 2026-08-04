@@ -17,6 +17,7 @@ source = "src"
 entry = "src/main.slp"
 
 [dependencies]
+std = { toolchain = true }
 helper = { path = "helper" }
 foundation = { workspace = true }
 

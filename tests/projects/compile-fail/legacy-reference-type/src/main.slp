@@ -1,4 +1,6 @@
+(take std:io println-i64)
+
 (fn show ((value &String)) -> unit
-  (println value))
+  (println-i64 value))
 
 (fn main () -> i32 0)

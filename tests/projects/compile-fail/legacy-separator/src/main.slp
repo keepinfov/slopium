@@ -1,3 +1,5 @@
+(take std:io println-i64)
+
 (fn main () -> i32
-  (println (helper::answer))
+  (println-i64 (helper::answer))
   0)

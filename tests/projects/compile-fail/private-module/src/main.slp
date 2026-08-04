@@ -1,3 +1,5 @@
+(take std:io println-i64)
+
 (fn main () -> i32
-  (println (secret:hidden))
+  (println-i64 (secret:hidden))
   0)

@@ -1509,7 +1509,8 @@ mod tests {
         )
         .unwrap();
         let geometry = "(export distance)\n(fn distance ((n i64)) -> i64 (+ n 1))\n";
-        let main = "(take geometry (distance :as length))\n(fn main () -> i32 (do (println (length 41)) 0))\n";
+        let main = "(take std:io println-i64)\n(take geometry (distance :as length))\n\
+                    (fn main () -> i32 (do (println-i64 (length 41)) 0))\n";
         let geometry_path = root.join("src/geometry.slp");
         let main_path = root.join("src/main.slp");
         fs::write(&geometry_path, geometry).unwrap();

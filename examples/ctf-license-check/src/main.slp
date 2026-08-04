@@ -4,6 +4,9 @@
 ; The service compiles this source to a native ELF. The real flag is supplied
 ; only to the deployed process through the FLAG environment variable.
 
+(take std:io println read-i64)
+(take std:process env)
+
 (fn mix-ticket ((value i64)) -> i64
   (+ (* value 31337) 7331))
 

@@ -760,6 +760,8 @@ cc = "x86_64-unknown-linux-gnu-gcc"
 ## Минимальный пример языка
 
 ```lisp
+(take std:io println println-i64)
+
 (fn fib ((n i64)) -> i64
   (if (< n 2)
       n
@@ -768,12 +770,16 @@ cc = "x86_64-unknown-linux-gnu-gcc"
 (fn main () -> i32
   (let message "fib(10)")
   (println (& message))
-  (println (fib 10))
+  (println-i64 (fib 10))
   0)
 
 (test "fibonacci"
   (= (fib 10) 55))
 ```
+
+Ввод и вывод — это библиотека, а не язык: `std:io` и `std:process` написаны на
+Slopium поверх `extern` (`D-063`). Пакет объявляет `std = { toolchain = true }`
+в манифесте; одиночный файл получает библиотеку сам, а `--no-std` её отключает.
 
 Дополнительные программы находятся в [`examples/`](examples/):
 

@@ -5,6 +5,7 @@ source = "src"
 entry = "src/main.slp"
 
 [dependencies]
+std = { toolchain = true }
 mathlib = { path = "../../dependencies/mathlib" }
 
 [build]

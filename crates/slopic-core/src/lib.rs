@@ -25,11 +25,12 @@ use crate::diagnostic::{codes, CompileResult, Diagnostic, SourceMap};
 use crate::mir::MirModule;
 use crate::sema::TypedProgram;
 use serde::Serialize;
+pub use slopium_std::{std_language_items, STD_MODULES, STD_PACKAGE};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub const COMPILER_PROTOCOL: u32 = 6;
+pub const COMPILER_PROTOCOL: u32 = 7;
 pub const RUNTIME_SOURCE: &[u8] = include_bytes!("../../../runtime/slop_rt.c");
 pub const STANDARD_LIBRARY_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -427,40 +428,43 @@ fn request_options(request: &CompileRequest) -> CompileOptions {
     if request
         .toolchain_dependencies
         .iter()
-        .any(|namespace| namespace == "std")
+        .any(|namespace| namespace == STD_PACKAGE)
     {
-        options
-            .language_items
-            .option
-            .get_or_insert_with(|| "std:option:Option".into());
-        options
-            .language_items
-            .result
-            .get_or_insert_with(|| "std:result:Result".into());
-        options
-            .language_items
-            .result_ok
-            .get_or_insert_with(|| "std:result:Ok".into());
-        options
-            .language_items
-            .result_err
-            .get_or_insert_with(|| "std:result:Err".into());
+        // The manager sends these explicitly for a package it resolved; a lone
+        // file has no manifest to send them from, and both cases mean the same
+        // library, so the defaults come from the library itself (`D-076`).
+        for (name, path) in std_language_items() {
+            let slot = match name.as_str() {
+                "option" => &mut options.language_items.option,
+                "result" => &mut options.language_items.result,
+                "result-ok" => &mut options.language_items.result_ok,
+                "result-err" => &mut options.language_items.result_err,
+                _ => continue,
+            };
+            slot.get_or_insert(path);
+        }
     }
     options
 }
 
+/// The bundled library as package sources under `namespace`.
+///
+/// The library ships inside the compiler, so there is no path to read it from
+/// and no version to resolve: a build that asked for the toolchain library gets
+/// these, and the manager hashes the same bytes into the lock (`D-076`).
+pub fn std_package_sources(namespace: &str) -> Vec<package::PackageSource> {
+    STD_MODULES
+        .iter()
+        .map(|(module, source)| package::PackageSource {
+            path: format!("<toolchain:{namespace}>/{module}.slp"),
+            namespace: Some(namespace.to_owned()),
+            module: (*module).into(),
+            source: (*source).into(),
+        })
+        .collect()
+}
+
 fn package_input(request: &CompileRequest) -> CompileResult<Option<package::PackageInput>> {
-    let Some(root) = request.source_root.as_ref() else {
-        return Ok(None);
-    };
-    let root = root.canonicalize().map_err(|error| {
-        vec![Diagnostic::error(
-            codes::INPUT_IO,
-            root.display().to_string(),
-            Default::default(),
-            format!("cannot resolve source root: {error}"),
-        )]
-    })?;
     let entry = request.input.canonicalize().map_err(|error| {
         vec![Diagnostic::error(
             codes::INPUT_IO,
@@ -469,18 +473,59 @@ fn package_input(request: &CompileRequest) -> CompileResult<Option<package::Pack
             format!("cannot resolve entry source: {error}"),
         )]
     })?;
-    let mut paths = Vec::new();
-    collect_sources(&root, &mut paths).map_err(|error| {
-        vec![Diagnostic::error(
-            codes::INPUT_IO,
-            root.display().to_string(),
-            Default::default(),
-            format!("cannot discover package sources: {error}"),
-        )]
-    })?;
-    paths.sort();
     let mut files = Vec::new();
     let mut entry_module = None;
+    // A lone file is a package of one module, named after the file, whether or
+    // not it asked for the library — so `--no-std` changes what a program can
+    // call and never what its symbols are called (`D-077`).
+    let root = match request.source_root.as_ref() {
+        Some(root) => root.canonicalize().map_err(|error| {
+            vec![Diagnostic::error(
+                codes::INPUT_IO,
+                root.display().to_string(),
+                Default::default(),
+                format!("cannot resolve source root: {error}"),
+            )]
+        })?,
+        None => {
+            let directory = entry.parent().unwrap_or(Path::new(".")).to_path_buf();
+            let module = module_from_path(&directory, &entry).ok_or_else(|| {
+                vec![Diagnostic::error(
+                    codes::MODULE,
+                    request.input.display().to_string(),
+                    Default::default(),
+                    "source path cannot be mapped to a module",
+                )]
+            })?;
+            entry_module = Some(module.clone());
+            files.push(package::PackageSource {
+                path: request.input.display().to_string(),
+                namespace: None,
+                module,
+                source: fs::read_to_string(&entry).map_err(|error| {
+                    vec![Diagnostic::error(
+                        codes::INPUT_IO,
+                        request.input.display().to_string(),
+                        Default::default(),
+                        format!("cannot read input: {error}"),
+                    )]
+                })?,
+            });
+            directory
+        }
+    };
+    let mut paths = Vec::new();
+    if request.source_root.is_some() {
+        collect_sources(&root, &mut paths).map_err(|error| {
+            vec![Diagnostic::error(
+                codes::INPUT_IO,
+                root.display().to_string(),
+                Default::default(),
+                format!("cannot discover package sources: {error}"),
+            )]
+        })?;
+        paths.sort();
+    }
     for path in paths {
         let module = module_from_path(&root, &path).ok_or_else(|| {
             vec![Diagnostic::error(
@@ -559,7 +604,7 @@ fn package_input(request: &CompileRequest) -> CompileResult<Option<package::Pack
         }
     }
     for namespace in &request.toolchain_dependencies {
-        if namespace.rsplit(':').next() != Some("std") {
+        if namespace.rsplit(':').next() != Some(STD_PACKAGE) {
             return Err(vec![Diagnostic::error(
                 codes::DEPENDENCY,
                 request.input.display().to_string(),
@@ -567,26 +612,7 @@ fn package_input(request: &CompileRequest) -> CompileResult<Option<package::Pack
                 format!("toolchain dependency `{namespace}` is not available"),
             )]);
         }
-        for (module, source) in [
-            (
-                "option",
-                "(export Option)\n(enum Option (T) None (Some ((value T))))\n",
-            ),
-            (
-                "result",
-                "(export Result (Result:Ok :as Ok) (Result:Err :as Err))\n\
-                 (enum Result (T E)\n\
-                   (Ok ((value T)))\n\
-                   (Err ((error E))))\n",
-            ),
-        ] {
-            files.push(package::PackageSource {
-                path: format!("<toolchain:{namespace}>/{module}.slp"),
-                namespace: Some(namespace.clone()),
-                module: module.into(),
-                source: source.into(),
-            });
-        }
+        files.extend(std_package_sources(namespace));
     }
     let entry_module = entry_module.ok_or_else(|| {
         vec![Diagnostic::error(
@@ -596,12 +622,15 @@ fn package_input(request: &CompileRequest) -> CompileResult<Option<package::Pack
             "entry source is outside the source root or is not a `.slp` file",
         )]
     })?;
-    let name = root
-        .parent()
-        .and_then(Path::file_name)
-        .and_then(|name| name.to_str())
-        .unwrap_or("package")
-        .to_owned();
+    let name = match request.source_root.as_ref() {
+        Some(_) => root
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            .unwrap_or("package")
+            .to_owned(),
+        None => entry_module.clone(),
+    };
     Ok(Some(package::PackageInput {
         name,
         entry_module,

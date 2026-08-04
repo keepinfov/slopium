@@ -1072,14 +1072,6 @@ fn is_builtin(name: &str) -> bool {
             | "get-ref"
             | "pop"
             | "remove"
-            | "print"
-            | "println"
-            | "read-i64"
-            | "read-line"
-            | "parse-i64"
-            | "env"
-            | "args-len"
-            | "arg"
             | "+"
             | "-"
             | "*"
@@ -1302,7 +1294,7 @@ mod tests {
                 ),
                 source(
                     "main",
-                    "(fn main () -> i32\n  (println (two))\n  0)\n(take beta two)\n",
+                    "(fn main () -> i32\n  (let sum (two))\n  0)\n(take beta two)\n",
                 ),
             ],
         };

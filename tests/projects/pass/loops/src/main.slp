@@ -1,3 +1,5 @@
+(take std:io println-i64)
+
 (fn while-total () -> i64
   (let mut value 0)
   (let mut total 0)
@@ -16,8 +18,8 @@
   value)
 
 (fn main () -> i32
-  (println (while-total))
-  (println (loop-until))
+  (println-i64 (while-total))
+  (println-i64 (loop-until))
   0)
 
 (test "while break and continue"

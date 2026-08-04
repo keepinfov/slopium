@@ -1,3 +1,5 @@
+(take std:io println println-i64)
+
 (take geometry Point (distance :as length))
 (take std:option Option)
 
@@ -5,7 +7,7 @@
 
 (fn main () -> i32
   (let point (Point :x 20 :y 22))
-  (println (identity (length point)))
+  (println-i64 (identity (length point)))
   (let mut messages (list "modules" "ownership"))
   (match (pop (&mut messages))
     ((Option:Some message)

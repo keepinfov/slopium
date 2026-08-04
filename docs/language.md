@@ -21,11 +21,12 @@ path below the package source root: `src/geometry/vector.slp` is
 
 ```lisp
 ; src/main.slp
+(take std:io println-i64)
 (take geometry Point (distance :as length))
 
 (fn main () -> i32
   (let point (Point :x 20 :y 22))
-  (println (length point))
+  (println-i64 (length point))
   0)
 ```
 
@@ -130,11 +131,12 @@ runtime errors with exit status 101.
 ```lisp
 (let fixed (array "zero" "one" "two"))
 (let view (slice (& fixed) 1 3))
-(println (len (& view)))
+(println-i64 (len (& view)))
 ```
 
 `array` creates an owned fixed-length `Array<T, N>`. `slice` creates a
 non-owning range descriptor tied to the lifetime of a borrowed list or array.
+`len` also accepts `(& String)`, where it is the length in bytes.
 
 ## Standard `Option`, `Result`, and `try`
 
@@ -159,21 +161,41 @@ can supply a compatible standard library instead of the bundled one.
 
 ## Console, environment, and process arguments
 
-`read-i64` reads one signed decimal integer. `read-line` returns an owned line
-without LF/CRLF. `parse-i64` validates a borrowed string, and `env` copies an
-environment variable into an owned `String`.
+Input and output are not part of the language. `std:io` and `std:process` are
+ordinary modules of the bundled library, written in Slopium over `extern`
+declarations, and a program that prints says so:
 
 ```lisp
+(take std:io println println-i64 read-i64)
+(take std:process env)
+
 (let number (read-i64))
 (let name "FLAG")
 (let flag (env (& name)))
-(println number)
+(println-i64 number)
 (println (& flag))
 ```
 
-`args-len` excludes the executable name; `arg` returns an owned argument copy.
-Unrecoverable runtime errors print a normalized message and exit with status
-101.
+`read-i64` reads one signed decimal integer. `read-line` returns an owned line
+without LF/CRLF. `parse-i64` validates a borrowed string, and `env` copies an
+environment variable into an owned `String`. `args-len` excludes the executable
+name; `arg` returns an owned argument copy. Unrecoverable runtime errors print
+a normalized message and exit with status 101.
+
+There are no traits yet, so one name cannot print every printable type
+(`D-078`). `print` and `println` take `(& String)`; `print-i32`, `println-i32`,
+`print-i64`, `println-i64`, `print-bool` and `println-bool` take the width they
+name. When `std:string:from-i64` exists these collapse into
+`(println (from-i64 n))`.
+
+A lone file has no manifest to declare a dependency in, so `slopic file.slp`
+compiles it against the bundled library and `--no-std` opts out. A package says
+what it depends on:
+
+```toml
+[dependencies]
+std = { toolchain = true }
+```
 
 ## Calling C
 
@@ -188,7 +210,7 @@ Slopium calls, and it is an ordinary module-level item — private by default,
 
 (fn main () -> i32
   (let text "borrowed")
-  (println (c-strlen (& text)))
+  (println-i64 (c-strlen (& text)))
   0)
 ```
 

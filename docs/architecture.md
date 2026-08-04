@@ -219,7 +219,11 @@ than two.
 
 Resolution, the manifest schema, semantic versions, workspaces and the lockfile
 live in `slopium-manifest`, which both `slopium` and `slopium-lsp` consume — the
-editor and the build cannot namespace a module differently. The language server
+editor and the build cannot namespace a module differently. The bundled library
+itself lives one level lower again, in `slopium-std`: the sources are ordinary
+`.slp` files under `std/`, and the compiler hands them to name resolution while
+the manager hashes them into the lock, so those two cannot disagree about what
+`std` contains (`D-076`). The language server
 analyzes an open file as the member that owns it. `slopic` still types
 and lowers the package as one semantic unit, then emits only the selected
 owner module for each object invocation. Generated function/type/drop/clone

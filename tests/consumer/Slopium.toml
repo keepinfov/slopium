@@ -5,4 +5,5 @@ source = "src"
 entry = "src/main.slp"
 
 [dependencies]
+std = { toolchain = true }
 geometry = "^1"

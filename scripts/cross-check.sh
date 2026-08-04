@@ -139,10 +139,11 @@ trap_dir="$result_dir/traps"
 mkdir -p "$trap_dir"
 
 cat >"$trap_dir/overflow.slp" <<'EOF'
+(take std:io println-i64)
 (fn main () -> i32
   (let big 9223372036854775807)
   (let step (+ big 1))
-  (println step)
+  (println-i64 step)
   0)
 EOF
 cat >"$trap_dir/narrow-overflow.slp" <<'EOF'
@@ -151,15 +152,17 @@ cat >"$trap_dir/narrow-overflow.slp" <<'EOF'
 (fn main () -> i32 (grow (wide)))
 EOF
 cat >"$trap_dir/div-zero.slp" <<'EOF'
+(take std:io println-i64)
 (fn divide ((a i64) (b i64)) -> i64 (/ a b))
 (fn main () -> i32
-  (println (divide 7 0))
+  (println-i64 (divide 7 0))
   0)
 EOF
 cat >"$trap_dir/div-overflow.slp" <<'EOF'
+(take std:io println-i64)
 (fn divide ((a i64) (b i64)) -> i64 (/ a b))
 (fn main () -> i32
-  (println (divide -9223372036854775808 -1))
+  (println-i64 (divide -9223372036854775808 -1))
   0)
 EOF
 
@@ -195,18 +198,19 @@ float_dir="$result_dir/floats"
 mkdir -p "$float_dir"
 
 cat >"$float_dir/nan.slp" <<'EOF'
+(take std:io println-i64)
 (fn zero () -> f64 0.0)
 (fn one () -> f64 1.0)
 (fn flag ((c bool)) -> i64 (if c 1 0))
 (fn main () -> i32
   (let nan (/ (zero) (zero)))
   (let unit (one))
-  (println (flag (< nan unit)))
-  (println (flag (> nan unit)))
-  (println (flag (= nan nan)))
-  (println (flag (< (zero) unit)))
-  (println (flag (> unit (zero))))
-  (println (flag (= unit unit)))
+  (println-i64 (flag (< nan unit)))
+  (println-i64 (flag (> nan unit)))
+  (println-i64 (flag (= nan nan)))
+  (println-i64 (flag (< (zero) unit)))
+  (println-i64 (flag (> unit (zero))))
+  (println-i64 (flag (= unit unit)))
   0)
 EOF
 
@@ -298,6 +302,8 @@ SlString *probe_string(void) { return sl_rt_string_new("from C", 6); }
 EOF
 
 cat >"$ffi_dir/ffi.slp" <<'EOF'
+(take std:io println println-bool println-i32 println-i64)
+
 (extern "probe_ten" (probe-ten (a i64) (b i64) (c i64) (d i64) (e i64) (f i64) (g i64) (h i64) (i i64) (j i64)) -> i64)
 
 (extern "probe_ten_doubles" (probe-ten-doubles (a f64) (b f64) (c f64) (d f64) (e f64) (f f64) (g f64) (h f64) (i f64) (j f64)) -> f64)
@@ -313,16 +319,16 @@ cat >"$ffi_dir/ffi.slp" <<'EOF'
 (extern "probe_string" (probe-string) -> String)
 
 (fn main () -> i32
-  (println (probe-ten 1 2 3 4 5 6 7 8 9 10))
+  (println-i64 (probe-ten 1 2 3 4 5 6 7 8 9 10))
   (let total (probe-ten-doubles 1.5 2.5 3.5 4.5 5.5 6.5 7.5 8.5 9.5 10.5))
-  (println (= total 60.0))
-  (println (probe-mixed 1 1.5 2 2.5 3 3.5 4 4.5 5 5.5 6 6.5 7 7.5 8 8.5 9 9.5 10 10.5))
-  (println (probe-narrow 2000000000))
+  (println-bool (= total 60.0))
+  (println-i64 (probe-mixed 1 1.5 2 2.5 3 3.5 4 4.5 5 5.5 6 6.5 7 7.5 8 8.5 9 9.5 10 10.5))
+  (println-i32 (probe-narrow 2000000000))
   (let text "borrowed")
-  (println (probe-strlen (& text)))
+  (println-i64 (probe-strlen (& text)))
   (let values (array 10 20 30 40))
   (let view (slice (& values) 1 4))
-  (println (probe-slice (& view)))
+  (println-i64 (probe-slice (& view)))
   (let greeting (probe-string))
   (println (& greeting))
   0)
@@ -383,6 +389,8 @@ abi_dir="$result_dir/abi"
 mkdir -p "$abi_dir"
 
 cat >"$abi_dir/abi.slp" <<'EOF'
+(take std:io println-i64)
+
 (fn sum-ten ((a i64) (b i64) (c i64) (d i64) (e i64)
              (f i64) (g i64) (h i64) (i i64) (j i64)) -> i64
   (+ (+ (+ (+ a b) (+ c d)) (+ (+ e f) (+ g h))) (+ i j)))
@@ -408,7 +416,7 @@ cat >"$abi_dir/abi.slp" <<'EOF'
 (fn narrowed ((a i32) (b i32)) -> i32 (- a b))
 
 (fn main () -> i32
-  (println (sum-ten 1 2 3 4 5 6 7 8 9 10))
+  (println-i64 (sum-ten 1 2 3 4 5 6 7 8 9 10))
   0)
 EOF
 
@@ -434,24 +442,26 @@ cat >"$abi_dir/caller.c" <<'EOF'
     1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5,                     \
     6, 6.5, 7, 7.5, 8, 8.5, 9, 9.5, 10, 10.5
 
-int64_t sl_fn_73756d2d74656e(int64_t, int64_t, int64_t, int64_t, int64_t,
+/* `abi.slp` is a package of one module named after the file, so every symbol
+ * carries the `abi:` prefix the hex spells out (`D-077`). */
+int64_t sl_fn_6162693a73756d2d74656e(int64_t, int64_t, int64_t, int64_t, int64_t,
                              int64_t, int64_t, int64_t, int64_t, int64_t);
-double sl_fn_73756d2d74656e2d666c6f617473(double, double, double, double, double,
+double sl_fn_6162693a73756d2d74656e2d666c6f617473(double, double, double, double, double,
                                           double, double, double, double, double);
-int64_t sl_fn_6d697865642d696e746567657273(MIXED_PARAMS);
-double sl_fn_6d697865642d666c6f617473(MIXED_PARAMS);
-int32_t sl_fn_6e6172726f776564(int32_t, int32_t);
+int64_t sl_fn_6162693a6d697865642d696e746567657273(MIXED_PARAMS);
+double sl_fn_6162693a6d697865642d666c6f617473(MIXED_PARAMS);
+int32_t sl_fn_6162693a6e6172726f776564(int32_t, int32_t);
 
 int main(void) {
     printf("integers %lld\n",
-           (long long)sl_fn_73756d2d74656e(1, 2, 3, 4, 5, 6, 7, 8, 9, 10));
+           (long long)sl_fn_6162693a73756d2d74656e(1, 2, 3, 4, 5, 6, 7, 8, 9, 10));
     printf("floats %.1f\n",
-           sl_fn_73756d2d74656e2d666c6f617473(1.5, 2.5, 3.5, 4.5, 5.5,
+           sl_fn_6162693a73756d2d74656e2d666c6f617473(1.5, 2.5, 3.5, 4.5, 5.5,
                                               6.5, 7.5, 8.5, 9.5, 10.5));
     printf("mixed integers %lld\n",
-           (long long)sl_fn_6d697865642d696e746567657273(MIXED_ARGS));
-    printf("mixed floats %.1f\n", sl_fn_6d697865642d666c6f617473(MIXED_ARGS));
-    printf("narrowed %d\n", (int)sl_fn_6e6172726f776564(-2000000000, 147483647));
+           (long long)sl_fn_6162693a6d697865642d696e746567657273(MIXED_ARGS));
+    printf("mixed floats %.1f\n", sl_fn_6162693a6d697865642d666c6f617473(MIXED_ARGS));
+    printf("narrowed %d\n", (int)sl_fn_6162693a6e6172726f776564(-2000000000, 147483647));
     return 0;
 }
 EOF

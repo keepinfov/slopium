@@ -474,10 +474,10 @@ pub fn builtin(
             "sl_rt_slice_new",
             args.iter().copied().map(Argument::Value).collect(),
         )],
-        "len" => one(if reference_is_slice(&arg_types[0]) {
-            "sl_rt_slice_len"
-        } else {
-            "sl_rt_list_len"
+        "len" => one(match &arg_types[0] {
+            ty if reference_is_slice(ty) => "sl_rt_slice_len",
+            Type::Ref { inner, .. } if inner.as_ref() == &Type::String => "sl_rt_string_len",
+            _ => "sl_rt_list_len",
         }),
         "push" => vec![call(
             "sl_rt_list_push",
@@ -547,21 +547,6 @@ pub fn builtin(
             "sl_rt_list_remove",
             vec![Argument::Value(args[0]), Argument::Value(args[1])],
         )],
-        "read-i64" => vec![call("sl_rt_read_i64", Vec::new())],
-        "read-line" => vec![call("sl_rt_read_line", Vec::new())],
-        "parse-i64" => one("sl_rt_parse_i64"),
-        "env" => one("sl_rt_env"),
-        "args-len" => vec![call("sl_rt_args_len", Vec::new())],
-        "arg" => one("sl_rt_arg"),
-        "print" | "println" => {
-            let string = match &arg_types[0] {
-                Type::String => true,
-                Type::Ref { inner, .. } => inner.as_ref() == &Type::String,
-                _ => false,
-            };
-            let width = if string { "string" } else { "i64" };
-            one(&format!("sl_rt_{callee}_{width}"))
-        }
         _ => return None,
     };
     Some(steps)
@@ -764,26 +749,30 @@ mod tests {
         );
     }
 
-    /// `print` and `println` pick their entry point from the argument's type,
-    /// through a borrow as well as directly.
+    /// `len` picks its entry point from what is being measured. A string is not
+    /// a collection, but its byte length is the one thing the library cannot
+    /// work out for itself: the boundary hands C a pointer and no length.
     #[test]
-    fn printing_dispatches_on_what_is_printed() {
-        let borrowed = Type::Ref {
-            inner: Box::new(Type::String),
+    fn len_dispatches_on_what_is_measured() {
+        let borrowed = |inner: Type| Type::Ref {
+            inner: Box::new(inner),
             mutable: false,
         };
         for (ty, expected) in [
-            (Type::I64, "sl_rt_println_i64"),
-            (Type::String, "sl_rt_println_string"),
-            (borrowed, "sl_rt_println_string"),
+            (borrowed(Type::List(Box::new(Type::I64))), "sl_rt_list_len"),
+            (
+                borrowed(Type::Slice(Box::new(Type::I64))),
+                "sl_rt_slice_len",
+            ),
+            (borrowed(Type::String), "sl_rt_string_len"),
         ] {
-            let steps = builtin(&module(), 0, "println", &[1], &[ty], &Type::Unit).unwrap();
+            let steps = builtin(&module(), 0, "len", &[1], &[ty], &Type::I64).unwrap();
             let Step::Invoke {
                 tail: Tail::Call(symbol),
                 ..
             } = &steps[0]
             else {
-                panic!("println calls the runtime");
+                panic!("len calls the runtime");
             };
             assert_eq!(symbol, expected);
         }

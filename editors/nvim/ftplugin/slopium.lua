@@ -8,7 +8,7 @@ vim.bo.lisp = true
 vim.bo.autoindent = true
 vim.bo.iskeyword = vim.bo.iskeyword .. ",-"
 vim.bo.lispwords =
-  "fn,test,struct,enum,export,take,let,set,do,if,match,loop,while,list,array,push,println,print"
+  "fn,test,struct,enum,export,take,extern,let,set,do,if,match,loop,while,list,array,push"
 vim.bo.omnifunc = "v:lua.slopium_omnifunc"
 
 vim.b.undo_ftplugin =

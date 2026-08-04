@@ -1,6 +1,6 @@
 ownership.slp:5:12: error[SL0300]: use of moved value `value`
   |
- 5 |   (println value)
+ 5 |   (consume value)
   |            ^^^^^
   = label 3:3: value was declared here
   = help: borrow the value or call `clone` before moving it

@@ -270,10 +270,11 @@ mod tests {
         let source = r#"
             (struct Pair ((left String) (right String)))
             (enum Shape Empty (Sized ((size i64))))
+            (fn note ((text String)) -> unit ())
             (fn main () -> i32
               (let pair (Pair :left "l" :right "r"))
               (let shape (Shape:Sized 3))
-              (println "hi")
+              (note "hi")
               0)
         "#;
         let mir = compile_to_mir("test.slp", source, &CompileOptions::default()).unwrap();
@@ -285,7 +286,7 @@ mod tests {
         assert!(text.contains("    Sized = 1 (size: i64),"), "{text}");
         assert!(text.contains("= Pair {"), "{text}");
         assert!(text.contains("drop(_"), "{text}");
-        assert!(text.contains("println("), "{text}");
+        assert!(text.contains("note("), "{text}");
     }
 
     #[test]

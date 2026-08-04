@@ -1,5 +1,7 @@
+(take std:io println-i64)
+
 (take a from-a)
 
 (fn main () -> i32
-  (println (from-a))
+  (println-i64 (from-a))
   0)

@@ -113,8 +113,13 @@
 
               # A path package is already inside `src`, and the bundled library
               # is inside the compiler. Neither is anything to fetch, which is
-              # the same rule resolution itself follows.
-              fetched = builtins.filter (package: package ? checksum) lock.package;
+              # the same rule resolution itself follows. The library does carry
+              # a checksum — that is how a lock notices a toolchain whose
+              # library changed — so it is excluded by its source, not by the
+              # absence of one.
+              fetched = builtins.filter
+                (package: package ? checksum && package.source != "toolchain")
+                lock.package;
 
               archiveOf = package:
                 let

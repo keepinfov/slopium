@@ -66,6 +66,7 @@ version = "$version"
 source = "src"
 
 [dependencies]
+std = { toolchain = true }
 $dependencies
 EOF
   printf '%s\n' "$body" >"$root/src/lib.slp"
@@ -122,17 +123,19 @@ source = "src"
 entry = "src/main.slp"
 
 [dependencies]
+std = { toolchain = true }
 $dependencies
 
 [build]
 target = "x86_64-unknown-linux-gnu"
 EOF
   cat >"$root/src/main.slp" <<'EOF'
+(take std:io println-i64)
 (take geometry:lib area)
 (take shapes:lib perimeter)
 
 (fn main () -> i32
-  (println (+ (area) (perimeter)))
+  (println-i64 (+ (area) (perimeter)))
   0)
 EOF
   configure "$root"

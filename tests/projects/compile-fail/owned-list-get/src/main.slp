@@ -1,5 +1,7 @@
+(take std:io println-i64)
+
 (fn main () -> i32
   (let values (list "owned"))
   (let value (get (& values) 0))
-  (println value)
+  (println-i64 value)
   0)

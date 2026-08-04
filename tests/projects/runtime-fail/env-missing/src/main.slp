@@ -1,3 +1,6 @@
+(take std:io println)
+(take std:process env)
+
 (fn main () -> i32
   (let name "SLOPIUM_PROJECT_TEST_INTENTIONALLY_MISSING")
   (let value (env (& name)))

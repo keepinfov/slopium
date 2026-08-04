@@ -1,7 +1,7 @@
 use slopic_core::codegen::{emit_assembly, CodegenOptions, DEFAULT_TARGET};
 use slopic_core::{
     compile, compile_to_mir, CompileOptions, CompileRequest, DependencySource, EmitKind,
-    LanguageItems, RUNTIME_SOURCE,
+    LanguageItems, RUNTIME_SOURCE, STD_PACKAGE,
 };
 use std::fs;
 use std::io::Write;
@@ -10,6 +10,15 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 static NEXT_TEST: AtomicUsize = AtomicUsize::new(0);
+
+/// I/O is a library now, so every program below has to say so. These tests are
+/// about what the backends emit, not about naming imports, so the whole surface
+/// is taken once here and the sources stay about their subject.
+const TAKES: &str = "\
+(take std:io print println print-i32 println-i32 print-i64 println-i64 print-bool
+  println-bool read-line read-i64 parse-i64)
+(take std:process env args-len arg)
+";
 
 fn native_program(source: &str) -> (PathBuf, PathBuf) {
     let id = NEXT_TEST.fetch_add(1, Ordering::Relaxed);
@@ -20,12 +29,12 @@ fn native_program(source: &str) -> (PathBuf, PathBuf) {
     fs::create_dir_all(&directory).unwrap();
     let input = directory.join("main.slp");
     let output = directory.join("program");
-    fs::write(&input, source).unwrap();
+    fs::write(&input, format!("{TAKES}{source}")).unwrap();
     compile(&CompileRequest {
         input,
         source_root: None,
         dependencies: Vec::new(),
-        toolchain_dependencies: Vec::new(),
+        toolchain_dependencies: vec![STD_PACKAGE.to_owned()],
         output: Some(output.clone()),
         emit: EmitKind::Executable,
         options: CompileOptions::default(),
@@ -43,7 +52,7 @@ fn compiles_and_runs_recursive_native_program() {
         (fn fib ((n i64)) -> i64
           (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2)))))
         (fn main () -> i32
-          (println (fib 10))
+          (println-i64 (fib 10))
           0)
         "#,
     );
@@ -72,18 +81,20 @@ fn compiles_and_runs_multi_file_package() {
     .unwrap();
     fs::write(
         &input,
-        "(take geometry (distance :as length))\n\
-         (fn main () -> i32\n\
-           (println (length 41))\n\
-           (println (geometry:distance 9))\n\
-           0)\n",
+        format!(
+            "{TAKES}(take geometry (distance :as length))\n\
+             (fn main () -> i32\n\
+               (println-i64 (length 41))\n\
+               (println-i64 (geometry:distance 9))\n\
+               0)\n"
+        ),
     )
     .unwrap();
     compile(&CompileRequest {
         input,
         source_root: Some(source_root),
         dependencies: Vec::new(),
-        toolchain_dependencies: Vec::new(),
+        toolchain_dependencies: vec![STD_PACKAGE.to_owned()],
         output: Some(output.clone()),
         emit: EmitKind::Executable,
         options: CompileOptions::default(),
@@ -117,7 +128,7 @@ fn compiles_path_dependency_under_manifest_alias() {
     let input = app.join("main.slp");
     fs::write(
         &input,
-        "(take math:ops double)\n(fn main () -> i32 (println (double 21)) 0)\n",
+        format!("{TAKES}(take math:ops double)\n(fn main () -> i32 (println-i64 (double 21)) 0)\n"),
     )
     .unwrap();
     let executable = directory.join("program");
@@ -128,7 +139,7 @@ fn compiles_path_dependency_under_manifest_alias() {
             namespace: "math".into(),
             source_root: dependency,
         }],
-        toolchain_dependencies: Vec::new(),
+        toolchain_dependencies: vec![STD_PACKAGE.to_owned()],
         output: Some(executable.clone()),
         emit: EmitKind::Executable,
         options: CompileOptions::default(),
@@ -148,7 +159,7 @@ fn monomorphizes_parametric_generic_functions() {
         r#"
         (fn identity (T) ((value T)) -> T value)
         (fn main () -> i32
-          (println (identity 42))
+          (println-i64 (identity 42))
           (let text (identity "generic"))
           (println (& text))
           0)
@@ -172,9 +183,9 @@ fn monomorphizes_generic_structs_and_enums() {
         (fn main () -> i32
           (let wrapped (wrap 1))
           (let boxed (Box :value 2))
-          (println (. boxed value))
+          (println-i64 (. boxed value))
           (let option (Option:Some 40))
-          (println
+          (println-i64
             (match option
               ((Option:None) 0)
               ((Option:Some value) value)))
@@ -200,6 +211,10 @@ fn try_propagates_configured_result_errors() {
     fs::write(
         &input,
         r#"
+        (take std:io println println-i64)
+
+        (export Result (Result:Ok :as Ok) (Result:Err :as Err))
+
         (enum Result (T E)
           (Ok ((value T)))
           (Err ((error E))))
@@ -220,8 +235,8 @@ fn try_propagates_configured_result_errors() {
               (do (println (& error)) 0))))
 
         (fn main () -> i32
-          (println (show (forward true)))
-          (println (show (forward false)))
+          (println-i64 (show (forward true)))
+          (println-i64 (show (forward false)))
           0)
         "#,
     )
@@ -230,15 +245,17 @@ fn try_propagates_configured_result_errors() {
         input,
         source_root: None,
         dependencies: Vec::new(),
-        toolchain_dependencies: Vec::new(),
+        toolchain_dependencies: vec![STD_PACKAGE.to_owned()],
         output: Some(executable.clone()),
         emit: EmitKind::Executable,
         options: CompileOptions {
             language_items: LanguageItems {
                 option: None,
-                result: Some("Result".into()),
-                result_ok: Some("Result:Ok".into()),
-                result_err: Some("Result:Err".into()),
+                // A lone file is a package of one module now (`D-077`), so a
+                // language item in it is named the way any other declaration is.
+                result: Some("main:Result".into()),
+                result_ok: Some("main:Ok".into()),
+                result_err: Some("main:Err".into()),
             },
             ..CompileOptions::default()
         },
@@ -269,6 +286,7 @@ fn toolchain_std_supplies_option_result_and_language_items() {
     fs::write(
         &input,
         r#"
+        (take std:io println-i64)
         (take std:result Result)
         (take std:option Option)
 
@@ -281,15 +299,15 @@ fn toolchain_std_supplies_option_result_and_language_items() {
 
         (fn main () -> i32
           (let mut values (list 7))
-          (println
+          (println-i64
             (match (pop (&mut values))
               ((Option:Some value) value)
               ((Option:None) -1)))
-          (println
+          (println-i64
             (match (pop (&mut values))
               ((Option:Some value) value)
               ((Option:None) 0)))
-          (println
+          (println-i64
             (match (forward)
               ((Result:Ok value) value)
               ((Result:Err error) 0)))
@@ -326,7 +344,7 @@ fn strings_lists_structs_and_tests_use_the_runtime() {
           (let point (Point :x 20 :y 22))
           (let mut values (list (. point x) (. point y)))
           (do (push (&mut values) 10))
-          (println (+ (get (& values) 0) (get (& values) 1)))
+          (println-i64 (+ (get (& values) 0) (get (& values) 1)))
           0)
         "#,
     );
@@ -347,7 +365,7 @@ fn enum_match_transfers_owned_payload() {
             ((Message:Text value)
               (do (println (& value)) 42))))
         (fn main () -> i32
-          (println (consume (Message:Text "payload")))
+          (println-i64 (consume (Message:Text "payload")))
           0)
         "#,
     );
@@ -392,8 +410,8 @@ fn reads_lines_parses_numbers_and_exposes_process_arguments() {
         r#"
         (fn main () -> i32
           (let line (read-line))
-          (println (parse-i64 (& line)))
-          (println (args-len))
+          (println-i64 (parse-i64 (& line)))
+          (println-i64 (args-len))
           (let first (arg 0))
           (println (& first))
           0)
@@ -418,7 +436,7 @@ fn runtime_errors_use_stable_message_and_exit_status() {
         r#"
         (fn main () -> i32
           (let text "not-a-number")
-          (println (parse-i64 (& text)))
+          (println-i64 (parse-i64 (& text)))
           0)
         "#,
     );
@@ -443,7 +461,7 @@ fn list_owns_and_moves_non_copy_elements() {
           (println (& removed))
           (let last (remove (&mut values) 1))
           (println (& last))
-          (println (len (& values)))
+          (println-i64 (len (& values)))
           0)
         "#,
     );
@@ -469,7 +487,7 @@ fn clone_is_structural_for_lists_structs_and_enums() {
             (Message:Data
               (Payload :label "owned" :values (list "one" "two"))))
           (let copied (clone original))
-          (println 42)
+          (println-i64 42)
           0)
         "#,
     );
@@ -489,12 +507,12 @@ fn loops_support_break_continue_and_mutation() {
             (set n (+ n 1))
             (if (= n 2) (continue) ())
             (if (= n 4) (break) ())
-            (println n))
-          (println n)
+            (println-i64 n))
+          (println-i64 n)
           (loop
             (set n (+ n 1))
             (if (= n 6) (break) ()))
-          (println n)
+          (println-i64 n)
           0)
         "#,
     );
@@ -511,7 +529,7 @@ fn arrays_and_borrowed_slices_support_owned_elements() {
         (fn main () -> i32
           (let values (array "zero" "one" "two" "three"))
           (let view (slice (& values) 1 3))
-          (println (len (& view)))
+          (println-i64 (len (& view)))
           (let first (get-ref (& view) 0))
           (println first)
           (let copied (clone values))
@@ -547,8 +565,8 @@ fn nested_enum_and_struct_patterns_destructure_owned_values() {
             ((Outer:Empty) -1)
             (_ -2)))
         (fn main () -> i32
-          (println (score (Outer:Wrap (Inner:Value 42))))
-          (println (score (Outer:Pointed (Point :x 7 :label "point"))))
+          (println-i64 (score (Outer:Wrap (Inner:Value 42))))
+          (println-i64 (score (Outer:Pointed (Point :x 7 :label "point"))))
           0)
         "#,
     );
@@ -569,7 +587,7 @@ fn mixed_register_and_stack_arguments_round_trip() {
           -> i64
           (if (= f8 9.0) (+ i6 i7) 0))
         (fn main () -> i32
-          (println (probe 1 1.0 2 2.0 3 3.0 4 4.0 5 5.0 6 6.0
+          (println-i64 (probe 1 1.0 2 2.0 3 3.0 4 4.0 5 5.0 6 6.0
                           7 7.0 8 8.0 9.0))
           0)
         "#,
@@ -592,7 +610,7 @@ fn a_double_result_survives_a_spilled_destination() {
           (+ (+ (+ (+ a b) (+ c d)) (+ (+ e f) (+ g h))) (+ i j)))
         (fn main () -> i32
           (let sum (total 1.0 2.0 3.0 4.0 5.0 6.0 7.0 8.0 9.0 10.0))
-          (if (= sum 55.0) (println 1) (println 0))
+          (if (= sum 55.0) (println-i64 1) (println-i64 0))
           0)
         "#,
     );
@@ -615,19 +633,23 @@ fn an_extern_call_reaches_c_with_the_arguments_it_declared() {
     }
     fs::create_dir_all(&directory).unwrap();
     let source = r#"
+        (extern "sl_rt_println_i32" (println-i32 (value i32)) -> unit)
+        (extern "sl_rt_println_i64" (println-i64 (value i64)) -> unit)
+        (extern "sl_rt_println_bytes"
+          (println-bytes (text (& String)) (length i64)) -> unit)
         (extern "probe_narrow" (probe-narrow (value i32)) -> i32)
         (extern "probe_strlen" (probe-strlen (text (& String))) -> i64)
         (extern "probe_slice" (probe-slice (values (& (Slice i64)))) -> i64)
         (extern "probe_string" (probe-string) -> String)
         (fn main () -> i32
-          (println (probe-narrow 2000000000))
+          (println-i32 (probe-narrow 2000000000))
           (let text "borrowed")
-          (println (probe-strlen (& text)))
+          (println-i64 (probe-strlen (& text)))
           (let values (array 10 20 30 40))
           (let view (slice (& values) 1 4))
-          (println (probe-slice (& view)))
+          (println-i64 (probe-slice (& view)))
           (let greeting (probe-string))
-          (println (& greeting))
+          (println-bytes (& greeting) (len (& greeting)))
           0)
     "#;
     let module = compile_to_mir("ffi.slp", source, &CompileOptions::default()).unwrap();

@@ -7,6 +7,7 @@ version = "0.1.0"
 source = "path+."
 dependencies = [
     "geometry",
+    "std",
 ]
 
 [[package]]
@@ -14,4 +15,11 @@ name = "geometry"
 version = "1.0.0"
 source = "registry+../registry"
 checksum = "a419142d87e361026c3519a6425b46c4823bbe527c8af5fd49c8c2c7db664aac"
+dependencies = []
+
+[[package]]
+name = "std"
+version = "0.5.1"
+source = "toolchain"
+checksum = "ecbc2f08a57fc4f0e77477ea1fa8e843d36a1c893caf79434f1546f39dd44ede"
 dependencies = []

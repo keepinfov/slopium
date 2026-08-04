@@ -1,5 +1,6 @@
+(fn use-it ((value String)) -> unit ())
 (fn main () -> i32
   (let values (list "owned"))
   (let value (get (& values) 0))
-  (println value)
+  (use-it value)
   0)

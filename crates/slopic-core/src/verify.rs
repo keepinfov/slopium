@@ -495,6 +495,7 @@ mod tests {
         let source = r#"
             (struct Pair ((left String) (right String)))
             (enum Shape Empty (Sized ((size i64))))
+            (fn note ((value i64)) -> unit ())
             (fn helper ((a i64)) -> i64
               (let b (+ a 2))
               (if (< a b) b a))
@@ -507,9 +508,9 @@ mod tests {
               (let copied (clone pair))
               (let mut total 0)
               (while (< total 3) (set total (+ total 1)))
-              (println total)
-              (println (helper 3))
-              (println (measure (Shape:Sized 7)))
+              (note total)
+              (note (helper 3))
+              (note (measure (Shape:Sized 7)))
               0)
         "#;
         let mir = compile_to_mir("test.slp", source, &CompileOptions::default()).unwrap();
@@ -520,7 +521,8 @@ mod tests {
     fn an_extern_call_must_agree_with_its_declaration() {
         let source = r#"
             (extern "hal_add" (hal-add (a i64) (b i64)) -> i64)
-            (fn main () -> i32 (println (hal-add 20 22)) 0)
+            (fn note ((value i64)) -> unit ())
+            (fn main () -> i32 (note (hal-add 20 22)) 0)
         "#;
         let mut mir = compile_to_mir("test.slp", source, &CompileOptions::default()).unwrap();
         assert_eq!(verify_module("test.slp", &mir), Vec::new());

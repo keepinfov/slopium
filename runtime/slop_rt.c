@@ -80,6 +80,10 @@ SlString *sl_rt_string_new(const char *bytes, uint64_t len) {
     return string;
 }
 
+uint64_t sl_rt_string_len(const SlString *string) {
+    return string->len;
+}
+
 SlString *sl_rt_string_clone(const SlString *source) {
     return sl_rt_string_new(source->ptr, source->len);
 }
@@ -233,13 +237,25 @@ void sl_rt_list_drop(SlList *list) {
     }
 }
 
-void sl_rt_println_string(const SlString *string) {
-    fwrite(string->ptr, 1, (size_t)string->len, stdout);
+/* The library calls these across the FFI, where a `(& String)` arrives as a
+ * `const char *` and the length has to travel beside it: a Slopium string may
+ * contain a NUL byte, and stopping at the first one would print less than the
+ * caller asked for without saying so (`D-079`). */
+void sl_rt_println_bytes(const char *bytes, int64_t len) {
+    fwrite(bytes, 1, (size_t)len, stdout);
     fputc('\n', stdout);
 }
 
-void sl_rt_print_string(const SlString *string) {
-    fwrite(string->ptr, 1, (size_t)string->len, stdout);
+void sl_rt_print_bytes(const char *bytes, int64_t len) {
+    fwrite(bytes, 1, (size_t)len, stdout);
+}
+
+void sl_rt_println_i32(int32_t value) {
+    printf("%d\n", value);
+}
+
+void sl_rt_print_i32(int32_t value) {
+    printf("%d", value);
 }
 
 void sl_rt_println_i64(int64_t value) {
@@ -304,9 +320,9 @@ SlString *sl_rt_read_line(void) {
     return line;
 }
 
-int64_t sl_rt_parse_i64(const SlString *text) {
-    const char *cursor = text->ptr;
-    const char *limit = text->ptr + text->len;
+int64_t sl_rt_parse_i64(const char *text, int64_t len) {
+    const char *cursor = text;
+    const char *limit = text + len;
     while (cursor < limit && isspace((unsigned char)*cursor)) {
         cursor += 1;
     }
@@ -325,13 +341,13 @@ int64_t sl_rt_parse_i64(const SlString *text) {
     return (int64_t)value;
 }
 
-SlString *sl_rt_env(const SlString *name) {
+SlString *sl_rt_env(const char *name, int64_t len) {
     // Every other string operation is length-based, but getenv stops at the
     // first NUL. Reject the mismatch instead of silently looking up a prefix.
-    if (memchr(name->ptr, '\0', (size_t)name->len) != NULL) {
+    if (memchr(name, '\0', (size_t)len) != NULL) {
         RT_FAIL("environment variable name contains a NUL byte");
     }
-    const char *value = getenv(name->ptr);
+    const char *value = getenv(name);
     if (value == NULL) {
         RT_FAIL("required environment variable is not set");
     }

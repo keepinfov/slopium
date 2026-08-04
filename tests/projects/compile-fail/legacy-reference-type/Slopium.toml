@@ -3,3 +3,6 @@ name = "legacy-reference-type"
 version = "0.2.4"
 source = "src"
 entry = "src/main.slp"
+
+[dependencies]
+std = { toolchain = true }

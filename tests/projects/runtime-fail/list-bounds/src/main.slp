@@ -1,6 +1,8 @@
+(take std:io println-i64)
+
 (fn main () -> i32
   (let values (list 1))
-  (println (get (& values) 2))
+  (println-i64 (get (& values) 2))
   0)
 
 (test "fixture compiles" true)

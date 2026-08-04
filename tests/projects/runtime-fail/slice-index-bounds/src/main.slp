@@ -1,3 +1,5 @@
+(take std:io println)
+
 (fn main () -> i32
   (let values (array "one" "two"))
   (let view (slice (& values) 0 1))

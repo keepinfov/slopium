@@ -70,13 +70,15 @@ source = "src"
 entry = "src/main.slp"
 
 [dependencies]
+std = { toolchain = true }
 geometry = "^1"
 EOF
   cat >"$root/src/main.slp" <<'EOF'
+(take std:io println-i32)
 (take geometry:lib area)
 
 (fn main () -> i32
-  (println (area))
+  (println-i32 (area))
   0)
 EOF
   printf '[registry.default]\nindex = "%s"\n' "$index" >"$root/.slopium/config.toml"

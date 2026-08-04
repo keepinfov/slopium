@@ -2,5 +2,5 @@
 (fn main () -> i32
   (let value "hello")
   (consume value)
-  (println value)
+  (consume value)
   0)

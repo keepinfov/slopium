@@ -1,3 +1,5 @@
+(take std:io println)
+
 (enum Choice
   None
   (Some ((value i64)))

@@ -1,8 +1,10 @@
+(take std:io println-i64)
+
 (fn main () -> i32
   (let mut values (list 10 20 30))
   (do (push (&mut values) 40))
-  (println (len (& values)))
-  (println (get (& values) 2))
+  (println-i64 (len (& values)))
+  (println-i64 (get (& values) 2))
   0)
 
 (test "list operations"

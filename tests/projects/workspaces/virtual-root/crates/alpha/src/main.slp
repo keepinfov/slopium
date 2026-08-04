@@ -1,7 +1,9 @@
+(take std:io println-i64)
+
 (take beta:lib tripled)
 
 (fn main () -> i32
-  (println (tripled))
+  (println-i64 (tripled))
   0)
 
 (test "a member reaches another member"
