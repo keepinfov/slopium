@@ -6,6 +6,7 @@
 
 (take std:io println read-i64)
 (take std:process env)
+(take std:prelude Option)
 
 (fn mix-ticket ((value i64)) -> i64
   (+ (* value 31337) 7331))
@@ -15,10 +16,11 @@
 
 (fn reveal-flag () -> i32
   (let flag-name "FLAG")
-  (let flag (env (& flag-name)))
   (let accepted "license accepted")
   (println (& accepted))
-  (println (& flag))
+  (match (env (& flag-name))
+    ((Option:Some flag) (println (& flag)))
+    ((Option:None) ()))
   0)
 
 (fn reject-license () -> i32
@@ -32,14 +34,20 @@
   (let pin-prompt "activation pin:")
   (println (& banner))
   (println (& ticket-prompt))
-  (let ticket (read-i64))
+  (let ticket (entered))
   (println (& pin-prompt))
-  (let pin (read-i64))
+  (let pin (entered))
   (if (= (mix-ticket ticket) 41904900)
     (if (= (mix-pin pin) 411463)
       (reveal-flag)
       (reject-license))
     (reject-license)))
+
+; Anything that is not a number is a wrong answer, not a crash.
+(fn entered () -> i64
+  (match (read-i64)
+    ((Option:Some value) value)
+    ((Option:None) 0)))
 
 (test "known development license"
   (= (+ (mix-ticket 1337) (mix-pin 4242)) 42316363))

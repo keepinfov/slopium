@@ -142,9 +142,13 @@ none of which is a code generation question.
 
 The link is asked to keep only what a program uses. The runtime is two C files
 of every helper the language might call, so they are compiled with a section
-per function and linked with `--gc-sections`: a program that never touches a
+per function and linked with `--gc-sections`: a program that never makes a
 slice does not carry `sl_rt_slice_*`. That only ever removes unreferenced code, so it
-is unconditional. Stripping the symbol table is a choice, because it removes
+is unconditional. The granularity is the C runtime's functions and the Slopium
+*object*, though, not the Slopium function: an object is one `.text`, so a
+library module a program takes brings whatever that module calls. Since
+v0.5.3, `core:string:split` builds a list, so every program that prints a
+number links the list runtime. Stripping the symbol table is a choice, because it removes
 the mangled `sl_fn_*` and runtime names a debugger needs — so it is a flag
 (`slopic --strip`), not something the compiler decides. A test body is code
 only the harness reaches, so a build without `--test` does not emit it at all,
@@ -224,10 +228,11 @@ itself lives one level lower again, in `slopium-std`: the sources are ordinary
 `.slp` files under `std/`, and the compiler hands them to name resolution while
 the manager hashes them into the lock, so those two cannot disagree about what
 the library contains (`D-076`). There are two bundled packages — `core`, which
-carries `Option`, `Result` and the language items, and `std`, which carries
-`io` and `process`, depends on `core`, and re-exports its language items
-through a `prelude` module so that exactly one direct dependency ever declares
-them (`D-082`). The language server
+carries `Option`, `Result`, `string` and the language items, and `std`, which
+carries `io`, `process` and `fs`, depends on `core`, and re-exports its
+language items through a `prelude` module so that exactly one direct dependency
+ever declares them (`D-082`). `std:string` re-exports `core:string` for the
+same reason (`D-083`): a package that depends on `std` has no name for `core`. The language server
 analyzes an open file as the member that owns it. `slopic` still types
 and lowers the package as one semantic unit, then emits only the selected
 owner module for each object invocation. Generated function/type/drop/clone
@@ -297,8 +302,9 @@ graph.
 
 Generated programs link a small C runtime through the stable `sl_rt_*` ABI. It
 provides allocation, strings, owned lists/arrays, borrowed slice descriptors,
-printing, input, and process arguments. It does not evaluate source or own
-language semantics. Generated clone/drop helpers recursively copy and destroy
+printing, input, files, and process arguments. It does not evaluate source or
+own language semantics, and since v0.5.3 it does not format or parse a number
+either — that is Slopium, in `core:string` (`D-086`, `D-087`). Generated clone/drop helpers recursively copy and destroy
 collection elements, structs, and enum payloads.
 
 It is two translation units, and the seam between them is the boundary a
@@ -312,7 +318,16 @@ an allocator; what it does not have is libc. So core is the code and hosted is
 the providers.
 
 `runtime/slop_rt_hosted.c` defines those four over `malloc`, `free`, `exit` and
-`fprintf`, and adds stdio, `argv` and `getenv`.
+`fprintf`, and adds stdio, `argv`, `getenv` and whole-file reads and writes
+(`D-084`).
+
+A hosted call that can fail has one channel for its result and none for its
+error, because the FFI vocabulary has no out-parameter and no struct return.
+So the hosted half keeps a status slot: every such call clears it on the way in
+and sets it to an `errno` on the way out, `sl_rt_last_error` reads it, and the
+library turns it into an `Option` or a `Result` in the form immediately after
+the call (`D-085`). Zero is success, a positive value is an `errno`, and `-1`
+is end of input.
 
 Which units link is the environment's to say, and the environment is the
 target's default overridden by `slopic --freestanding` (`D-081`). It decides
@@ -322,9 +337,10 @@ or `core`. Both targets are hosted today; the override is what exercises the
 freestanding half before a `-none` triple exists.
 
 `scripts/core-check.sh` is the check that makes this real rather than
-aspirational. It builds a `core`-only program, links it against
-`slop_rt_core.o` with `-nostdlib` and a supplied `_start`, requires `nm -u` to
-show nothing but the four hooks, and runs it. The runtime ABI freezes at v0.8,
+aspirational. It builds a `core`-only program — one that sends its answer out
+through `core:string` and reads it back, so the string library is covered too
+(`D-083`) — links it against `slop_rt_core.o` with `-nostdlib` and a supplied
+`_start`, requires `nm -u` to show nothing but the four hooks, and runs it. The runtime ABI freezes at v0.8,
 and freezing a half nothing had ever linked would be freezing a guess.
 
 Generated hosted executables use a small C ABI `main(argc, argv)` wrapper.

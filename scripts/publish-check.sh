@@ -54,7 +54,7 @@ EOF
   cat >"$root/src/lib.slp" <<EOF
 (export area)
 
-(fn area () -> i32 $area)
+(fn area () -> i64 $area)
 EOF
 }
 
@@ -74,11 +74,11 @@ std = { toolchain = true }
 geometry = "^1"
 EOF
   cat >"$root/src/main.slp" <<'EOF'
-(take std:io println-i32)
+(take std:io println-i64)
 (take geometry:lib area)
 
 (fn main () -> i32
-  (println-i32 (area))
+  (println-i64 (area))
   0)
 EOF
   printf '[registry.default]\nindex = "%s"\n' "$index" >"$root/.slopium/config.toml"

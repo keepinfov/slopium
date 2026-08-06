@@ -258,10 +258,16 @@ cat >"$ffi_dir/callee.c" <<'EOF'
 /* Unmangled names, because that is the whole point: an `extern` asks the
    linker for the name C gave the function, not for `sl_fn_<hex>`. */
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 typedef struct { uint64_t len; uint64_t cap; char *ptr; } SlString;
 SlString *sl_rt_string_new(const char *bytes, uint64_t len);
+
+/* The library has no `println-i32`: an `i32` cannot reach `from-i64`, because
+   the language has no widening conversion (`D-086`). The probe prints its own
+   narrow return, which is the value under test anyway. */
+void probe_println_i32(int32_t value) { printf("%d\n", value); }
 
 int64_t probe_ten(int64_t a, int64_t b, int64_t c, int64_t d, int64_t e,
                   int64_t f, int64_t g, int64_t h, int64_t i, int64_t j) {
@@ -302,7 +308,9 @@ SlString *probe_string(void) { return sl_rt_string_new("from C", 6); }
 EOF
 
 cat >"$ffi_dir/ffi.slp" <<'EOF'
-(take std:io println println-bool println-i32 println-i64)
+(take std:io println println-bool println-i64)
+
+(extern "probe_println_i32" (println-i32 (value i32)) -> unit)
 
 (extern "probe_ten" (probe-ten (a i64) (b i64) (c i64) (d i64) (e i64) (f i64) (g i64) (h i64) (i i64) (j i64)) -> i64)
 

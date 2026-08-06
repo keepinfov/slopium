@@ -47,6 +47,7 @@ pub const TOOLCHAIN_PACKAGES: &[ToolchainPackage] = &[
         modules: &[
             ("option", include_str!("../../../std/core/option.slp")),
             ("result", include_str!("../../../std/core/result.slp")),
+            ("string", include_str!("../../../std/core/string.slp")),
         ],
         dependencies: &[],
         language_items: &[
@@ -60,8 +61,10 @@ pub const TOOLCHAIN_PACKAGES: &[ToolchainPackage] = &[
         name: STD_PACKAGE,
         modules: &[
             ("prelude", include_str!("../../../std/std/prelude.slp")),
+            ("string", include_str!("../../../std/std/string.slp")),
             ("io", include_str!("../../../std/std/io.slp")),
             ("process", include_str!("../../../std/std/process.slp")),
+            ("fs", include_str!("../../../std/std/fs.slp")),
         ],
         dependencies: &[CORE_PACKAGE],
         // Pointed at `prelude`, which takes them from `core` and exports them

@@ -1,9 +1,0 @@
-(take std:io println)
-(take std:process arg)
-
-(fn main () -> i32
-  (let value (arg 0))
-  (println (& value))
-  0)
-
-(test "fixture compiles" true)

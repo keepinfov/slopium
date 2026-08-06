@@ -12,23 +12,23 @@ dependencies = [
 
 [[package]]
 name = "core"
-version = "0.5.2"
+version = "0.5.3"
 source = "toolchain"
-checksum = "6848c3bfbcc3339ac67aff3607cb71985c9ed4ad846b0cad6f6e455fe7961e89"
+checksum = "4d60e259c277ff5906a0bcc974af854e1a91865454245230e29e3fb78a81957b"
 dependencies = []
 
 [[package]]
 name = "geometry"
 version = "1.0.0"
 source = "registry+../registry"
-checksum = "a419142d87e361026c3519a6425b46c4823bbe527c8af5fd49c8c2c7db664aac"
+checksum = "d1eeede41bb394e313f1687c350abfaca5b086551f943ea1daef8fa4b6a68a3e"
 dependencies = []
 
 [[package]]
 name = "std"
-version = "0.5.2"
+version = "0.5.3"
 source = "toolchain"
-checksum = "07ed727522a91da69923fab15e10bd0db7d198c4487164824f25406f4b4773ce"
+checksum = "619e2fa8a5b7a86e16f83296c7368fe3fcbb913a688d78892c758a43b232ae43"
 dependencies = [
     "core",
 ]

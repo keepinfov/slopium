@@ -33,13 +33,23 @@ fi
 # The hooks a freestanding program owes the core runtime, and nothing else.
 allowed_undefined="sl_rt_abort sl_rt_alloc sl_rt_free sl_rt_panic"
 
+# The answer goes out through `core:string` and comes back, so the string half
+# of the library is linked with `-nostdlib` on every run (`D-083`). A primitive
+# that reached for libc fails here.
 cat > "$work/program.slp" <<'SLP'
+(take core:option Option)
+(take core:string from-i64 to-i64)
+
 (export answer)
 
 (fn answer () -> i64
   (let mut values (list 3 4))
-  (do (push (&mut values) 35))
-  (+ (get (& values) 0) (+ (get (& values) 1) (get (& values) 2))))
+  (push (&mut values) 35)
+  (let total (+ (get (& values) 0) (+ (get (& values) 1) (get (& values) 2))))
+  (let text (from-i64 total))
+  (match (to-i64 (& text))
+    ((Option:Some parsed) parsed)
+    ((Option:None) 0)))
 SLP
 
 # `sl_fn_` + the hex of `program:answer`, which is how a module-qualified name

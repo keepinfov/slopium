@@ -8,7 +8,6 @@
  * `sl_rt_string_new`, so the layout is core's to know and nobody has to keep
  * two copies of it agreeing. */
 
-#include <ctype.h>
 #include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -22,6 +21,16 @@ SlString *sl_rt_string_new(const char *bytes, uint64_t len);
 
 static int32_t sl_argc = 0;
 static char **sl_argv = NULL;
+
+/* The status slot (`D-085`). Zero is success, a positive value is an `errno`,
+ * and `-1` is end of input. Every entry point below that can fail clears it on
+ * the way in and sets it on the way out; the library reads it in the form
+ * immediately after the call and turns it into an `Option` or a `Result`. */
+static int64_t sl_last_error = 0;
+
+int64_t sl_rt_last_error(void) {
+    return sl_last_error;
+}
 
 /* A message-less abort, for `panic = "abort"` builds. The generated
  * trampolines call this instead of `sl_rt_panic`, and both halves' error paths
@@ -65,44 +74,8 @@ void sl_rt_print_bytes(const char *bytes, int64_t len) {
     fwrite(bytes, 1, (size_t)len, stdout);
 }
 
-void sl_rt_println_i32(int32_t value) {
-    printf("%d\n", value);
-}
-
-void sl_rt_print_i32(int32_t value) {
-    printf("%d", value);
-}
-
-void sl_rt_println_i64(int64_t value) {
-    printf("%ld\n", (long)value);
-}
-
-void sl_rt_print_i64(int64_t value) {
-    printf("%ld", (long)value);
-}
-
-int64_t sl_rt_read_i64(void) {
-    char buffer[256];
-    if (fgets(buffer, sizeof(buffer), stdin) == NULL) {
-        RT_FAIL("expected an integer on stdin");
-    }
-
-    errno = 0;
-    char *end = NULL;
-    long long value = strtoll(buffer, &end, 10);
-    if (errno != 0 || end == buffer) {
-        RT_FAIL("invalid i64 on stdin");
-    }
-    while (*end != '\0' && isspace((unsigned char)*end)) {
-        end += 1;
-    }
-    if (*end != '\0') {
-        RT_FAIL("invalid trailing data after i64");
-    }
-    return (int64_t)value;
-}
-
 SlString *sl_rt_read_line(void) {
+    sl_last_error = 0;
     uint64_t length = 0;
     uint64_t capacity = 128;
     char *buffer = malloc((size_t)capacity);
@@ -126,9 +99,13 @@ SlString *sl_rt_read_line(void) {
         }
         buffer[length++] = (char)value;
     }
+    /* End of input is a value, not a failure: the library hands back `None`
+     * and the program decides (`D-087`). An empty line is a `Some` of an empty
+     * string, which is why the slot and not the length is what says so. */
     if (value == EOF && length == 0) {
         free(buffer);
-        RT_FAIL("expected a line on stdin");
+        sl_last_error = -1;
+        return sl_rt_string_new("", 0);
     }
     if (length > 0 && buffer[length - 1] == '\r') {
         length -= 1;
@@ -138,38 +115,130 @@ SlString *sl_rt_read_line(void) {
     return line;
 }
 
-int64_t sl_rt_parse_i64(const char *text, int64_t len) {
-    const char *cursor = text;
-    const char *limit = text + len;
-    while (cursor < limit && isspace((unsigned char)*cursor)) {
-        cursor += 1;
-    }
-    errno = 0;
-    char *end = NULL;
-    long long value = strtoll(cursor, &end, 10);
-    if (errno == ERANGE || end == cursor) {
-        RT_FAIL("invalid i64");
-    }
-    while (end < limit && isspace((unsigned char)*end)) {
-        end += 1;
-    }
-    if (end != limit) {
-        RT_FAIL("invalid trailing data after i64");
-    }
-    return (int64_t)value;
-}
-
 SlString *sl_rt_env(const char *name, int64_t len) {
+    sl_last_error = 0;
     // Every other string operation is length-based, but getenv stops at the
-    // first NUL. Reject the mismatch instead of silently looking up a prefix.
+    // first NUL. A name that contains one cannot name a variable, so this is
+    // the same answer as a name that is not set, and not a separate refusal.
     if (memchr(name, '\0', (size_t)len) != NULL) {
-        RT_FAIL("environment variable name contains a NUL byte");
+        sl_last_error = EINVAL;
+        return sl_rt_string_new("", 0);
     }
     const char *value = getenv(name);
     if (value == NULL) {
-        RT_FAIL("required environment variable is not set");
+        sl_last_error = ENOENT;
+        return sl_rt_string_new("", 0);
     }
     return sl_rt_string_new(value, (uint64_t)strlen(value));
+}
+
+/* A path crosses as a pointer and a length like every other string, and the C
+ * calls below take a NUL-terminated one. A path containing a NUL byte names no
+ * file, so it is `EINVAL` here rather than a silent truncation (`D-079`). */
+static int sl_path_is_usable(const char *path, int64_t len) {
+    if (len < 0 || memchr(path, '\0', (size_t)len) != NULL) {
+        sl_last_error = EINVAL;
+        return 0;
+    }
+    return 1;
+}
+
+SlString *sl_rt_fs_read(const char *path, int64_t len) {
+    sl_last_error = 0;
+    if (!sl_path_is_usable(path, len)) {
+        return sl_rt_string_new("", 0);
+    }
+    FILE *file = fopen(path, "rb");
+    if (file == NULL) {
+        sl_last_error = errno;
+        return sl_rt_string_new("", 0);
+    }
+
+    uint64_t length = 0;
+    uint64_t capacity = 1024;
+    char *buffer = malloc((size_t)capacity);
+    if (buffer == NULL) {
+        fclose(file);
+        RT_FAIL("allocation failed");
+    }
+    for (;;) {
+        size_t read = fread(buffer + length, 1, (size_t)(capacity - length), file);
+        length += (uint64_t)read;
+        if (length < capacity) {
+            break;
+        }
+        if (capacity > (uint64_t)SIZE_MAX / 2) {
+            free(buffer);
+            fclose(file);
+            RT_FAIL("file is too large");
+        }
+        capacity *= 2;
+        char *next = realloc(buffer, (size_t)capacity);
+        if (next == NULL) {
+            free(buffer);
+            fclose(file);
+            RT_FAIL("allocation failed");
+        }
+        buffer = next;
+    }
+    if (ferror(file)) {
+        sl_last_error = errno;
+        free(buffer);
+        fclose(file);
+        return sl_rt_string_new("", 0);
+    }
+    fclose(file);
+    SlString *contents = sl_rt_string_new(buffer, length);
+    free(buffer);
+    return contents;
+}
+
+int64_t sl_rt_fs_write(const char *path, int64_t path_len, const char *data, int64_t data_len) {
+    sl_last_error = 0;
+    if (!sl_path_is_usable(path, path_len) || data_len < 0) {
+        sl_last_error = EINVAL;
+        return -1;
+    }
+    FILE *file = fopen(path, "wb");
+    if (file == NULL) {
+        sl_last_error = errno;
+        return -1;
+    }
+    size_t written = fwrite(data, 1, (size_t)data_len, file);
+    if (written != (size_t)data_len || fclose(file) != 0) {
+        sl_last_error = errno;
+        return -1;
+    }
+    return data_len;
+}
+
+int64_t sl_rt_fs_exists(const char *path, int64_t len) {
+    sl_last_error = 0;
+    if (!sl_path_is_usable(path, len)) {
+        return 0;
+    }
+    FILE *file = fopen(path, "rb");
+    if (file == NULL) {
+        return 0;
+    }
+    fclose(file);
+    return 1;
+}
+
+int64_t sl_rt_fs_remove(const char *path, int64_t len) {
+    sl_last_error = 0;
+    if (!sl_path_is_usable(path, len)) {
+        return -1;
+    }
+    if (remove(path) != 0) {
+        sl_last_error = errno;
+        return -1;
+    }
+    return 0;
+}
+
+_Noreturn void sl_rt_exit(int64_t code) {
+    exit((int)code);
 }
 
 void sl_rt_args_init(int32_t argc, char **argv) {
@@ -181,6 +250,9 @@ int64_t sl_rt_args_len(void) {
     return sl_argc > 0 ? (int64_t)sl_argc - 1 : 0;
 }
 
+/* The library checks the index against `sl_rt_args_len` before calling, so
+ * this refusal is a backstop for an `extern` written by hand, not the path an
+ * out-of-range index takes in a Slopium program (`D-087`). */
 SlString *sl_rt_arg(int64_t index) {
     if (index < 0 || index >= sl_rt_args_len()) {
         RT_FAIL("process argument index out of bounds");

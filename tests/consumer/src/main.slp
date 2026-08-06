@@ -1,6 +1,6 @@
-(take std:io println-i32)
+(take std:io println-i64)
 (take geometry:lib area)
 
 (fn main () -> i32
-  (println-i32 (area))
+  (println-i64 (area))
   0)

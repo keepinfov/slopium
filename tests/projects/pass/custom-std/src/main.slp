@@ -1,4 +1,4 @@
-(take mini-std:io println-i64)
+(take mini-std:io println)
 (take mini-std:option Option)
 (take mini-std:result Result)
 
@@ -11,14 +11,18 @@
 
 (fn main () -> i32
   (let mut values (list 7))
-  (println-i64
+  (let popped
     (match (pop (&mut values))
       ((Option:Some value) value)
       ((Option:None) 0)))
-  (println-i64
+  (let forwarded
     (match (forward)
       ((Result:Ok value) value)
       ((Result:Err error) 0)))
+  (let popped-text (if (= popped 7) "popped seven" "popped nothing"))
+  (let forwarded-text (if (= forwarded 42) "forwarded the answer" "forwarded nothing"))
+  (println (& popped-text))
+  (println (& forwarded-text))
   0)
 
 (test "path std option language item"

@@ -1,14 +1,48 @@
-; The process this program is: its arguments and its environment.
+; The process this program is: its arguments, its environment, and how it ends.
+;
+; Nothing here aborts. An index past the last argument and a variable that is
+; not set are both `None`, because both are things a program can be asked to
+; handle rather than things it got wrong (`D-087`).
 
-(export env args-len arg)
+(take core:option Option)
+
+(export args-len arg args env exit)
 
 (extern "sl_rt_args_len" (args-len) -> i64)
 
-(extern "sl_rt_arg" (arg (index i64)) -> String)
+(extern "sl_rt_arg" (arg-raw (index i64)) -> String)
 
 ; The runtime refuses a name with an embedded NUL rather than looking up the
 ; prefix `getenv` would stop at, and it needs the length to see one (`D-079`).
-(extern "sl_rt_env" (env-bytes (name (& String)) (length i64)) -> String)
+(extern "sl_rt_env" (env-raw (name (& String)) (length i64)) -> String)
 
-(fn env ((name (& String))) -> String
-  (env-bytes name (len name)))
+; Zero is success, and anything else is the status the process exits with
+; (`D-085` for the slot this does not use: nothing comes back).
+(extern "sl_rt_exit" (exit (status i64)) -> unit)
+
+(extern "sl_rt_last_error" (last-error) -> i64)
+
+(fn arg ((index i64)) -> (Option String)
+  (if (if (< index 0) false (< index (args-len)))
+    (Option:Some (arg-raw index))
+    (Option:None)))
+
+; The list starts with a placeholder and loses it again, because an empty
+; `(list)` has no element type to infer and a process may have no arguments.
+(fn args () -> (List String)
+  (let count (args-len))
+  (let mut collected (list ""))
+  (let discarded (remove (&mut collected) 0))
+  (let mut index 0)
+  (while (< index count)
+    (push (&mut collected) (arg-raw index))
+    (set index (+ index 1)))
+  collected)
+
+; A name containing a NUL byte cannot name a variable, so it is `None` for the
+; same reason a name that is not set is.
+(fn env ((name (& String))) -> (Option String)
+  (let value (env-raw name (len name)))
+  (if (= (last-error) 0)
+    (Option:Some value)
+    (Option:None)))

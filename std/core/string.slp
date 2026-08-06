@@ -1,0 +1,195 @@
+; Strings: bytes, formatting and parsing.
+;
+; This is `core` and not `std` (`D-083`): none of it needs a C library, so a
+; freestanding program gets it, and `scripts/core-check.sh` links a program
+; that uses it with `-nostdlib` on every run.
+;
+; Four things cannot be written here, because a `(& String)` reaches C as a
+; pointer and the bytes are otherwise unreachable: a byte at an index, a
+; substring, a concatenation, and a string built out of bytes. Everything else
+; below is written over those four.
+
+(take core:option Option)
+
+(export byte-at substring concat from-bytes equals starts-with find contains
+  trim split from-i64 to-i64)
+
+; The length travels beside the pointer, because a Slopium string may contain a
+; NUL byte and C would stop at it (`D-079`).
+(extern "sl_rt_string_byte"
+  (byte-raw (text (& String)) (length i64) (index i64)) -> i64)
+
+(extern "sl_rt_string_slice"
+  (slice-raw (text (& String)) (length i64) (start i64) (end i64)) -> String)
+
+(extern "sl_rt_string_concat"
+  (concat-raw (left (& String)) (left-length i64)
+    (right (& String)) (right-length i64)) -> String)
+
+; One `i64` per byte: a slice is how a list of bytes crosses the boundary, and
+; `i64` is the narrowest element type there is.
+(extern "sl_rt_string_from_bytes" (from-bytes (bytes (& (Slice i64)))) -> String)
+
+(fn byte-at ((text (& String)) (index i64)) -> i64
+  (byte-raw text (len text) index))
+
+(fn substring ((text (& String)) (start i64) (end i64)) -> String
+  (slice-raw text (len text) start end))
+
+(fn concat ((left (& String)) (right (& String))) -> String
+  (concat-raw left (len left) right (len right)))
+
+(fn equals ((left (& String)) (right (& String))) -> bool
+  (let size (len left))
+  (if (= size (len right))
+    (do
+      (let mut index 0)
+      (let mut same true)
+      (while (< index size)
+        (if (= (byte-at left index) (byte-at right index))
+          ()
+          (do
+            (set same false)
+            (break)))
+        (set index (+ index 1)))
+      same)
+    false))
+
+(fn starts-with ((text (& String)) (prefix (& String))) -> bool
+  (let width (len prefix))
+  (if (> width (len text))
+    false
+    (do
+      (let head (substring text 0 width))
+      (equals (& head) prefix))))
+
+(fn find ((text (& String)) (needle (& String))) -> (Option i64)
+  (let size (len text))
+  (let width (len needle))
+  (if (> width size)
+    (Option:None)
+    (do
+      (let last (- size width))
+      (let mut index 0)
+      (let mut found (- 0 1))
+      (while (< index (+ last 1))
+        (let window (substring text index (+ index width)))
+        (if (equals (& window) needle)
+          (do
+            (set found index)
+            (break))
+          ())
+        (set index (+ index 1)))
+      (if (< found 0)
+        (Option:None)
+        (Option:Some found)))))
+
+(fn contains ((text (& String)) (needle (& String))) -> bool
+  (match (find text needle)
+    ((Option:Some _) true)
+    ((Option:None) false)))
+
+(fn is-space ((byte i64)) -> bool
+  (if (= byte 32)
+    true
+    (if (= byte 9)
+      true
+      (if (= byte 10)
+        true
+        (= byte 13)))))
+
+(fn trim ((text (& String))) -> String
+  (let size (len text))
+  (let mut start 0)
+  (while (if (< start size) (is-space (byte-at text start)) false)
+    (set start (+ start 1)))
+  (let mut stop size)
+  (while (if (> stop start) (is-space (byte-at text (- stop 1))) false)
+    (set stop (- stop 1)))
+  (substring text start stop))
+
+; Where the next separator is, or where the string ends.
+(fn segment-end ((text (& String)) (separator i64) (start i64)) -> i64
+  (let size (len text))
+  (let mut index start)
+  (while (if (< index size)
+      (if (= (byte-at text index) separator) false true)
+      false)
+    (set index (+ index 1)))
+  index)
+
+; Splitting always yields at least one part, which is what lets the list start
+; with an element: an empty `(list)` has no type to infer.
+(fn split ((text (& String)) (separator i64)) -> (List String)
+  (let size (len text))
+  (let mut stop (segment-end text separator 0))
+  (let mut parts (list (substring text 0 stop)))
+  (while (< stop size)
+    (let start (+ stop 1))
+    (set stop (segment-end text separator start))
+    (push (&mut parts) (substring text start stop)))
+  parts)
+
+(fn digit-string ((digit i64)) -> String
+  (let table "0123456789")
+  (substring (& table) digit (+ digit 1)))
+
+(fn from-i64 ((value i64)) -> String
+  (if (= value 0)
+    "0"
+    (do
+      (let negative (< value 0))
+      ; The digits come off the negative side, because negating the smallest
+      ; `i64` overflows and arithmetic traps.
+      (let mut remaining (if negative value (- 0 value)))
+      (let mut text "")
+      (while (< remaining 0)
+        (let quotient (/ remaining 10))
+        (let digit (- (* quotient 10) remaining))
+        (let glyph (digit-string digit))
+        (let next (concat (& glyph) (& text)))
+        (set text next)
+        (set remaining quotient))
+      (if negative
+        (do
+          (let sign "-")
+          (concat (& sign) (& text)))
+        text))))
+
+; `None` for anything that is not an optional `-` followed by at least one
+; digit, and for a number too large to hold — arithmetic traps, so the refusal
+; comes before the multiply and not after it (`D-087`).
+(fn to-i64 ((text (& String))) -> (Option i64)
+  (let size (len text))
+  (let negative (if (= size 0) false (= (byte-at text 0) 45)))
+  (let start (if negative 1 0))
+  (if (= start size)
+    (Option:None)
+    (do
+      (let limit (- 0 922337203685477580))
+      (let smallest (- 0 9223372036854775807))
+      (let mut index start)
+      (let mut total 0)
+      (let mut ok true)
+      (while (< index size)
+        (let byte (byte-at text index))
+        (if (if (< byte 48) true (> byte 57))
+          (do
+            (set ok false)
+            (break))
+          ())
+        (let digit (- byte 48))
+        (if (if (< total limit) true (if (= total limit) (> digit 8) false))
+          (do
+            (set ok false)
+            (break))
+          ())
+        (set total (- (* total 10) digit))
+        (set index (+ index 1)))
+      (if ok
+        (if negative
+          (Option:Some total)
+          (if (< total smallest)
+            (Option:None)
+            (Option:Some (- 0 total))))
+        (Option:None)))))

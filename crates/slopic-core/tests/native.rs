@@ -15,8 +15,9 @@ static NEXT_TEST: AtomicUsize = AtomicUsize::new(0);
 /// about what the backends emit, not about naming imports, so the whole surface
 /// is taken once here and the sources stay about their subject.
 const TAKES: &str = "\
-(take std:io print println print-i32 println-i32 print-i64 println-i64 print-bool
-  println-bool read-line read-i64 parse-i64)
+(take std:io print println print-i64 println-i64 print-bool println-bool
+  read-line read-i64)
+(take std:string to-i64 trim)
 (take std:process env args-len arg)
 ";
 
@@ -391,12 +392,14 @@ fn enum_match_transfers_owned_payload() {
 fn reads_integer_and_returns_owned_environment_string() {
     let (directory, executable) = native_program(
         r#"
+        (take std:prelude Option)
         (fn main () -> i32
           (let expected (read-i64))
           (let key "SLOPIUM_NATIVE_TEST_FLAG")
-          (let flag (env (& key)))
-          (if (= expected 1337)
-              (do (println (& flag)) 0)
+          (if (match expected ((Option:Some value) (= value 1337)) ((Option:None) false))
+              (match (env (& key))
+                ((Option:Some flag) (do (println (& flag)) 0))
+                ((Option:None) 1))
               1))
         "#,
     );
@@ -420,12 +423,17 @@ fn reads_integer_and_returns_owned_environment_string() {
 fn reads_lines_parses_numbers_and_exposes_process_arguments() {
     let (directory, executable) = native_program(
         r#"
+        (take std:prelude Option)
         (fn main () -> i32
-          (let line (read-line))
-          (println-i64 (parse-i64 (& line)))
+          (let parsed
+            (match (read-line)
+              ((Option:Some line) (do (let text (trim (& line))) (to-i64 (& text))))
+              ((Option:None) (Option:None))))
+          (println-i64 (match parsed ((Option:Some value) value) ((Option:None) 0)))
           (println-i64 (args-len))
-          (let first (arg 0))
-          (println (& first))
+          (match (arg 0)
+            ((Option:Some first) (println (& first)))
+            ((Option:None) ()))
           0)
         "#,
     );
@@ -447,8 +455,8 @@ fn runtime_errors_use_stable_message_and_exit_status() {
     let (directory, executable) = native_program(
         r#"
         (fn main () -> i32
-          (let text "not-a-number")
-          (println-i64 (parse-i64 (& text)))
+          (let values (list 1 2 3))
+          (println-i64 (get (& values) 7))
           0)
         "#,
     );
@@ -456,7 +464,7 @@ fn runtime_errors_use_stable_message_and_exit_status() {
     assert_eq!(output.status.code(), Some(101));
     assert_eq!(
         String::from_utf8(output.stderr).unwrap(),
-        "slopium runtime error: invalid i64\n"
+        "slopium runtime error: list index out of bounds\n"
     );
     fs::remove_dir_all(directory).unwrap();
 }
@@ -645,8 +653,8 @@ fn an_extern_call_reaches_c_with_the_arguments_it_declared() {
     }
     fs::create_dir_all(&directory).unwrap();
     let source = r#"
-        (extern "sl_rt_println_i32" (println-i32 (value i32)) -> unit)
-        (extern "sl_rt_println_i64" (println-i64 (value i64)) -> unit)
+        (extern "probe_println_i32" (println-i32 (value i32)) -> unit)
+        (extern "probe_println_i64" (println-i64 (value i64)) -> unit)
         (extern "sl_rt_println_bytes"
           (println-bytes (text (& String)) (length i64)) -> unit)
         (extern "probe_narrow" (probe-narrow (value i32)) -> i32)
@@ -686,9 +694,16 @@ fn an_extern_call_reaches_c_with_the_arguments_it_declared() {
         &callee_path,
         r#"
         #include <stdint.h>
+        #include <stdio.h>
         #include <string.h>
         typedef struct { uint64_t len; uint64_t cap; char *ptr; } SlString;
         SlString *sl_rt_string_new(const char *bytes, uint64_t len);
+
+        /* The printers are the probe's own: the runtime prints bytes, and a
+         * number reaches it through the library's Slopium formatter (`D-086`),
+         * which this test deliberately does not link. */
+        void probe_println_i32(int32_t value) { printf("%d\n", value); }
+        void probe_println_i64(int64_t value) { printf("%ld\n", (long)value); }
 
         int32_t probe_narrow(int32_t value) { return -value; }
         int64_t probe_strlen(const char *text) { return (int64_t)strlen(text); }

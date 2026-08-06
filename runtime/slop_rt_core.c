@@ -117,6 +117,61 @@ void sl_rt_string_drop(SlString *string) {
     }
 }
 
+/* The four the library cannot write for itself (`D-083`). Everything else in
+ * `core:string` — formatting, parsing, splitting, trimming — is Slopium over
+ * these, because a `(& String)` reaches C as a pointer and a length and there
+ * is no other way back into the bytes. */
+int64_t sl_rt_string_byte(const char *bytes, int64_t len, int64_t index) {
+    if (index < 0 || index >= len) {
+        RT_FAIL("string index out of bounds");
+    }
+    return (int64_t)(unsigned char)bytes[index];
+}
+
+SlString *sl_rt_string_slice(const char *bytes, int64_t len, int64_t start, int64_t end) {
+    if (start < 0 || end < start || end > len) {
+        RT_FAIL("string range out of bounds");
+    }
+    return sl_rt_string_new(bytes + start, (uint64_t)(end - start));
+}
+
+SlString *sl_rt_string_concat(const char *left, int64_t left_len,
+                              const char *right, int64_t right_len) {
+    if (left_len < 0 || right_len < 0) {
+        RT_FAIL("negative string length");
+    }
+    uint64_t total = (uint64_t)left_len + (uint64_t)right_len;
+    if (total == UINT64_MAX || total + 1 > (uint64_t)SIZE_MAX) {
+        RT_FAIL("string length overflow");
+    }
+    SlString *string = sl_checked_alloc(sizeof(SlString));
+    string->ptr = sl_checked_alloc(total + 1);
+    sl_mem_copy(string->ptr, left, (uint64_t)left_len);
+    sl_mem_copy(string->ptr + left_len, right, (uint64_t)right_len);
+    string->ptr[total] = '\0';
+    string->len = total;
+    string->cap = total + 1;
+    return string;
+}
+
+/* One `i64` per byte, because the library builds its bytes in a `(List i64)`
+ * and there is no narrower element type to slice. Everything above 8 bits is
+ * dropped, which is what a byte is. */
+SlString *sl_rt_string_from_bytes(const int64_t *bytes, uint64_t count) {
+    if (count == UINT64_MAX || count + 1 > (uint64_t)SIZE_MAX) {
+        RT_FAIL("string length overflow");
+    }
+    SlString *string = sl_checked_alloc(sizeof(SlString));
+    string->ptr = sl_checked_alloc(count + 1);
+    for (uint64_t index = 0; index < count; index += 1) {
+        string->ptr[index] = (unsigned char)(bytes[index] & 0xff);
+    }
+    string->ptr[count] = '\0';
+    string->len = count;
+    string->cap = count + 1;
+    return string;
+}
+
 SlList *sl_rt_list_new(uint64_t elem_size,
                        void (*drop_element)(void *),
                        uint64_t (*clone_element)(uint64_t)) {

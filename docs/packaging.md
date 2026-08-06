@@ -432,17 +432,18 @@ published version:
 ```toml
 [[package]]
 name = "std"
-version = "0.5.2"
+version = "0.5.3"
 source = "toolchain"
-checksum = "07ed727522a91da69923fab15e10bd0db7d198c4487164824f25406f4b4773ce"
+checksum = "619e2fa8a5b7a86e16f83296c7368fe3fcbb913a688d78892c758a43b232ae43"
 dependencies = [
     "core",
 ]
 ```
 
 The toolchain ships two packages, so a project that depends on `std` locks
-`core` beside it: `std` carries `io` and `process` and depends on `core`, which
-carries `Option`, `Result` and the language items (`D-082`). A freestanding
+`core` beside it: `std` carries `io`, `process` and `fs` and depends on `core`,
+which carries `Option`, `Result`, `string` and the language items (`D-082`,
+`D-083`). A freestanding
 project depends on `core` alone. Each has its own checksum, which is what lets
 a lock say which of the two changed.
 

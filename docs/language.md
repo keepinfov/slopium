@@ -159,38 +159,63 @@ std = { toolchain = true }
 `try` is configured through replaceable language items, so a path dependency
 can supply a compatible standard library instead of the bundled one.
 
-## Console, environment, and process arguments
+## The library
 
-Input and output are not part of the language. `std:io` and `std:process` are
+Input, output, strings and files are not part of the language. They are
 ordinary modules of the bundled library, written in Slopium over `extern`
-declarations, and a program that prints says so:
+declarations, and a program that uses one says so.
+
+The library is two packages. `core` is what a program with no C library under
+it can have — `option`, `result` and `string`. `std` is `core` plus what needs
+an operating system — `io`, `process` and `fs` — and it re-exports `core`
+through `std:prelude` and `std:string`, so a package that depends on `std`
+alone reaches everything by that name.
 
 ```lisp
 (take std:io println println-i64 read-i64)
+(take std:string from-i64 split to-i64 trim)
 (take std:process env)
+(take std:prelude Option)
 
-(let number (read-i64))
 (let name "FLAG")
-(let flag (env (& name)))
-(println-i64 number)
-(println (& flag))
+(match (env (& name))
+  ((Option:Some flag) (println (& flag)))
+  ((Option:None) ()))
 ```
 
-`read-i64` reads one signed decimal integer. `read-line` returns an owned line
-without LF/CRLF. `parse-i64` validates a borrowed string, and `env` copies an
-environment variable into an owned `String`. `args-len` excludes the executable
-name; `arg` returns an owned argument copy. Unrecoverable runtime errors print
-a normalized message and exit with status 101.
+**Nothing in the library aborts** (`D-087`). A line past the end of input, a
+byte that is not a digit, an argument that is not there, a variable that is not
+set: each is `None`, and a file operation that fails is an `Err` carrying an
+`errno`. The runtime errors that remain — an index out of bounds, a division by
+zero, an overflow — are the language's own, and they still print a normalized
+message and exit with status 101.
 
+`std:string` is bytes: `byte-at`, `substring`, `concat`, `from-bytes`,
+`equals`, `starts-with`, `find`, `contains`, `trim`, `split` on a separator
+byte, and `from-i64` and `to-i64` between a number and its text. `to-i64`
+returns `(Option i64)` and refuses anything that is not an optional `-`
+followed by digits, including a number too large to hold.
+
+`std:io` has `print` and `println` over `(& String)`, `print-i64`,
+`println-i64`, `print-bool` and `println-bool`, `read-line` returning
+`(Option String)` without LF/CRLF, and `read-i64` returning `(Option i64)`.
 There are no traits yet, so one name cannot print every printable type
-(`D-078`). `print` and `println` take `(& String)`; `print-i32`, `println-i32`,
-`print-i64`, `println-i64`, `print-bool` and `println-bool` take the width they
-name. When `std:string:from-i64` exists these collapse into
-`(println (from-i64 n))`.
+(`D-078`); the widths are separate functions, and their bodies are Slopium over
+`from-i64`. There is no `println-i32`, because there is no widening conversion
+for an `i32` to reach `from-i64` through (`D-086`).
+
+`std:fs` reads and writes whole files: `read`, `write`, `exists` and `delete`,
+each taking a path, returning `(Result T Error)` where `Error` carries an
+`errno`. There is no `open` and no `close` — a file descriptor in a Slopium
+value would have nothing to close it, because a struct wrapping an `i64` owns
+nothing and no drop glue runs for it (`D-084`).
+
+`std:process` has `args-len`, `arg` and `args`, `env` returning
+`(Option String)`, and `exit`.
 
 A lone file has no manifest to declare a dependency in, so `slopic file.slp`
-compiles it against the bundled library and `--no-std` opts out. A package says
-what it depends on:
+compiles it against `std` and `--no-std` opts out; `--freestanding` gets `core`
+instead. A package says what it depends on:
 
 ```toml
 [dependencies]

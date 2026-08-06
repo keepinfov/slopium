@@ -1,7 +1,0 @@
-(take std:io println-i64 read-i64)
-
-(fn main () -> i32
-  (println-i64 (read-i64))
-  0)
-
-(test "fixture compiles" true)

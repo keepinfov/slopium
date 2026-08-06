@@ -29,8 +29,11 @@ SlString *probe_string(void) { return sl_rt_string_new("from C", 6); }
 PROBE
 
 cat >"$check_dir/runtime.slp" <<'SLOPIUM'
-(take std:io println println-i64 parse-i64 read-line)
+(take std:io println println-i64 read-i64)
+(take std:string concat from-i64 split substring to-i64 trim)
 (take std:process arg args-len)
+(take std:fs delete exists read write Error)
+(take std:prelude Option Result)
 
 (struct Pair ((left String) (right String)))
 (enum Message Empty (Text ((value String))))
@@ -40,8 +43,37 @@ cat >"$check_dir/runtime.slp" <<'SLOPIUM'
 (extern "probe_string" (probe-string) -> String)
 
 (fn main () -> i32
-  (let line (read-line))
-  (let number (parse-i64 (& line)))
+  (let number
+    (match (read-i64)
+      ((Option:Some value) value)
+      ((Option:None) 0)))
+  ; The string and file halves of the library allocate, so they belong under a
+  ; leak checker too.
+  (let rendered (from-i64 number))
+  (let suffix ",7,x")
+  (let joined (concat (& rendered) (& suffix)))
+  (let parts (split (& joined) 44))
+  (println-i64 (len (& parts)))
+  (let piece (get-ref (& parts) 1))
+  (let trimmed (trim piece))
+  (println-i64
+    (match (to-i64 (& trimmed))
+      ((Option:Some value) value)
+      ((Option:None) 0)))
+  (let path "/tmp/slopium-runtime-check.txt")
+  (match (write (& path) (& joined))
+    ((Result:Ok written) (println-i64 written))
+    ((Result:Err (Error :code code)) (println-i64 code)))
+  (match (read (& path))
+    ((Result:Ok text) (println (& text)))
+    ((Result:Err (Error :code code)) (println-i64 code)))
+  (match (delete (& path))
+    ((Result:Ok status) (println-i64 status))
+    ((Result:Err (Error :code code)) (println-i64 code)))
+  (match (read (& path))
+    ((Result:Ok text) (println (& text)))
+    ((Result:Err (Error :code code)) (println-i64 code)))
+  (println-i64 (if (exists (& path)) 1 0))
   (let pair (Pair :left "left" :right "right"))
   (let pair-copy (clone pair))
   (let message (Message:Text "payload"))
@@ -59,7 +91,10 @@ cat >"$check_dir/runtime.slp" <<'SLOPIUM'
   (let viewed (get-ref (& view) 0))
   (println viewed)
   (println-i64 (args-len))
-  (let first (arg 0))
+  (let first
+    (match (arg 0)
+      ((Option:Some value) value)
+      ((Option:None) (substring (& suffix) 0 0))))
   (println (& first))
   (println-i64 (probe-strlen (& first)))
   (let numbers (array 10 20 30 40))

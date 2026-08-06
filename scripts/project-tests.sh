@@ -382,10 +382,18 @@ if command -v readelf >/dev/null 2>&1; then
     echo "project-tests: a dev build lost the symbols a debugger needs" >&2
     exit 1
   fi
-  # And nothing a program never calls is dragged along: `basics` touches no
-  # list, so the linker must have dropped the list runtime.
+  # And nothing a program never calls is dragged along: `basics` makes no
+  # slice, so the linker must have dropped the slice runtime.
+  #
+  # It used to be the list runtime, and at v0.5.3 it stopped being: a whole
+  # Slopium object is one `.text`, so the granularity here is the C runtime's
+  # functions and the Slopium *object*, not the Slopium function. `basics`
+  # takes `std:io`, `std:io` takes `core:string`, and `core:string:split`
+  # builds a list — so `sl_rt_list_*` is now reachable from every program that
+  # prints a number. Per-function sections for our own text would fix it and
+  # are not this milestone's business.
   if readelf -sW "$basic_project/target/$host_target/dev/basics" 2>/dev/null |
-    grep -q 'sl_rt_list_'; then
+    grep -q 'sl_rt_slice_'; then
     echo "project-tests: an unused runtime helper survived --gc-sections" >&2
     exit 1
   fi

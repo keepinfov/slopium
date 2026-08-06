@@ -1,0 +1,19 @@
+; The strings a hosted package reaches.
+;
+; They are `core`'s (`D-083`), and a package that depends on `std` has no name
+; for `core`, so this module re-exports them the way `prelude` re-exports the
+; language items (`D-082`).
+
+(export
+  (core:string:byte-at :as byte-at)
+  (core:string:substring :as substring)
+  (core:string:concat :as concat)
+  (core:string:from-bytes :as from-bytes)
+  (core:string:equals :as equals)
+  (core:string:starts-with :as starts-with)
+  (core:string:find :as find)
+  (core:string:contains :as contains)
+  (core:string:trim :as trim)
+  (core:string:split :as split)
+  (core:string:from-i64 :as from-i64)
+  (core:string:to-i64 :as to-i64))

@@ -1,6 +1,14 @@
 ; A library that replaces the toolchain's reaches the runtime the same way the
 ; toolchain's does: through an `extern`. Nothing here is privileged.
+;
+; It prints text and not numbers, because formatting a number is the bundled
+; library's own Slopium code over `sl_rt_string_*` (`D-086`) and copying it
+; here would say nothing this fixture is about.
 
-(export println-i64)
+(export println)
 
-(extern "sl_rt_println_i64" (println-i64 (value i64)) -> unit)
+(extern "sl_rt_println_bytes"
+  (write-line-bytes (bytes (& String)) (length i64)) -> unit)
+
+(fn println ((text (& String))) -> unit
+  (write-line-bytes text (len text)))

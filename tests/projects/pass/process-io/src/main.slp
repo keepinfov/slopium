@@ -1,19 +1,47 @@
-(take std:io parse-i64 println println-i64 read-i64 read-line)
+(take std:io println println-i64 read-i64 read-line)
+(take std:string substring to-i64)
 (take std:process arg args-len env)
+(take std:prelude Option)
+
+; Nothing in the library aborts any more (`D-087`): a line that is not a
+; number, an argument that is not there and a variable that is not set are all
+; values this program has to answer for.
+(fn number-or ((text (Option i64)) (fallback i64)) -> i64
+  (match text
+    ((Option:Some value) value)
+    ((Option:None) fallback)))
+
+(fn text-or ((value (Option String)) (fallback (& String))) -> String
+  (match value
+    ((Option:Some found) found)
+    ; `clone` of a `(& String)` is a `(& String)` — there is no conversion
+    ; from a borrow to an owned copy, so the copy is a substring of the whole.
+    ((Option:None) (substring fallback 0 (len fallback)))))
 
 (fn main () -> i32
-  (let line (read-line))
-  (let parsed (parse-i64 (& line)))
+  (let missing "missing")
+  (let first-line (read-line))
+  (let parsed
+    (match first-line
+      ((Option:Some line) (to-i64 (& line)))
+      ((Option:None) (Option:None))))
   (let number (read-i64))
-  (println-i64 (+ parsed number))
+  (println-i64 (+ (number-or parsed 0) (number-or number 0)))
+  ; Past the end of stdin, and not a number: both are `None`, not an abort.
+  (println-i64 (number-or (read-i64) (- 0 1)))
   (let environment-name "SLOPIUM_PROJECT_TEST_VALUE")
-  (let environment-value (env (& environment-name)))
+  (let environment-value (text-or (env (& environment-name)) (& missing)))
   (println (& environment-value))
+  (let unset-name "SLOPIUM_PROJECT_TEST_UNSET")
+  (let unset-value (text-or (env (& unset-name)) (& missing)))
+  (println (& unset-value))
   (println-i64 (args-len))
-  (let first (arg 0))
-  (let second (arg 1))
+  (let first (text-or (arg 0) (& missing)))
+  (let second (text-or (arg 1) (& missing)))
+  (let third (text-or (arg 2) (& missing)))
   (println (& first))
   (println (& second))
+  (println (& third))
   0)
 
 (test "process fixture arithmetic"

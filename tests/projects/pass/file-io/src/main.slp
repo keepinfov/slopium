@@ -1,0 +1,91 @@
+; The v0.5 exit condition: a program that reads a file, parses integers out of
+; it and writes one, using only the library. No `extern` of its own, no builtin
+; that v0.5.1 removed, nothing privileged.
+;
+; The path arrives as an argument, because the fixture runs with the repository
+; as its working directory and has no business writing into it.
+
+(take std:io println println-bool println-i64)
+(take std:string concat from-i64 split to-i64 trim)
+(take std:fs delete exists read write Error)
+(take std:process arg)
+(take std:prelude Option Result)
+
+; Blank lines and lines that are not numbers are skipped, which is the whole
+; reason `to-i64` returns an `Option` (`D-087`).
+(fn sum-lines ((text (& String))) -> i64
+  (let lines (split text 10))
+  (let count (len (& lines)))
+  (let mut index 0)
+  (let mut total 0)
+  (while (< index count)
+    (let line (get-ref (& lines) index))
+    (let trimmed (trim line))
+    (match (to-i64 (& trimmed))
+      ((Option:Some value) (set total (+ total value)))
+      ((Option:None) ()))
+    (set index (+ index 1)))
+  total)
+
+(fn report ((label (& String)) (outcome (Result i64 Error))) -> unit
+  (match outcome
+    ((Result:Ok count) (do (print-label label) (println-i64 count)))
+    ((Result:Err (Error :code code)) (do (print-label label) (println-i64 code)))))
+
+(fn print-label ((label (& String))) -> unit
+  (println label))
+
+(fn main () -> i32
+  (let fallback "/tmp/slopium-file-io-fixture.txt")
+  (let path
+    (match (arg 0)
+      ((Option:Some given) given)
+      ((Option:None) (clone fallback))))
+  (let suffix ".sum")
+  (let sum-path (concat (& path) (& suffix)))
+  (let body "12
+30
+
+-7
+not a number
+")
+
+  (let wrote "wrote")
+  (report (& wrote) (write (& path) (& body)))
+  (let total
+    (match (read (& path))
+      ((Result:Ok text) (sum-lines (& text)))
+      ((Result:Err (Error :code code)) (- 0 code))))
+  (println-i64 total)
+
+  (let rendered (from-i64 total))
+  (let wrote-sum "wrote the sum")
+  (report (& wrote-sum) (write (& sum-path) (& rendered)))
+  (match (read (& sum-path))
+    ((Result:Ok text) (println (& text)))
+    ((Result:Err (Error :code code)) (println-i64 code)))
+  (println-bool (exists (& sum-path)))
+
+  ; A file that is not there is an `Err` carrying `ENOENT`, and not a crash.
+  (let removed "removed")
+  (report (& removed) (delete (& path)))
+  (report (& removed) (delete (& sum-path)))
+  (let missing "missing")
+  (report (& missing) (delete (& path)))
+  (println-bool (exists (& path)))
+  0)
+
+(test "lines that are not numbers do not count"
+  (do
+    (let text "1
+two
+3
+")
+    (= (sum-lines (& text)) 4)))
+
+(test "an integer survives a round trip through its text"
+  (do
+    (let rendered (from-i64 (- 0 4210)))
+    (match (to-i64 (& rendered))
+      ((Option:Some value) (= value (- 0 4210)))
+      ((Option:None) false))))
