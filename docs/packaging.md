@@ -432,9 +432,9 @@ published version:
 ```toml
 [[package]]
 name = "std"
-version = "0.6.0"
+version = "0.6.1"
 source = "toolchain"
-checksum = "2f11e453359f2495e328b9308f32aabcb03f5f22798fe7a68fc6a35c5586129d"
+checksum = "6dbbb0a51db54af6b2e0382db44b087098353f301709a3ee1c9179b365552072"
 dependencies = [
     "core",
 ]

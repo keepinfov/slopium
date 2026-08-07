@@ -1,11 +1,12 @@
 ; Standard input and output.
 ;
-; There are no traits yet (`D-068`), so one name cannot print every printable
-; type and the widths are separate functions. What changed at v0.5.3 is that
-; only the two byte-writing entry points are still C: a number reaches them
-; through `core:string:from-i64`, and `read-i64` is `read-line` and `to-i64`
-; (`D-086`, `D-087`). There is no `print-i32`, because there is no widening
-; conversion for an `i32` to reach `from-i64` through.
+; There are no traits and none are planned (`D-088`), so one name cannot print
+; every printable type and the widths are separate functions. What changed at
+; v0.5.3 is that only the two byte-writing entry points are still C: a number
+; reaches them through `core:string:from-i64`, and `read-i64` is `read-line`
+; and `to-i64` (`D-086`, `D-087`). There is no `print-i32` and there will not
+; be one: since v0.6.1 an `i32` widens at the call, as `(print-i64 (as i64
+; value))` (`D-090`).
 
 (take core:option Option)
 (take core:string from-i64 to-i64 trim)

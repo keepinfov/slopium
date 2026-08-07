@@ -1,0 +1,5 @@
+(fn doubled ((value i64)) -> i64
+  (+ (clone value) value))
+
+(fn main () -> i32
+  0)

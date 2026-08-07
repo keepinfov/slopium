@@ -59,7 +59,11 @@ future version nothing.
 
 Scalar types are `unit`, `bool`, `i32`, `i64`, and `f64`. Other built-in types
 are `String`, `(List T)`, `(Array T N)`, `(Slice T)`, `(& T)`, and `(&mut T)`.
-Numeric conversions are never implicit.
+Numeric conversions are never implicit. `(as i64 value)` is the one that exists
+(`D-090`): it widens an `i32`, and every other pair — narrowing, truncating,
+anything touching `f64` — is refused by name. The form takes a target type
+rather than a value, so what it converts to is read the way a type is read and
+not the way a variable is.
 
 `+`, `-`, `*`, `/`, `<`, and `>` take two operands of one numeric type. `=`
 takes two `bool`, `i32`, `i64`, or `f64` operands and nothing else (`D-089`):
@@ -76,6 +80,9 @@ while looking like it answered about contents.
 (let message "hello")
 (let copy (clone message))
 (println (& message))
+
+(fn owned ((text (& String))) -> String
+  (clone text))
 ```
 
 Owned values move by default. `(& value)` and `(&mut value)` create shared and
@@ -84,6 +91,12 @@ analysis can prove that it is dead; references still cannot escape a function
 or be stored in aggregate fields or collection elements. Borrowed slices
 cannot be returned either. `clone` recursively copies strings, lists, arrays,
 structs, and enums. Generated drop glue recursively destroys them.
+
+`clone` crosses a borrow (`D-091`): `(clone text)` on a `(& String)` is a
+`String`, which is how a borrowed value is copied into an owned one. It refuses
+a `&mut`, and it refuses a scalar — a `bool`, an `i32`, an `i64` or an `f64` is
+copied by being used, so `(clone 42)` is an error rather than a call that does
+nothing.
 
 ## Control flow
 
@@ -213,8 +226,9 @@ followed by digits, including a number too large to hold.
 `(Option String)` without LF/CRLF, and `read-i64` returning `(Option i64)`.
 There are no traits and none are planned (`D-088`), so one name cannot print
 every printable type (`D-078`); the widths are separate functions, and their
-bodies are Slopium over `from-i64`. There is no `println-i32`, because there is
-no widening conversion for an `i32` to reach `from-i64` through (`D-086`).
+bodies are Slopium over `from-i64`. There is no `println-i32` and there will
+not be one: an `i32` reaches `println-i64` as `(println-i64 (as i64 value))`,
+which is the debt `D-086` named and `D-090` paid.
 
 `std:fs` reads and writes whole files: `read`, `write`, `exists` and `delete`,
 each taking a path, returning `(Result T Error)` where `Error` carries an

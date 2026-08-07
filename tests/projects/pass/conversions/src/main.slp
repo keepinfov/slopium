@@ -1,0 +1,44 @@
+; The two conversions the language has, and nothing else. `(as i64 value)` is
+; the only widening (`D-090`), and it is what lets an `i32` reach `from-i64`,
+; which is why there is no `println-i32` (`D-086`). `clone` crosses a borrow
+; (`D-091`), which is the only way a `(& String)` becomes a `String`.
+
+(take std:io println println-i64)
+(take std:string equals from-i64)
+
+(fn small () -> i32 42)
+
+(fn negative () -> i32 (- 0 7))
+
+(fn label ((value i32)) -> String
+  (from-i64 (as i64 value)))
+
+(fn owned ((text (& String))) -> String
+  (clone text))
+
+(fn main () -> i32
+  (println-i64 (as i64 (small)))
+  (println-i64 (as i64 (negative)))
+  (let text (label (negative)))
+  (println (& text))
+  ; The borrow is still the caller's after the copy is taken from it.
+  (let source "borrowed")
+  (let copy (owned (& source)))
+  (println (& copy))
+  (println (& source))
+  ; Cloning an owned aggregate is what it always was.
+  (let values (list "one" "two"))
+  (let echo (clone values))
+  (println-i64 (+ (len (& values)) (len (& echo))))
+  0)
+
+(test "a widened i32 keeps its sign"
+  (if (= (as i64 (small)) 42)
+    (= (as i64 (negative)) (- 0 7))
+    false))
+
+(test "a clone through a borrow is an owned copy"
+  (do
+    (let original "text")
+    (let taken (owned (& original)))
+    (equals (& taken) (& original))))

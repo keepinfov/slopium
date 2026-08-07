@@ -604,6 +604,24 @@ impl Builder {
                 ok_tag,
                 ..
             } => self.lower_try(value, ok_type, *ok_tag),
+            // The only pair `D-090` allows is `i32` to `i64`, and an `i32` is
+            // kept sign-extended in its full word everywhere (`D-074`), so the
+            // widening is already done and the move is the whole conversion.
+            // A pair that is not already extended needs an instruction here,
+            // and the differential suite is what would catch its absence.
+            TExprKind::Convert { value } => {
+                let source = self.expr(value)?;
+                let dst = self.temp(expr.ty.clone());
+                self.emit(Instruction::Assign {
+                    dst,
+                    src: source.local,
+                });
+                Some(Value {
+                    local: dst,
+                    ty: expr.ty.clone(),
+                    owned_temporary: false,
+                })
+            }
             TExprKind::Call { callee, args } | TExprKind::GenericCall { callee, args, .. } => {
                 let callee = match &expr.kind {
                     TExprKind::GenericCall {

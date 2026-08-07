@@ -76,6 +76,11 @@ cat >"$check_dir/runtime.slp" <<'SLOPIUM'
   (println-i64 (if (exists (& path)) 1 0))
   (let pair (Pair :left "left" :right "right"))
   (let pair-copy (clone pair))
+  ; A clone that crosses a borrow (`D-091`) allocates a second buffer, and the
+  ; value the borrow came from still drops its own. Getting that wrong is a
+  ; double free rather than a type error, which is why it is checked here.
+  (let borrowed-copy (clone (& joined)))
+  (println-i64 (probe-strlen (& borrowed-copy)))
   (let message (Message:Text "payload"))
   (let mut values (list number 2 3))
   (do (push (&mut values) 4))

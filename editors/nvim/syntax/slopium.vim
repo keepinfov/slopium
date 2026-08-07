@@ -33,6 +33,8 @@ syntax keyword slopiumAssignmentKeyword set nextgroup=slopiumVariable skipwhite
 syntax match slopiumVariable "[a-z_][A-Za-z0-9_-]*" contained
 syntax keyword slopiumControl do loop while break continue
 syntax keyword slopiumConditional if match try
+" Anchored after `(` so the `:as` of an import alias stays a field.
+syntax match slopiumConversion "\%((\s*\)\@<=as\>"
 syntax keyword slopiumModuleKeyword export take
 
 " A lowercase name followed by a type and `)` is a parameter/field
@@ -66,6 +68,7 @@ highlight default link slopiumBindingKeyword @keyword
 highlight default link slopiumAssignmentKeyword @keyword
 highlight default link slopiumControl Conditional
 highlight default link slopiumConditional @keyword.conditional
+highlight default link slopiumConversion @keyword.operator
 highlight default link slopiumModuleKeyword Include
 highlight default link slopiumOwnership StorageClass
 highlight default link slopiumBuiltin @function.builtin

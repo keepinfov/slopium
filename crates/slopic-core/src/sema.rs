@@ -118,6 +118,13 @@ pub enum TExprKind {
         id: BindingId,
         mutable: bool,
     },
+    /// A widening between two numeric types, from `(as i64 value)`.
+    ///
+    /// The source type is the value's own; the destination is this
+    /// expression's. Only the pairs `D-090` allows survive sema.
+    Convert {
+        value: Box<TExpr>,
+    },
     Call {
         callee: String,
         args: Vec<TExpr>,
@@ -1172,6 +1179,7 @@ impl<'a> Analyzer<'a> {
             ExprKind::Match { value, arms } => self.match_expr(expr, value, arms, expected),
             ExprKind::Borrow { mutable, value } => self.borrow(expr, *mutable, value),
             ExprKind::Try(value) => self.try_expr(expr, value),
+            ExprKind::Convert { target, value } => self.convert(expr, target, value),
             ExprKind::Call { callee, args } => self.call(expr, callee, args, expected),
         };
 
@@ -1213,10 +1221,9 @@ impl<'a> Analyzer<'a> {
                 .first()
                 .and_then(|argument| self.reference_loan(argument))
                 .map(|(origin, _)| (origin, true)),
-            TExprKind::Call { callee, args } if callee == "clone" => args
-                .first()
-                .and_then(|argument| self.reference_loan(argument))
-                .map(|(origin, _)| (origin, false)),
+            // `clone` is deliberately absent: since `D-091` its result is owned
+            // whatever it was handed, so it ends a loan rather than passing one
+            // on.
             _ => None,
         }
     }
@@ -2041,6 +2048,40 @@ impl<'a> Analyzer<'a> {
         )
     }
 
+    /// Types `(as target value)` against the table of allowed pairs.
+    ///
+    /// The table is one row — `i32` to `i64` — and it is a table rather than a
+    /// rule so that v0.8 freezes a list a later version can add a row to
+    /// (`D-090`). A conversion that is not in it is refused by name, because
+    /// the alternative is a language where `as` means "trust me".
+    fn convert(&mut self, expr: &Expr, target: &Type, value: &Expr) -> TExpr {
+        const PAIRS: &[(Type, Type)] = &[(Type::I32, Type::I64)];
+
+        let value = self.expr(value, None);
+        let target = self.normalize_type(target, expr.span);
+        let allowed = PAIRS
+            .iter()
+            .any(|(from, to)| *from == value.ty && *to == target);
+        if !allowed {
+            self.diagnostics.push(
+                Diagnostic::error(
+                    codes::NAME_OR_TYPE,
+                    self.file,
+                    expr.span,
+                    format!("`as` cannot convert `{}` to `{target}`", value.ty),
+                )
+                .with_help("the only conversion is `(as i64 value)` from an `i32`"),
+            );
+        }
+        self.typed(
+            expr,
+            target,
+            TExprKind::Convert {
+                value: Box::new(value),
+            },
+        )
+    }
+
     fn clone_call(&mut self, expr: &Expr, args: &[Expr]) -> TExpr {
         if args.len() != 1 {
             self.error(expr.span, "`clone` expects one argument");
@@ -2053,7 +2094,21 @@ impl<'a> Analyzer<'a> {
         if matches!(arg.ty, Type::Ref { mutable: true, .. }) {
             self.error(arg.span, "cannot clone a mutable reference");
         }
-        let result = arg.ty.clone();
+        // `clone` crosses a borrow (`D-091`). Returning the borrow it was handed
+        // made the call a no-op, and left the language with no way at all to
+        // turn a `(& String)` into a `String`.
+        let result = arg.ty.strip_ref().clone();
+        if is_nothing_to_clone(&result) {
+            self.diagnostics.push(
+                Diagnostic::error(
+                    codes::NAME_OR_TYPE,
+                    self.file,
+                    expr.span,
+                    format!("`clone` has nothing to copy out of `{result}`"),
+                )
+                .with_help("a scalar is copied by using it; drop the `clone`"),
+            );
+        }
         self.typed(
             expr,
             result,
@@ -2786,6 +2841,7 @@ impl<'a> Analyzer<'a> {
                     self.materialize_typed_expr(argument);
                 }
             }
+            TExprKind::Convert { value } => self.materialize_typed_expr(value),
             TExprKind::Try {
                 value,
                 ok_type,
@@ -2887,6 +2943,18 @@ impl<'a> Analyzer<'a> {
     }
 }
 
+/// Whether `clone` would have nothing to do for this type.
+///
+/// A scalar is copied by being used, so a `clone` of one is silence dressed as
+/// a call, and `D-091` makes it an error rather than let it read as a deep
+/// copy. The argument has already crossed its borrow when this is asked.
+fn is_nothing_to_clone(ty: &Type) -> bool {
+    matches!(
+        ty,
+        Type::Unit | Type::Bool | Type::I32 | Type::I64 | Type::F64
+    )
+}
+
 /// Whether a refused `=` operand is text, owned or borrowed.
 ///
 /// Only used to decide whether the diagnostic points at `core:string:equals`.
@@ -2934,7 +3002,7 @@ fn collect_variable_names(expr: &Expr, output: &mut HashSet<String>) {
                 collect_variable_names(&arm.body, output);
             }
         }
-        ExprKind::Borrow { value, .. } | ExprKind::Try(value) => {
+        ExprKind::Borrow { value, .. } | ExprKind::Try(value) | ExprKind::Convert { value, .. } => {
             collect_variable_names(value, output);
         }
         ExprKind::Call { args, .. } => {
@@ -3260,6 +3328,7 @@ fn specialize_expr(
                 args: ordinary_args,
             };
         }
+        TExprKind::Convert { value } => specialize_expr(value, substitutions, queue),
         TExprKind::Try { value, ok_type, .. } => {
             specialize_expr(value, substitutions, queue);
             *ok_type = substitute_type(ok_type, substitutions);

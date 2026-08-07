@@ -378,7 +378,9 @@ impl<'a> SymbolIndexBuilder<'a> {
                     self.expr(argument, scope, bindings);
                 }
             }
-            TExprKind::Try { value, .. } => self.expr(value, scope, bindings),
+            TExprKind::Try { value, .. } | TExprKind::Convert { value } => {
+                self.expr(value, scope, bindings)
+            }
             TExprKind::StructInit { name, fields } => {
                 self.top_level_reference(name, expression.span);
                 for field in fields {
@@ -508,7 +510,7 @@ impl<'a> SymbolIndexBuilder<'a> {
 }
 
 pub const BUILTINS: &[(&str, &str)] = &[
-    ("clone", "clone(T) -> T"),
+    ("clone", "clone(T | &T) -> T"),
     ("list", "list(T...) -> List<T>"),
     ("array", "array(T...) -> Array<T, N>"),
     ("slice", "slice(&Collection<T>, i64, i64) -> Slice<T>"),

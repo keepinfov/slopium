@@ -1,0 +1,5 @@
+clone-scalar.slp:2:6: error[SL0200]: `clone` has nothing to copy out of `i64`
+  |
+ 2 |   (+ (clone value) value))
+  |      ^^^^^^^^^^^^^
+  = help: a scalar is copied by using it; drop the `clone`

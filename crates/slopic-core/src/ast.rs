@@ -30,6 +30,18 @@ impl Type {
     pub fn is_integer(&self) -> bool {
         matches!(self, Type::I32 | Type::I64)
     }
+
+    /// What a borrow borrows, or the type itself when it is not one.
+    ///
+    /// One level, because that is all the language can build: a `(& (& T))` has
+    /// no spelling. `clone` uses it to cross the borrow it is handed (`D-091`),
+    /// and lowering uses it to pick the glue for what is behind one.
+    pub fn strip_ref(&self) -> &Type {
+        match self {
+            Type::Ref { inner, .. } => inner,
+            other => other,
+        }
+    }
 }
 
 impl fmt::Display for Type {
@@ -208,6 +220,14 @@ pub enum ExprKind {
         value: Box<Expr>,
     },
     Try(Box<Expr>),
+    /// `(as i64 value)` — a widening between two named numeric types.
+    ///
+    /// A form rather than a call, so the target type is parsed as a type and
+    /// not as a variable that happens to spell one (`D-090`).
+    Convert {
+        target: Type,
+        value: Box<Expr>,
+    },
     Call {
         callee: String,
         args: Vec<Expr>,
@@ -802,6 +822,16 @@ impl AstBuilder<'_> {
                             return None;
                         }
                         ExprKind::Try(Box::new(self.expr(&items[1])?))
+                    }
+                    "as" => {
+                        if items.len() != 3 {
+                            self.error(form.span, "`as` expects a target type and a value");
+                            return None;
+                        }
+                        ExprKind::Convert {
+                            target: self.ty(&items[1])?,
+                            value: Box::new(self.expr(&items[2])?),
+                        }
                     }
                     "&" | "&mut" => {
                         if items.len() != 2 {

@@ -1,5 +1,5 @@
 (take std:io println println-i64 read-i64 read-line)
-(take std:string substring to-i64)
+(take std:string to-i64)
 (take std:process arg args-len env)
 (take std:prelude Option)
 
@@ -14,9 +14,7 @@
 (fn text-or ((value (Option String)) (fallback (& String))) -> String
   (match value
     ((Option:Some found) found)
-    ; `clone` of a `(& String)` is a `(& String)` — there is no conversion
-    ; from a borrow to an owned copy, so the copy is a substring of the whole.
-    ((Option:None) (substring fallback 0 (len fallback)))))
+    ((Option:None) (clone fallback))))
 
 (fn main () -> i32
   (let missing "missing")

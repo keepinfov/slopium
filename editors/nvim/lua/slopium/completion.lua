@@ -28,6 +28,7 @@ local static_items = {
   { label = "break", kind = kinds.Keyword },
   { label = "continue", kind = kinds.Keyword },
   { label = "try", kind = kinds.Snippet, detail = "propagate Result error", insertText = "try ${0:expression}", insertTextFormat = 2 },
+  { label = "as", kind = kinds.Snippet, detail = "widen a number to a named type", insertText = "as ${1:i64} ${0:value}", insertTextFormat = 2 },
   { label = "mut", kind = kinds.Keyword, detail = "mutable marker" },
   { label = "true", kind = kinds.Keyword },
   { label = "false", kind = kinds.Keyword },

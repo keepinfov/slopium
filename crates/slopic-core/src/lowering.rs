@@ -437,9 +437,12 @@ pub fn builtin(
     let one = |symbol: &str| vec![call(symbol, vec![Argument::Value(args[0])])];
 
     let steps = match callee {
+        // `clone` crosses a borrow (`D-091`), and a borrow of a pointer-shaped
+        // value is that pointer rather than the address of a slot holding it,
+        // so the glue to call is the one for what is behind the borrow.
         "clone" => vec![Step::Invoke {
             arguments: vec![Argument::Value(args[0])],
-            tail: match clone_function(module, &arg_types[0]) {
+            tail: match clone_function(module, arg_types[0].strip_ref()) {
                 Some(symbol) => Tail::Call(symbol),
                 None => Tail::FirstArgument,
             },

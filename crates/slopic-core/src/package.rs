@@ -751,6 +751,14 @@ impl Resolver<'_> {
             ExprKind::Borrow { value, .. } | ExprKind::Try(value) => {
                 self.rewrite_expr(value, diagnostics);
             }
+            // `as` carries a type, and the table `D-090` allows holds only
+            // scalars, so nothing needs resolving today. It is resolved anyway,
+            // because the day the table gains a named row is not the day anyone
+            // will remember this arm.
+            ExprKind::Convert { target, value } => {
+                self.rewrite_type(target, expression.span, diagnostics);
+                self.rewrite_expr(value, diagnostics);
+            }
             ExprKind::Call { callee, args } => {
                 if !is_builtin(callee) {
                     *callee = self.resolve(callee, expression.span, diagnostics);
@@ -961,7 +969,9 @@ fn collect_qualified_names<'a>(program: &'a Program, output: &mut Vec<&'a str>) 
                     expr(&arm.body, output);
                 }
             }
-            ExprKind::Borrow { value, .. } | ExprKind::Try(value) => expr(value, output),
+            ExprKind::Borrow { value, .. }
+            | ExprKind::Try(value)
+            | ExprKind::Convert { value, .. } => expr(value, output),
             ExprKind::Call { callee, args } => {
                 if callee.contains(':') {
                     output.push(callee);
@@ -1133,7 +1143,9 @@ fn shift_program(program: &mut Program, base: usize) {
                     shift_expr(&mut arm.body, base);
                 }
             }
-            ExprKind::Borrow { value, .. } | ExprKind::Try(value) => shift_expr(value, base),
+            ExprKind::Borrow { value, .. }
+            | ExprKind::Try(value)
+            | ExprKind::Convert { value, .. } => shift_expr(value, base),
             ExprKind::Call { args, .. } => {
                 args.iter_mut()
                     .for_each(|argument| shift_expr(argument, base));
