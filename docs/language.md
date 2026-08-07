@@ -51,8 +51,11 @@ All module dependency cycles are rejected.
 
 Generic applications use S-expressions, for example `(Box String)` and
 `(Result i64 Error)`. Type arguments are inferred at calls and constructors.
-The compiler monomorphizes only reachable concrete instances. Traits and
-bounds are intentionally not part of v0.2.
+The compiler monomorphizes only reachable concrete instances. The language has
+no traits and no bounds, and none are planned for 1.0 (`D-088`). A bound can be
+added later to a parameter that is unconstrained today without invalidating a
+program that already satisfies it, which is why refusing them now costs a
+future version nothing.
 
 Scalar types are `unit`, `bool`, `i32`, `i64`, and `f64`. Other built-in types
 are `String`, `(List T)`, `(Array T N)`, `(Slice T)`, `(& T)`, and `(&mut T)`.
@@ -199,10 +202,10 @@ followed by digits, including a number too large to hold.
 `std:io` has `print` and `println` over `(& String)`, `print-i64`,
 `println-i64`, `print-bool` and `println-bool`, `read-line` returning
 `(Option String)` without LF/CRLF, and `read-i64` returning `(Option i64)`.
-There are no traits yet, so one name cannot print every printable type
-(`D-078`); the widths are separate functions, and their bodies are Slopium over
-`from-i64`. There is no `println-i32`, because there is no widening conversion
-for an `i32` to reach `from-i64` through (`D-086`).
+There are no traits and none are planned (`D-088`), so one name cannot print
+every printable type (`D-078`); the widths are separate functions, and their
+bodies are Slopium over `from-i64`. There is no `println-i32`, because there is
+no widening conversion for an `i32` to reach `from-i64` through (`D-086`).
 
 `std:fs` reads and writes whole files: `read`, `write`, `exists` and `delete`,
 each taking a path, returning `(Result T Error)` where `Error` carries an
