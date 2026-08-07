@@ -432,9 +432,9 @@ published version:
 ```toml
 [[package]]
 name = "std"
-version = "0.5.3"
+version = "0.6.0"
 source = "toolchain"
-checksum = "619e2fa8a5b7a86e16f83296c7368fe3fcbb913a688d78892c758a43b232ae43"
+checksum = "2f11e453359f2495e328b9308f32aabcb03f5f22798fe7a68fc6a35c5586129d"
 dependencies = [
     "core",
 ]
@@ -443,9 +443,8 @@ dependencies = [
 The toolchain ships two packages, so a project that depends on `std` locks
 `core` beside it: `std` carries `io`, `process` and `fs` and depends on `core`,
 which carries `Option`, `Result`, `string` and the language items (`D-082`,
-`D-083`). A freestanding
-project depends on `core` alone. Each has its own checksum, which is what lets
-a lock say which of the two changed.
+`D-083`). A freestanding project depends on `core` alone. Each has its own
+checksum, which is what lets a lock say which of the two changed.
 
 A path dependency has none. It is a working tree, and hashing one would rewrite
 the lock on every keystroke. The bundled library has one because it ships inside

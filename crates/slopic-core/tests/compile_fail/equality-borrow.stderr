@@ -1,0 +1,5 @@
+equality-borrow.slp:4:7: error[SL0200]: operator `=` does not support `&String`
+  |
+ 4 |   (if (= (& left) (& right)) 0 1))
+  |       ^^^^^^^^^^^^^^^^^^^^^^
+  = help: compare text with `core:string:equals`

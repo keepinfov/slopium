@@ -61,6 +61,15 @@ Scalar types are `unit`, `bool`, `i32`, `i64`, and `f64`. Other built-in types
 are `String`, `(List T)`, `(Array T N)`, `(Slice T)`, `(& T)`, and `(&mut T)`.
 Numeric conversions are never implicit.
 
+`+`, `-`, `*`, `/`, `<`, and `>` take two operands of one numeric type. `=`
+takes two `bool`, `i32`, `i64`, or `f64` operands and nothing else (`D-089`):
+comparing two `String`s, two structs, two enums, two borrows, or two values of
+an unconstrained type parameter is an error. Text is compared with
+`core:string:equals`, which `std:string` re-exports. Without traits there is no
+way to give `=` a meaning for a type the compiler did not define, and comparing
+such values by the machine word that holds them would answer about identity
+while looking like it answered about contents.
+
 ## Ownership and borrows
 
 ```lisp

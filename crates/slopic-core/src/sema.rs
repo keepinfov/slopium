@@ -2715,14 +2715,24 @@ impl<'a> Analyzer<'a> {
         let valid = match callee {
             "+" | "-" | "*" | "/" => left.ty.is_integer() || left.ty == Type::F64,
             "<" | ">" => left.ty.is_integer() || left.ty == Type::F64,
-            "=" => left.ty != Type::Unit,
+            // Scalars only, per `D-089`. Every other type is one machine word
+            // in a local — `Type` has no aggregate variant — so a wider `=`
+            // would compare handles rather than contents, and would hand an
+            // unconstrained type parameter a capability `D-012` denies it.
+            "=" => left.ty.is_integer() || matches!(left.ty, Type::F64 | Type::Bool),
             _ => false,
         };
         if !valid {
-            self.error(
+            let mut diagnostic = Diagnostic::error(
+                codes::NAME_OR_TYPE,
+                self.file,
                 expr.span,
                 format!("operator `{callee}` does not support `{}`", left.ty),
             );
+            if callee == "=" && is_text(&left.ty) {
+                diagnostic = diagnostic.with_help("compare text with `core:string:equals`");
+            }
+            self.diagnostics.push(diagnostic);
         }
         let result = if matches!(callee, "<" | ">" | "=") {
             Type::Bool
@@ -2874,6 +2884,18 @@ impl<'a> Analyzer<'a> {
     fn error_with_code(&mut self, code: &str, span: Span, message: impl Into<String>) {
         self.diagnostics
             .push(Diagnostic::error(code, self.file, span, message));
+    }
+}
+
+/// Whether a refused `=` operand is text, owned or borrowed.
+///
+/// Only used to decide whether the diagnostic points at `core:string:equals`.
+/// It is the case a user actually hits, and the one with an answer to give.
+fn is_text(ty: &Type) -> bool {
+    match ty {
+        Type::String => true,
+        Type::Ref { inner, .. } => is_text(inner),
+        _ => false,
     }
 }
 

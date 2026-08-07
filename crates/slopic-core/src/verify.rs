@@ -278,15 +278,24 @@ fn verify_instruction_shape(
             }
         }
         Instruction::Binary { op, ty, .. } => {
-            // Comparisons produce a bool regardless of operand type; arithmetic
-            // carries the operand type. Codegen selects integer or float
-            // instructions from `ty`, so a wrong one is a silent miscompile.
-            let comparison = matches!(op, BinaryOp::Less | BinaryOp::Greater | BinaryOp::Equal);
+            // `ty` is the operand type, not the result: a comparison produces a
+            // bool but still compares two operands. Codegen selects integer or
+            // float instructions from it, so a wrong one is a silent
+            // miscompile, and since `D-089` a comparison operand is a scalar
+            // too. `Equal` additionally accepts `bool`, which pattern lowering
+            // emits for a boolean pattern and `<`/`>` never see.
             let numeric = matches!(ty, Type::I32 | Type::I64 | Type::F64);
-            if !comparison && !numeric {
+            let allowed = match op {
+                BinaryOp::Equal => numeric || *ty == Type::Bool,
+                _ => numeric,
+            };
+            if !allowed {
+                let complaint = match op {
+                    BinaryOp::Less | BinaryOp::Greater | BinaryOp::Equal => "compares non-scalar",
+                    _ => "performs arithmetic on non-numeric",
+                };
                 report(format!(
-                    "block {index} instruction {position} performs arithmetic on non-numeric \
-                     type `{ty:?}`"
+                    "block {index} instruction {position} {complaint} type `{ty:?}`"
                 ));
             }
         }

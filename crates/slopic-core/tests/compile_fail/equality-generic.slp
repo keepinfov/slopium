@@ -1,0 +1,5 @@
+(fn same (T) ((left T) (right T)) -> bool
+  (= left right))
+
+(fn main () -> i32
+  (if (same 1 2) 0 1))
