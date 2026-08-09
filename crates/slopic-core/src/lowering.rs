@@ -93,19 +93,27 @@ pub fn call_words(
 ) -> Vec<(ExternWord, ExternClass)> {
     match extern_declaration(module, callee) {
         Some(declaration) => extern_arguments(declaration, args),
-        None => args
-            .iter()
-            .zip(arg_types)
-            .map(|(arg, ty)| {
-                let class = if *ty == Type::F64 {
-                    ExternClass::Float
-                } else {
-                    ExternClass::Integer
-                };
-                (ExternWord::Value(*arg), class)
-            })
-            .collect(),
+        None => value_words(args, arg_types),
     }
+}
+
+/// A call's arguments where each one is a whole machine word.
+///
+/// Every Slopium callee takes them this way, and an indirect call has no name
+/// to look an `extern` up by — which is the same statement twice, because a
+/// function value can only ever point at a Slopium function (`D-092`).
+pub fn value_words(args: &[LocalId], arg_types: &[Type]) -> Vec<(ExternWord, ExternClass)> {
+    args.iter()
+        .zip(arg_types)
+        .map(|(arg, ty)| {
+            let class = if *ty == Type::F64 {
+                ExternClass::Float
+            } else {
+                ExternClass::Integer
+            };
+            (ExternWord::Value(*arg), class)
+        })
+        .collect()
 }
 
 fn extern_arguments(declaration: &MirExtern, args: &[LocalId]) -> Vec<(ExternWord, ExternClass)> {

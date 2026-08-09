@@ -125,6 +125,12 @@ const LEAF: RegisterFile = RegisterFile {
 /// `x16` and `x17` are the platform's own intra-procedure scratch pair, free
 /// for exactly this. `x15` is taken out of the leaf pool to give the two
 /// overflow checks that need three live values somewhere to put the third.
+/// What the argument marshalling ends with: a symbol, or a local holding one.
+enum Callee {
+    Symbol(String),
+    Value(LocalId),
+}
+
 const SCRATCH: [(Reg, Reg); 3] = [
     (Reg("x15"), Reg("w15")),
     (Reg("x16"), Reg("w16")),
@@ -789,6 +795,33 @@ impl<'a> Generator<'a> {
                 arg_types,
                 result,
             } => self.call(*dst, callee, args, arg_types, result),
+            Instruction::FnAddr { dst, symbol } => {
+                // The same page-then-offset pair a string literal's address
+                // uses; `x16` is scratch and never an allocated local.
+                let symbol = symbol.clone();
+                self.address_of_label(X16, &symbol);
+                self.write(*dst, X16);
+            }
+            Instruction::CallValue {
+                dst,
+                callee,
+                args,
+                arg_types,
+                result,
+            } => {
+                self.indirect_call(*callee, args, arg_types);
+                match result {
+                    Type::Unit => {}
+                    Type::F64 => {
+                        self.inst(Inst::Fmov { dst: X16, src: D0 });
+                        self.write(*dst, X16);
+                    }
+                    // No narrow-return fixup: the callee is a Slopium function
+                    // and already returns an extended value (`D-074`). Only the
+                    // C boundary needs one, and a function value never crosses.
+                    _ => self.write(*dst, RESULT),
+                }
+            }
             Instruction::Drop { local, ty } => {
                 let source = self.read(*local, 1);
                 if source != X0 {
@@ -1235,10 +1268,27 @@ impl<'a> Generator<'a> {
     /// addressed from.
     fn ordinary_call(&mut self, callee: &str, args: &[LocalId], arg_types: &[Type]) {
         let words = call_words(self.module, callee, args, arg_types);
+        let symbol = call_symbol(self.module, callee);
+        self.marshalled_call(&words, Callee::Symbol(symbol));
+    }
+
+    /// A call through a function value.
+    ///
+    /// The callee is read into `x16` *after* the arguments are marshalled, not
+    /// before: `x16` is one of the three scratch registers the argument loads
+    /// themselves use, and reading a local touches only those — never `x0`–`x7`
+    /// — so this order is the one that cannot clobber anything.
+    fn indirect_call(&mut self, callee: LocalId, args: &[LocalId], arg_types: &[Type]) {
+        let words = crate::lowering::value_words(args, arg_types);
+        self.marshalled_call(&words, Callee::Value(callee));
+    }
+
+    /// AAPCS64, shared by both call shapes.
+    fn marshalled_call(&mut self, words: &[(ExternWord, ExternClass)], callee: Callee) {
         let mut integers = 0;
         let mut floats = 0;
         let mut stack = 0;
-        for (word, class) in &words {
+        for (word, class) in words {
             match class {
                 ExternClass::Float if floats < FLOAT_ARGUMENTS.len() => {
                     let source = self.word_register(*word, 1);
@@ -1284,7 +1334,21 @@ impl<'a> Generator<'a> {
                 }
             }
         }
-        self.inst(Inst::Bl(call_symbol(self.module, callee)));
+        match callee {
+            Callee::Symbol(symbol) => self.inst(Inst::Bl(symbol)),
+            Callee::Value(local) => {
+                // `x16` is the platform's IP0 and is never allocated, which is
+                // what makes it safe to name here rather than ask for one.
+                let source = self.read(local, 1);
+                if source != SCRATCH[1].0 {
+                    self.inst(Inst::Mov {
+                        dst: SCRATCH[1].0,
+                        src: source,
+                    });
+                }
+                self.inst(Inst::Blr(SCRATCH[1].0));
+            }
+        }
     }
 
     /// A register holding one argument word, loading an indirect one through
@@ -1588,6 +1652,7 @@ fn calls_something(module: &MirModule, function: &MirFunction) -> bool {
         .flat_map(|block| block.instructions())
         .any(|instruction| match instruction {
             Instruction::Call { .. }
+            | Instruction::CallValue { .. }
             | Instruction::StringNew { .. }
             | Instruction::StructNew { .. }
             | Instruction::EnumNew { .. }
@@ -1599,6 +1664,7 @@ fn calls_something(module: &MirModule, function: &MirFunction) -> bool {
             | Instruction::Assign { .. }
             | Instruction::AddressOf { .. }
             | Instruction::Binary { .. }
+            | Instruction::FnAddr { .. }
             | Instruction::FieldLoad { .. }
             | Instruction::EnumTag { .. }
             | Instruction::EnumFieldLoad { .. } => false,
@@ -1628,6 +1694,21 @@ fn outgoing_bytes(module: &MirModule, function: &MirFunction) -> usize {
                 ..
             } => {
                 let words = call_words(module, callee, args, arg_types);
+                let floats = words
+                    .iter()
+                    .filter(|(_, class)| *class == ExternClass::Float)
+                    .count();
+                let integers = words.len() - floats;
+                let stacked = integers.saturating_sub(INTEGER_ARGUMENTS.len())
+                    + floats.saturating_sub(FLOAT_ARGUMENTS.len());
+                stacked * 8
+            }
+            // A function value's arguments are one word each, so this is the
+            // same arithmetic without the `extern` expansion.
+            Instruction::CallValue {
+                args, arg_types, ..
+            } => {
+                let words = crate::lowering::value_words(args, arg_types);
                 let floats = words
                     .iter()
                     .filter(|(_, class)| *class == ExternClass::Float)

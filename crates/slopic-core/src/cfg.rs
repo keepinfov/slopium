@@ -36,6 +36,8 @@ pub fn defs(instruction: &Instruction) -> Option<LocalId> {
         | Instruction::AddressOf { dst, .. }
         | Instruction::Binary { dst, .. }
         | Instruction::Call { dst, .. }
+        | Instruction::FnAddr { dst, .. }
+        | Instruction::CallValue { dst, .. }
         | Instruction::StructNew { dst, .. }
         | Instruction::FieldLoad { dst, .. }
         | Instruction::EnumNew { dst, .. }
@@ -54,13 +56,21 @@ pub fn uses(instruction: &Instruction, out: &mut Vec<LocalId>) {
         Instruction::ConstInt { .. }
         | Instruction::ConstFloat { .. }
         | Instruction::ConstBool { .. }
-        | Instruction::StringNew { .. } => {}
+        | Instruction::StringNew { .. }
+        | Instruction::FnAddr { .. } => {}
         Instruction::Assign { src, .. } | Instruction::AddressOf { src, .. } => out.push(*src),
         Instruction::Binary { lhs, rhs, .. } => {
             out.push(*lhs);
             out.push(*rhs);
         }
         Instruction::Call { args, .. } => out.extend(args.iter().copied()),
+        // The callee is a read like any other, and saying so is what keeps the
+        // register allocator from treating the local as dead across the call
+        // and the verifier from calling it undefined.
+        Instruction::CallValue { callee, args, .. } => {
+            out.push(*callee);
+            out.extend(args.iter().copied());
+        }
         Instruction::StructNew { fields, .. } | Instruction::EnumNew { fields, .. } => {
             out.extend(fields.iter().copied())
         }

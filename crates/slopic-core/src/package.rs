@@ -713,6 +713,12 @@ impl Resolver<'_> {
                     self.rewrite_type(argument, span, diagnostics);
                 }
             }
+            Type::Fn { params, result } => {
+                for param in params {
+                    self.rewrite_type(param, span, diagnostics);
+                }
+                self.rewrite_type(result, span, diagnostics);
+            }
             _ => {}
         }
     }
@@ -767,12 +773,34 @@ impl Resolver<'_> {
                     self.rewrite_expr(argument, diagnostics);
                 }
             }
+            // A bare name is usually a local, and this pass has no scopes to
+            // tell one from a `fn` used as a value (`D-092`). So it records
+            // what the name *would* mean as a top-level item and lets sema,
+            // which does have scopes, decide — the name itself is untouched.
+            //
+            // Resolution is silent, because the two errors it can raise are
+            // about qualified names and a local is not one: "private or does
+            // not exist" would fire on an ordinary local that shares a name
+            // with a module. The `::` separator is the exception — no local can
+            // be spelled with one, so that error is kept rather than swallowed,
+            // and `D-035` stays refused in value position as it is everywhere
+            // else.
+            ExprKind::Var { name, resolved } => {
+                if !is_builtin(name) {
+                    let mut quiet = Vec::new();
+                    let sink = if name.contains("::") {
+                        &mut *diagnostics
+                    } else {
+                        &mut quiet
+                    };
+                    *resolved = Some(self.resolve(name, expression.span, sink));
+                }
+            }
             ExprKind::Unit
             | ExprKind::Bool(_)
             | ExprKind::Int(_)
             | ExprKind::Float(_)
             | ExprKind::String(_)
-            | ExprKind::Var(_)
             | ExprKind::Break
             | ExprKind::Continue => {}
         }
@@ -927,6 +955,10 @@ fn collect_qualified_names<'a>(program: &'a Program, output: &mut Vec<&'a str>) 
                     output.push(name);
                 }
                 args.iter().for_each(|argument| ty(argument, output));
+            }
+            Type::Fn { params, result } => {
+                params.iter().for_each(|param| ty(param, output));
+                ty(result, output);
             }
             _ => {}
         }

@@ -372,6 +372,23 @@ fn remap_instruction(instruction: &Instruction, map: &impl Fn(LocalId) -> LocalI
             arg_types: arg_types.clone(),
             result: result.clone(),
         },
+        Instruction::FnAddr { dst, symbol } => Instruction::FnAddr {
+            dst: m(*dst),
+            symbol: symbol.clone(),
+        },
+        Instruction::CallValue {
+            dst,
+            callee,
+            args,
+            arg_types,
+            result,
+        } => Instruction::CallValue {
+            dst: m(*dst),
+            callee: m(*callee),
+            args: args.iter().map(|arg| m(*arg)).collect(),
+            arg_types: arg_types.clone(),
+            result: result.clone(),
+        },
         Instruction::Drop { local, ty } => Instruction::Drop {
             local: m(*local),
             ty: ty.clone(),

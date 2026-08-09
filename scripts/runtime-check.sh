@@ -37,6 +37,17 @@ cat >"$check_dir/runtime.slp" <<'SLOPIUM'
 
 (struct Pair ((left String) (right String)))
 (enum Message Empty (Text ((value String))))
+; A function value beside an owning field: the struct has real drop glue, and
+; the word holding the address must not be dropped as though it owned memory.
+(struct Labelled ((name String) (render (Fn ((& String)) String))))
+
+(fn shout ((text (& String))) -> String
+  (let mark "!")
+  (concat text (& mark)))
+
+(fn run-label ((item Labelled) (text (& String))) -> String
+  (let render (. item render))
+  (render text))
 
 (extern "probe_strlen" (probe-strlen (text (& String))) -> i64)
 (extern "probe_slice" (probe-slice (values (& (Slice i64)))) -> i64)
@@ -81,6 +92,12 @@ cat >"$check_dir/runtime.slp" <<'SLOPIUM'
   ; double free rather than a type error, which is why it is checked here.
   (let borrowed-copy (clone (& joined)))
   (println-i64 (probe-strlen (& borrowed-copy)))
+  ; A call through a function value, and one stored in an aggregate that also
+  ; owns a `String`. A wrong drop decision for either is a double free here
+  ; rather than a type error anywhere.
+  (let labelled (Labelled :name (clone (& rendered)) :render shout))
+  (let shouted (run-label labelled (& suffix)))
+  (println (& shouted))
   (let message (Message:Text "payload"))
   (let mut values (list number 2 3))
   (do (push (&mut values) 4))

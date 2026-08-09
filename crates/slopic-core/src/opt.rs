@@ -454,7 +454,10 @@ fn is_pure(instruction: &Instruction) -> bool {
         | Instruction::AddressOf { .. }
         | Instruction::FieldLoad { .. }
         | Instruction::EnumTag { .. }
-        | Instruction::EnumFieldLoad { .. } => true,
+        | Instruction::EnumFieldLoad { .. }
+        // Taking a function's address reads nothing and writes nothing; an
+        // unused one is as dead as an unused constant.
+        | Instruction::FnAddr { .. } => true,
         // Allocating instructions are pure in the sense that matters here: if
         // nothing reads the result and nothing drops it, the allocation was
         // leaked, and removing it is a fix rather than a behaviour change.
@@ -463,6 +466,7 @@ fn is_pure(instruction: &Instruction) -> bool {
         | Instruction::EnumNew { .. } => true,
         Instruction::Binary { .. }
         | Instruction::Call { .. }
+        | Instruction::CallValue { .. }
         | Instruction::Drop { .. }
         | Instruction::Free { .. } => false,
     }

@@ -58,7 +58,8 @@ program that already satisfies it, which is why refusing them now costs a
 future version nothing.
 
 Scalar types are `unit`, `bool`, `i32`, `i64`, and `f64`. Other built-in types
-are `String`, `(List T)`, `(Array T N)`, `(Slice T)`, `(& T)`, and `(&mut T)`.
+are `String`, `(List T)`, `(Array T N)`, `(Slice T)`, `(& T)`, `(&mut T)`, and
+`(Fn (T ...) R)`.
 Numeric conversions are never implicit. `(as i64 value)` is the one that exists
 (`D-090`): it widens an `i32`, and every other pair — narrowing, truncating,
 anything touching `f64` — is refused by name. The form takes a target type
@@ -73,6 +74,47 @@ an unconstrained type parameter is an error. Text is compared with
 way to give `=` a meaning for a type the compiler did not define, and comparing
 such values by the machine word that holds them would answer about identity
 while looking like it answered about contents.
+
+## Function types
+
+```lisp
+(fn double ((value i64)) -> i64
+  (* value 2))
+
+(fn apply ((f (Fn (i64) i64)) (value i64)) -> i64
+  (f value))
+
+(fn main () -> i32
+  (println-i64 (apply double 21))
+  0)
+```
+
+A function type is written `(Fn (parameter ...) result)`. The parameters are
+grouped in their own list, so every arity has exactly one spelling: `(Fn () i64)`
+takes nothing, `(Fn (i64) i64)` takes one, and nothing has to be counted from the
+right to find where the result begins.
+
+A top-level `fn` named where a value is expected *is* that function, and a local
+of `Fn` type in head position is called through. Both are ordinary lookups with
+one rule between them: the function namespace is consulted first, so a call
+`(f v)` means the `fn` named `f` whenever there is one, and a local named `f` of
+`Fn` type beside a `fn f` is an error rather than a silent winner. A local of any
+other type may share a name with a `fn` as it always could.
+
+A function value is one machine word — the address of a top-level function. It
+is `Copy`, so passing it twice is not a move and `clone` refuses it the way it
+refuses a scalar; it can be returned, and it can be a struct or enum field.
+
+An `extern` is not a value. Its arguments may cross the C boundary as more than
+one machine word — a borrowed `Slice` goes as a pointer and a length — so a `Fn`
+type cannot describe the call it makes. Wrap it in a `fn` and take that instead.
+
+A generic function used as a value needs its instance chosen where the value is
+taken, because a value is the address of one monomorphized body. Where the
+expected type says which instance that is, it is taken; where it does not, it is
+refused with `SL0452` rather than guessed at.
+
+There are no closures and no `lambda` yet: a function value captures nothing.
 
 ## Ownership and borrows
 

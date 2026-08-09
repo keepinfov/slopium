@@ -375,13 +375,22 @@ impl Server {
         const KEYWORDS: &[&str] = &[
             "fn", "test", "struct", "enum", "let", "mut", "set", "if", "match", "do", "true",
             "false", "_", "unit", "bool", "i32", "i64", "f64", "String", "List", "Array", "Slice",
-            "loop", "while", "break", "continue", "export", "take", "try", "as",
+            "Fn", "loop", "while", "break", "continue", "export", "take", "try", "as",
         ];
         for token in &document.analysis.syntax.tokens {
             if token.kind == SyntaxKind::Atom && KEYWORDS.contains(&token.text.as_str()) {
                 let token_type = if matches!(
                     token.text.as_str(),
-                    "unit" | "bool" | "i32" | "i64" | "f64" | "String" | "List" | "Array" | "Slice"
+                    "unit"
+                        | "bool"
+                        | "i32"
+                        | "i64"
+                        | "f64"
+                        | "String"
+                        | "List"
+                        | "Array"
+                        | "Slice"
+                        | "Fn"
                 ) {
                     5
                 } else {
@@ -451,7 +460,7 @@ impl Server {
         }
         for keyword in [
             "fn", "test", "struct", "enum", "export", "take", "let", "set", "if", "match", "do",
-            "loop", "while", "break", "continue", "try", "as", "&", "&mut",
+            "loop", "while", "break", "continue", "try", "as", "Fn", "&", "&mut",
         ] {
             if seen.insert(keyword.to_owned()) {
                 items.push(json!({ "label": keyword, "kind": 14 }));
@@ -1112,7 +1121,7 @@ fn scan_expr_occurrences(
         | ExprKind::Int(_)
         | ExprKind::Float(_)
         | ExprKind::String(_)
-        | ExprKind::Var(_)
+        | ExprKind::Var { .. }
         | ExprKind::Break
         | ExprKind::Continue => {}
     }
@@ -1162,6 +1171,12 @@ fn scan_type_occurrences(
         }
         Type::List(inner) | Type::Slice(inner) | Type::Ref { inner, .. } => {
             scan_type_occurrences(workspace, modules, summary, file, inner, span);
+        }
+        Type::Fn { params, result } => {
+            for param in params {
+                scan_type_occurrences(workspace, modules, summary, file, param, span);
+            }
+            scan_type_occurrences(workspace, modules, summary, file, result, span);
         }
         Type::Array { element, .. } => {
             scan_type_occurrences(workspace, modules, summary, file, element, span);

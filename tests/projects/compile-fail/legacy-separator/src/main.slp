@@ -1,5 +1,11 @@
 (take std:io println-i64)
 
+(fn apply ((f (Fn () i64))) -> i64
+  (f))
+
 (fn main () -> i32
   (println-i64 (helper::answer))
+  ; A bare name in value position resolves through the same table, so `::` is
+  ; refused there too rather than quietly meaning the `:` spelling (`D-092`).
+  (println-i64 (apply helper::answer))
   0)

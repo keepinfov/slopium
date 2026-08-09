@@ -1,0 +1,5 @@
+fn-value-shadow.slp:4:12: error[SL0200]: `double` is already a function, so it cannot also name a function value
+  |
+ 4 | (fn apply ((double (Fn (i64) i64))) -> i64
+  |            ^^^^^^^^^^^^^^^^^^^^^^^
+  = help: rename the binding: `(double ...)` would call the `fn`, not this value

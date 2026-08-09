@@ -50,6 +50,7 @@ fn verify_module_after(file: &str, module: &MirModule, phase: Option<&str>) -> V
         .chain(module.tests.iter().map(|test| &test.function))
     {
         verify_extern_calls(file, module, function, phase, &mut errors);
+        verify_indirect_calls(file, function, phase, &mut errors);
     }
     errors
 }
@@ -125,6 +126,85 @@ fn verify_extern_calls(
                 report(format!(
                     "{where_} taking `{result:?}` as the result, declared `{:?}`",
                     declaration.result
+                ));
+            }
+        }
+    }
+}
+
+/// Checks every call that goes through a function value.
+///
+/// A direct call is checked by the linker in the end: a wrong symbol does not
+/// link. An indirect call has no such backstop — the callee is a machine word,
+/// and a mismatched arity or argument type is a wrong call that assembles,
+/// links and runs. This is the layer that says so (`D-092`).
+fn verify_indirect_calls(
+    file: &str,
+    function: &MirFunction,
+    phase: Option<&str>,
+    errors: &mut Vec<Diagnostic>,
+) {
+    let after = phase.map_or(String::new(), |phase| format!(" after {phase}"));
+    let mut report = |message: String| {
+        errors.push(Diagnostic::error(
+            codes::INTERNAL,
+            file,
+            function.span,
+            format!(
+                "internal compiler error: MIR verification failed{after} in `{}`: {message}; \
+                 this is a compiler bug",
+                function.name
+            ),
+        ));
+    };
+
+    for (index, block) in function.blocks.iter().enumerate() {
+        for (position, instruction) in block.instructions().enumerate() {
+            let Instruction::CallValue {
+                callee,
+                arg_types,
+                result,
+                ..
+            } = instruction
+            else {
+                continue;
+            };
+            let where_ = format!("block {index} instruction {position} calls through _{callee}");
+            let Some(local) = function.locals.get(*callee) else {
+                // Out of range is already reported by the operand check.
+                continue;
+            };
+            let Type::Fn {
+                params,
+                result: declared,
+            } = &local.ty
+            else {
+                report(format!(
+                    "{where_}, which holds `{:?}` rather than a function",
+                    local.ty
+                ));
+                continue;
+            };
+            if arg_types.len() != params.len() {
+                report(format!(
+                    "{where_} with {} arguments but its type takes {}",
+                    arg_types.len(),
+                    params.len()
+                ));
+                continue;
+            }
+            for (argument, (actual, declared)) in arg_types.iter().zip(params).enumerate() {
+                if actual != declared {
+                    report(format!(
+                        "{where_} passing `{actual:?}` as argument {argument}, which its type \
+                         declares `{declared:?}`"
+                    ));
+                }
+            }
+            if result != declared.as_ref() {
+                report(format!(
+                    "{where_} taking `{result:?}` as the result, which its type declares \
+                     `{declared:?}`"
                 ));
             }
         }
@@ -272,6 +352,21 @@ fn verify_instruction_shape(
                 report(format!(
                     "block {index} instruction {position} calls `{callee}` with {} arguments \
                      but {} argument types",
+                    args.len(),
+                    arg_types.len()
+                ));
+            }
+        }
+        Instruction::CallValue {
+            callee,
+            args,
+            arg_types,
+            ..
+        } => {
+            if args.len() != arg_types.len() {
+                report(format!(
+                    "block {index} instruction {position} calls through _{callee} with {} \
+                     arguments but {} argument types",
                     args.len(),
                     arg_types.len()
                 ));

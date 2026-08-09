@@ -34,6 +34,16 @@ struct RegisterFile {
 /// All five are callee-saved, which is the point: a local that survives a call
 /// needs no save around the call, so allocation needs no notion of a clobber
 /// set at all. The price is one save and one restore per register per function.
+/// What the argument marshalling ends with.
+///
+/// The two shapes differ in one instruction and nothing else — same registers,
+/// same stack layout, same cleanup — which is why they share a body rather than
+/// having the convention written twice.
+enum Callee {
+    Symbol(String),
+    Register(Reg),
+}
+
 const CALLEE_SAVED: RegisterFile = RegisterFile {
     wide: &["rbx", "r12", "r13", "r14", "r15"],
     narrow: &["ebx", "r12d", "r13d", "r14d", "r15d"],
@@ -625,6 +635,7 @@ impl<'a> Generator<'a> {
             .flat_map(|block| block.instructions())
             .any(|instruction| match instruction {
                 Instruction::Call { .. }
+                | Instruction::CallValue { .. }
                 | Instruction::StringNew { .. }
                 | Instruction::StructNew { .. }
                 | Instruction::EnumNew { .. }
@@ -636,6 +647,7 @@ impl<'a> Generator<'a> {
                 | Instruction::Assign { .. }
                 | Instruction::AddressOf { .. }
                 | Instruction::Binary { .. }
+                | Instruction::FnAddr { .. }
                 | Instruction::FieldLoad { .. }
                 | Instruction::EnumTag { .. }
                 | Instruction::EnumFieldLoad { .. } => false,
@@ -871,6 +883,38 @@ impl<'a> Generator<'a> {
                 result,
             } => {
                 self.call(*dst, callee, args, arg_types, result);
+            }
+            Instruction::FnAddr { dst, symbol } => {
+                // `rax` is this generator's scratch and never an allocated
+                // local, so the address lands there and is stored, whether the
+                // destination is a register or a stack slot.
+                self.inst(Inst::Lea(Reg("rax"), Operand::Rip(symbol.clone())));
+                let destination = operand(&self.alloc, self.registers, *dst);
+                self.inst(Inst::Mov(destination, reg("rax")));
+            }
+            Instruction::CallValue {
+                dst,
+                callee,
+                args,
+                arg_types,
+                result,
+            } => {
+                self.indirect_call(*callee, args, arg_types);
+                match result {
+                    Type::Unit => {}
+                    Type::F64 => {
+                        let destination = operand(&self.alloc, self.registers, *dst);
+                        self.store_double(destination, "xmm0");
+                    }
+                    // No narrow-return extension: the callee is a Slopium
+                    // function, which already returns an extended value
+                    // (`D-074`). Only the C boundary needs that, and a function
+                    // value never crosses it.
+                    _ => {
+                        let destination = operand(&self.alloc, self.registers, *dst);
+                        self.inst(Inst::Mov(destination, reg("rax")));
+                    }
+                }
             }
             Instruction::Drop { local, ty } => {
                 self.inst(Inst::Mov(
@@ -1365,10 +1409,30 @@ impl<'a> Generator<'a> {
     /// A call to a Slopium function, by the platform calling convention.
     fn ordinary_call(&mut self, callee: &str, args: &[LocalId], arg_types: &[Type]) {
         let words = call_words(self.module, callee, args, arg_types);
+        let symbol = self.symbol(callee, false);
+        self.marshalled_call(&words, &Callee::Symbol(symbol));
+    }
+
+    /// A call through a function value.
+    ///
+    /// The callee is read into `r11` *before* the argument registers are
+    /// loaded: a function that calls something allocates only from
+    /// `CALLEE_SAVED`, so `r11` is free here, and it is never an argument
+    /// register — reading it after marshalling would be the bug that reading it
+    /// first cannot be.
+    fn indirect_call(&mut self, callee: LocalId, args: &[LocalId], arg_types: &[Type]) {
+        let words = crate::lowering::value_words(args, arg_types);
+        let source = operand(&self.alloc, self.registers, callee);
+        self.inst(Inst::Mov(reg("r11"), source));
+        self.marshalled_call(&words, &Callee::Register(Reg("r11")));
+    }
+
+    /// The calling convention, shared by both call shapes.
+    fn marshalled_call(&mut self, words: &[(ExternWord, ExternClass)], callee: &Callee) {
         let mut integers = 0;
         let mut floats = 0;
         let mut stack_words = Vec::new();
-        for (word, class) in &words {
+        for (word, class) in words {
             match class {
                 ExternClass::Float if floats < FLOAT_ARGUMENTS.len() => {
                     let source = self.word_operand(*word);
@@ -1406,7 +1470,10 @@ impl<'a> Generator<'a> {
             let source = self.word_operand(*word);
             self.inst(Inst::Push(source));
         }
-        self.inst(Inst::Call(self.symbol(callee, false)));
+        match callee {
+            Callee::Symbol(symbol) => self.inst(Inst::Call(symbol.clone())),
+            Callee::Register(register) => self.inst(Inst::CallReg(*register)),
+        }
         let cleanup = (stack_words.len() + padding) * 8;
         if cleanup != 0 {
             self.inst(Inst::Alu(

@@ -44,6 +44,7 @@ local static_items = {
   { label = "List", kind = kinds.TypeParameter },
   { label = "Array", kind = kinds.TypeParameter },
   { label = "Slice", kind = kinds.TypeParameter },
+  { label = "Fn", kind = kinds.TypeParameter },
   { label = "clone", kind = kinds.Function, detail = "structural clone" },
   { label = ".", kind = kinds.Function, detail = "field access" },
   { label = "list", kind = kinds.Function, detail = "construct List<T>" },

@@ -1,0 +1,9 @@
+(extern "sl_rt_args_len" (args-len) -> i64)
+
+(fn call-it ((f (Fn () i64))) -> i64
+  (f))
+
+(fn main () -> i32
+  (do
+    (call-it args-len)
+    0))

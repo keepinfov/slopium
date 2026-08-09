@@ -37,8 +37,10 @@ command-line protocol is internal and versioned.
    stale if it contained a copy of another module's code.
 9. A verifier checks the result of each pass: identifier ranges, parameter
    layout, call arity, operand types, and that every read has a reaching
-   definition. It reports `SL0700` internal errors rather than panicking, and
-   runs in debug builds or under `SLOPIUM_VERIFY_MIR=1`.
+   definition. A call through a function value is checked against the callee
+   local's own `Fn` type, because a wrong indirect call is the one kind that
+   assembles and links (`D-092`). It reports `SL0700` internal errors rather
+   than panicking, and runs in debug builds or under `SLOPIUM_VERIFY_MIR=1`.
 10. Backward liveness dataflow yields live intervals over a linear block order,
     and a linear-scan allocator places every local in a register or a frame
     slot. Allocation runs in both profiles: it is part of code generation

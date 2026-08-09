@@ -253,6 +253,8 @@ pub enum Inst {
     PopFrame,
     B(Target),
     Bl(String),
+    /// `blr` — a call through the address in a register (`D-092`).
+    Blr(Reg),
     Bcond(Cond, Target),
     Cbz(Reg, Target),
     Cbnz(Reg, Target),
@@ -314,6 +316,7 @@ impl fmt::Display for Inst {
             Inst::PopFrame => f.write_str("ldp x29, x30, [sp], #16"),
             Inst::B(target) => write!(f, "b {target}"),
             Inst::Bl(symbol) => write!(f, "bl {symbol}"),
+            Inst::Blr(register) => write!(f, "blr {register}"),
             Inst::Bcond(cond, target) => write!(f, "b.{cond} {target}"),
             Inst::Cbz(register, target) => write!(f, "cbz {register}, {target}"),
             Inst::Cbnz(register, target) => write!(f, "cbnz {register}, {target}"),
@@ -498,6 +501,9 @@ impl Instruction for Inst {
                 code.relocate(at, FixupKind::Call26, Target::Named(symbol.clone()), 0);
                 0x9400_0000
             }
+            // The same unconditional-branch-to-register family as `ret`, which
+            // is `br x30` with the link bit clear: no target, so no relocation.
+            Inst::Blr(register) => 0xd63f_0000 | (register.number()? << 5),
             Inst::Bcond(cond, target) => {
                 let at = code.here();
                 code.relocate(at, FixupKind::CondBr19, target.clone(), 0);
@@ -867,6 +873,9 @@ mod tests {
             (Inst::PushFrame, 0xa9bf7bfd),
             (Inst::PopFrame, 0xa8c17bfd),
             (Inst::Ret, 0xd65f03c0),
+            (Inst::Blr(x("x16")), 0xd63f0200),
+            (Inst::Blr(x("x0")), 0xd63f0000),
+            (Inst::Blr(x("x30")), 0xd63f03c0),
             (Inst::Brk(1), 0xd4200020),
             (
                 Inst::Fmov {

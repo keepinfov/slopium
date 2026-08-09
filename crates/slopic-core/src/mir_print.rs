@@ -208,6 +208,14 @@ fn render_instruction(instruction: &Instruction) -> String {
             result,
             ..
         } => format!("_{dst} = {callee}({}) -> {result};", locals(args)),
+        Instruction::FnAddr { dst, symbol } => format!("_{dst} = &{symbol};"),
+        Instruction::CallValue {
+            dst,
+            callee,
+            args,
+            result,
+            ..
+        } => format!("_{dst} = _{callee}({}) -> {result};", locals(args)),
         Instruction::Drop { local, ty } => format!("drop(_{local}: {ty});"),
         Instruction::StructNew { dst, name, fields } => {
             format!("_{dst} = {name} {{ {} }};", locals(fields))

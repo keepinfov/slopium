@@ -372,6 +372,16 @@ impl<'a> SymbolIndexBuilder<'a> {
                     self.expr(&arm.body, arm.span, &mut arm_bindings);
                 }
             }
+            // A `fn` named where a value is expected is a reference to that
+            // function, so rename and go-to-definition must follow it: a
+            // rename that misses one renames a program into a different one.
+            TExprKind::FnRef { name, .. } => self.top_level_reference(name, expression.span),
+            TExprKind::CallValue { callee, args } => {
+                self.binding_reference(*callee, expression.span, bindings);
+                for argument in args {
+                    self.expr(argument, scope, bindings);
+                }
+            }
             TExprKind::Call { callee, args } | TExprKind::GenericCall { callee, args, .. } => {
                 self.top_level_reference(callee, expression.span);
                 for argument in args {

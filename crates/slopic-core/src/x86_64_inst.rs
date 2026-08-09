@@ -308,6 +308,11 @@ pub enum Inst {
     Push(Operand),
     Pop(Reg),
     Call(String),
+    /// A call through the address in a register (`D-092`).
+    ///
+    /// Written `call r` here, because this backend emits Intel syntax; a
+    /// disassembler shows it as `call *%r`.
+    CallReg(Reg),
     Jmp(Target),
     Jcc(Cond, Target),
     Setcc(Cond, Reg),
@@ -334,6 +339,10 @@ impl fmt::Display for Inst {
             Inst::Push(operand) => write!(f, "push {operand}"),
             Inst::Pop(register) => write!(f, "pop {register}"),
             Inst::Call(symbol) => write!(f, "call {symbol}"),
+            // No `*`: this text is `.intel_syntax noprefix`, where the sigil is
+            // an AT&T spelling and `as` rejects it. `scripts/object-check.sh`
+            // is what says so, because the object writer never sees this.
+            Inst::CallReg(register) => write!(f, "call {register}"),
             Inst::Jmp(target) => write!(f, "jmp {target}"),
             Inst::Jcc(cond, target) => write!(f, "j{cond} {target}"),
             Inst::Setcc(cond, register) => write!(f, "set{cond} {register}"),
@@ -683,6 +692,12 @@ impl Instruction for Inst {
                 encoding.displacement.extend_from_slice(&[0; 4]);
                 encoding.fixup = Some((FixupKind::Plt32, Target::Named(symbol.clone()), -4));
             }
+            // `FF /2` already defaults to a 64-bit operand in long mode, so it
+            // takes no `REX.W`; `registers` still emits `REX.B` for r8–r15.
+            Inst::CallReg(register) => {
+                encoding.opcode.push(0xff);
+                encoding.registers(2, register.number()?);
+            }
             Inst::Jmp(target) => {
                 encoding.opcode.push(0xe9);
                 encoding.displacement.extend_from_slice(&[0; 4]);
@@ -889,6 +904,11 @@ mod tests {
             ),
             (Inst::Idiv(r("rcx")), &[0x48, 0xf7, 0xf9]),
             (Inst::Idiv(r("ecx")), &[0xf7, 0xf9]),
+            // `FF /2` is 64-bit by default in long mode, so `rax` takes no REX
+            // at all and `r11` takes only REX.B.
+            (Inst::CallReg(r("rax")), &[0xff, 0xd0]),
+            (Inst::CallReg(r("rsp")), &[0xff, 0xd4]),
+            (Inst::CallReg(r("r11")), &[0x41, 0xff, 0xd3]),
             (Inst::Cqo, &[0x48, 0x99]),
             (Inst::Cdq, &[0x99]),
             (Inst::Setcc(Cond::E, r("al")), &[0x0f, 0x94, 0xc0]),

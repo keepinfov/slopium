@@ -1,0 +1,73 @@
+; A function is a value (`D-092`): a `fn` named where a value is expected is
+; that function, a local of `Fn` type is called through, and both are one
+; machine word. The type is written `(Fn (parameter ...) result)`, so every
+; arity has one spelling and none is read from the right.
+
+(take std:io println println-i64)
+(take std:string concat from-i64)
+
+(fn double ((value i64)) -> i64
+  (* value 2))
+
+(fn add-ten ((value i64)) -> i64
+  (+ value 10))
+
+(fn shout ((text (& String))) -> String
+  (let mark "!")
+  (concat text (& mark)))
+
+(fn apply ((f (Fn (i64) i64)) (value i64)) -> i64
+  (f value))
+
+; A generic function taken as a value needs its instance chosen here, because a
+; value is the address of one monomorphized body. The expected type says which,
+; so this takes `identity$<i64>`; where nothing says which, it is refused.
+(fn identity (T) ((value T)) -> T
+  value)
+
+(fn twice ((f (Fn (i64) i64)) (value i64)) -> i64
+  (f (f value)))
+
+; A function value is returned like any other one-word value.
+(fn pick ((doubling bool)) -> (Fn (i64) i64)
+  (if doubling double add-ten))
+
+; And stored in an aggregate, which is the thing `SlList` already did in C
+; before the language could say it. The `String` beside it is deliberate: the
+; struct gets real drop glue, and the function value has to survive being a
+; plain word next to something that owns memory.
+(struct Step ((name String) (run (Fn (i64) i64))))
+
+(fn run-step ((step Step) (value i64)) -> i64
+  (let action (. step run))
+  (action value))
+
+; A function taking a borrow is a function value like any other.
+(fn decorate ((f (Fn ((& String)) String)) (text (& String))) -> String
+  (f text))
+
+(fn main () -> i32
+  (println-i64 (apply double 21))
+  (println-i64 (apply identity 99))
+  (println-i64 (twice add-ten 1))
+  (println-i64 (apply (pick false) 5))
+  (println-i64 (apply (pick true) 5))
+  (let step (Step :name (from-i64 7) :run double))
+  (println-i64 (run-step step 21))
+  (let greeting "hello")
+  (let loud (decorate shout (& greeting)))
+  (println (& loud))
+  0)
+
+(test "a function value calls the function it names"
+  (if (= (apply double 21) 42)
+    (= (twice add-ten 1) 21)
+    false))
+
+(test "a generic function value resolves to one instance"
+  (= (apply identity 99) 99))
+
+(test "a function value chosen at run time is the one that runs"
+  (if (= (apply (pick true) 5) 10)
+    (= (apply (pick false) 5) 15)
+    false))

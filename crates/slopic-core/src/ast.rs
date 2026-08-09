@@ -12,18 +12,43 @@ pub enum Type {
     F64,
     String,
     List(Box<Type>),
-    Array { element: Box<Type>, length: usize },
+    Array {
+        element: Box<Type>,
+        length: usize,
+    },
     Slice(Box<Type>),
-    Ref { mutable: bool, inner: Box<Type> },
+    Ref {
+        mutable: bool,
+        inner: Box<Type>,
+    },
     Named(String),
-    Apply { name: String, args: Vec<Type> },
+    Apply {
+        name: String,
+        args: Vec<Type>,
+    },
+    /// The type of a function value, written `(Fn (i64 i64) bool)` (`D-092`).
+    ///
+    /// Parameters are grouped in their own list so that every arity has one
+    /// form: `(Fn () i64)` is nullary and nothing is counted from the right to
+    /// find where the result starts. A value of this type is the address of a
+    /// top-level function — one machine word, like every other local.
+    Fn {
+        params: Vec<Type>,
+        result: Box<Type>,
+    },
 }
 
 impl Type {
     pub fn is_copy(&self) -> bool {
         matches!(
             self,
-            Type::Unit | Type::Bool | Type::I32 | Type::I64 | Type::F64 | Type::Ref { .. }
+            Type::Unit
+                | Type::Bool
+                | Type::I32
+                | Type::I64
+                | Type::F64
+                | Type::Ref { .. }
+                | Type::Fn { .. }
         )
     }
 
@@ -70,6 +95,21 @@ impl fmt::Display for Type {
                     write!(f, " {argument}")?;
                 }
                 f.write_str(")")
+            }
+            // Not the source spelling, for the same reason `List<T>` is not:
+            // this rendering is also the mangling, because
+            // `sema::generic_instance_name` builds an instance name out of it.
+            // It only has to be injective, and hex-encoding in
+            // `lowering::function_symbol` makes any of it a legal symbol.
+            Type::Fn { params, result } => {
+                f.write_str("Fn(")?;
+                for (index, param) in params.iter().enumerate() {
+                    if index > 0 {
+                        f.write_str(", ")?;
+                    }
+                    write!(f, "{param}")?;
+                }
+                write!(f, ") -> {result}")
             }
         }
     }
@@ -186,7 +226,21 @@ pub enum ExprKind {
     Int(i64),
     Float(f64),
     String(String),
-    Var(String),
+    /// A bare name: a local, or a top-level `fn` used as a value (`D-092`).
+    ///
+    /// `resolved` is what the name would mean as a top-level item in the module
+    /// this expression was written in — filled in by `package.rs`, which is the
+    /// only place that knows the imports, and **advisory**: a name that resolves
+    /// to nothing in particular still gets one, and no diagnostic is raised for
+    /// it here.
+    ///
+    /// Sema consults the environment first and reaches for `resolved` only when
+    /// the name is not a local, so a local always wins and a `(let count 0)`
+    /// beside a `(fn count ...)` keeps meaning what it did.
+    Var {
+        name: String,
+        resolved: Option<String>,
+    },
     Let {
         name: String,
         mutable: bool,
@@ -691,6 +745,35 @@ impl AstBuilder<'_> {
                     inner: Box::new(self.ty(&parts[1])?),
                 })
             }
+            // Before the generic catch-all, and matching on the head alone
+            // rather than on the whole shape: `D-088` wrote `(Fn i64 i64)`
+            // while naming a feature it was refusing, so that is the spelling
+            // someone will try, and it deserves the correct form in a message
+            // rather than "unknown generic type `Fn`" from two passes later.
+            SExprKind::List(parts) if matches!(parts.first().and_then(atom), Some("Fn")) => {
+                let Some(SExprKind::List(params)) = parts.get(1).map(|part| &part.kind) else {
+                    self.error(
+                        form.span,
+                        "a function type is written `(Fn (parameter ...) result)`",
+                    );
+                    return None;
+                };
+                if parts.len() != 3 {
+                    self.error(
+                        form.span,
+                        "a function type is written `(Fn (parameter ...) result)`",
+                    );
+                    return None;
+                }
+                let mut types = Vec::new();
+                for param in params {
+                    types.push(self.ty(param)?);
+                }
+                Some(Type::Fn {
+                    params: types,
+                    result: Box::new(self.ty(&parts[2])?),
+                })
+            }
             SExprKind::List(parts) if !parts.is_empty() && atom(&parts[0]).is_some() => {
                 let name = atom(&parts[0]).expect("checked above").to_owned();
                 let mut args = Vec::new();
@@ -740,10 +823,16 @@ impl AstBuilder<'_> {
                 } else if value.contains('.') {
                     match value.parse::<f64>() {
                         Ok(number) => ExprKind::Float(number),
-                        Err(_) => ExprKind::Var(value.clone()),
+                        Err(_) => ExprKind::Var {
+                            name: value.clone(),
+                            resolved: None,
+                        },
                     }
                 } else {
-                    ExprKind::Var(value.clone())
+                    ExprKind::Var {
+                        name: value.clone(),
+                        resolved: None,
+                    }
                 }
             }
             SExprKind::List(items) if items.is_empty() => ExprKind::Unit,

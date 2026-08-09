@@ -1,0 +1,14 @@
+fn-value-generic.slp:9:17: error[SL0452]: cannot infer generic parameter `T` for `identity`
+  |
+ 9 |     (let chosen identity)
+  |                 ^^^^^^^^
+
+fn-value-generic.slp:9:5: error[SL0200]: cannot bind a value of type `unit`
+  |
+ 9 |     (let chosen identity)
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+fn-value-generic.slp:10:14: error[SL0200]: expected `Fn(i64) -> i64`, found `unit`
+  |
+10 |     (call-it chosen)
+  |              ^^^^^^

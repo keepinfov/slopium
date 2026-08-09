@@ -1,0 +1,11 @@
+(fn identity (T) ((value T)) -> T
+  value)
+
+(fn call-it ((f (Fn (i64) i64))) -> i64
+  (f 1))
+
+(fn main () -> i32
+  (do
+    (let chosen identity)
+    (call-it chosen)
+    0))

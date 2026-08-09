@@ -1,0 +1,4 @@
+fn-value-argument.slp:5:6: error[SL0200]: expected `i64`, found `bool`
+  |
+ 5 |   (f true))
+  |      ^^^^

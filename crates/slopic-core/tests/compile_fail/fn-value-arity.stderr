@@ -1,0 +1,4 @@
+fn-value-arity.slp:5:3: error[SL0200]: `f` expects 1 arguments, found 2
+  |
+ 5 |   (f value 1))
+  |   ^^^^^^^^^^^

@@ -1,0 +1,5 @@
+(fn apply ((f (Fn i64 i64)) (value i64)) -> i64
+  (f value))
+
+(fn main () -> i32
+  0)

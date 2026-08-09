@@ -164,6 +164,28 @@ pub enum Instruction {
         arg_types: Vec<Type>,
         result: Type,
     },
+    /// The address of a top-level function, as a value (`D-092`).
+    ///
+    /// The symbol is already resolved through `lowering::call_symbol`, so both
+    /// backends materialise it the same way they already do for the drop and
+    /// clone helpers a `List` carries.
+    FnAddr {
+        dst: LocalId,
+        symbol: String,
+    },
+    /// A call through a local holding a function address.
+    ///
+    /// Identical to `Call` except that the callee is a local rather than a
+    /// name: there is no symbol until run time, so `arg_types` and `result`
+    /// are the only description of the shape and the verifier checks them
+    /// against the callee local's `Fn` type.
+    CallValue {
+        dst: LocalId,
+        callee: LocalId,
+        args: Vec<LocalId>,
+        arg_types: Vec<Type>,
+        result: Type,
+    },
     Drop {
         local: LocalId,
         ty: Type,
@@ -684,6 +706,50 @@ impl Builder {
                 for value in cloned_temporaries {
                     self.drop_temporary(Some(value));
                 }
+                if expr.ty == Type::Unit {
+                    None
+                } else {
+                    Some(Value {
+                        local: dst,
+                        ty: expr.ty.clone(),
+                        owned_temporary: !expr.ty.is_copy(),
+                    })
+                }
+            }
+            TExprKind::FnRef { name, .. } => {
+                // `type_args` is empty here: `specialize_expr` has already
+                // folded a generic instance into the name.
+                let dst = self.temp(expr.ty.clone());
+                self.emit(Instruction::FnAddr {
+                    dst,
+                    // Not `call_symbol`, which exists to pick a C name for an
+                    // `extern`: sema refuses an `extern` as a value, so the
+                    // only symbol reachable here is a Slopium one.
+                    symbol: crate::lowering::function_symbol(name, false),
+                });
+                Some(Value {
+                    local: dst,
+                    ty: expr.ty.clone(),
+                    owned_temporary: false,
+                })
+            }
+            TExprKind::CallValue { callee, args } => {
+                let mut lowered = Vec::new();
+                let mut arg_types = Vec::new();
+                for arg in args {
+                    if let Some(value) = self.expr(arg) {
+                        arg_types.push(value.ty);
+                        lowered.push(value.local);
+                    }
+                }
+                let dst = self.temp(expr.ty.clone());
+                self.emit(Instruction::CallValue {
+                    dst,
+                    callee: self.bindings[callee],
+                    args: lowered,
+                    arg_types,
+                    result: expr.ty.clone(),
+                });
                 if expr.ty == Type::Unit {
                     None
                 } else {

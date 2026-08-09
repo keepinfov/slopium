@@ -1,0 +1,10 @@
+fn-value-extern.slp:8:14: error[SL0200]: `args-len` is an `extern` and cannot be used as a value
+  |
+ 8 |     (call-it args-len)
+  |              ^^^^^^^^
+  = help: wrap it in a `fn` and take that instead: an `extern` argument may cross the boundary as more than one machine word, which a `Fn` type cannot say
+
+fn-value-extern.slp:8:14: error[SL0200]: expected `Fn() -> i64`, found `unit`
+  |
+ 8 |     (call-it args-len)
+  |              ^^^^^^^^

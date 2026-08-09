@@ -27,6 +27,7 @@ programs=(
   "tests/projects/pass/aggregates-patterns/src/main.slp"
   "tests/projects/pass/process-io/src/main.slp"
   "tests/projects/pass/ownership-borrows/src/main.slp"
+  "tests/projects/pass/function-values/src/main.slp"
   "examples/fibonacci.slp"
   "examples/lists.slp"
   "examples/match.slp"

@@ -1,0 +1,10 @@
+(fn double ((value i64)) -> i64
+  (* value 2))
+
+(fn apply ((f (Fn (i64) i64))) -> i64
+  (f true))
+
+(fn main () -> i32
+  (do
+    (apply double)
+    0))

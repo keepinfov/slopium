@@ -129,6 +129,23 @@ pub enum TExprKind {
         callee: String,
         args: Vec<TExpr>,
     },
+    /// A top-level `fn` named where a value is expected (`D-092`).
+    ///
+    /// `type_args` is empty for a concrete function and names the instance for
+    /// a generic one, exactly as `GenericCall` does — `specialize_expr` reads
+    /// it to enqueue the monomorphization, which is the only path to the queue.
+    FnRef {
+        name: String,
+        type_args: Vec<Type>,
+    },
+    /// A call through a local of `Fn` type.
+    ///
+    /// The callee is a binding rather than a name, which is the whole
+    /// difference from `Call`: there is no symbol until run time.
+    CallValue {
+        callee: BindingId,
+        args: Vec<TExpr>,
+    },
     GenericCall {
         callee: String,
         type_args: Vec<Type>,
@@ -201,6 +218,13 @@ struct Signature {
     type_params: Vec<String>,
     params: Vec<Type>,
     result: Type,
+    /// Whether this name is an `extern` rather than a `fn`.
+    ///
+    /// Calling one is an ordinary call, which is why they share a table. Taking
+    /// one as a value is not: an `extern` argument expands to more than one
+    /// machine word at the boundary (a borrowed `Slice` is pointer and length),
+    /// so a `Fn` type would describe a shape the call does not have.
+    is_extern: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -700,6 +724,7 @@ impl<'a> Analyzer<'a> {
                     type_params: function.type_params.clone(),
                     params,
                     result,
+                    is_extern: false,
                 },
             );
         }
@@ -729,6 +754,7 @@ impl<'a> Analyzer<'a> {
                     type_params: Vec::new(),
                     params,
                     result,
+                    is_extern: true,
                 },
             );
         }
@@ -885,6 +911,12 @@ impl<'a> Analyzer<'a> {
                     self.validate_type(argument, span);
                 }
             }
+            Type::Fn { params, result } => {
+                for param in params {
+                    self.validate_type(param, span);
+                }
+                self.validate_type(result, span);
+            }
             _ => {}
         }
     }
@@ -900,6 +932,13 @@ impl<'a> Analyzer<'a> {
             Type::Ref { mutable, inner } => Type::Ref {
                 mutable: *mutable,
                 inner: Box::new(self.normalize_type(inner, span)),
+            },
+            Type::Fn { params, result } => Type::Fn {
+                params: params
+                    .iter()
+                    .map(|param| self.normalize_type(param, span))
+                    .collect(),
+                result: Box::new(self.normalize_type(result, span)),
             },
             Type::Apply { name, args } => {
                 let args = args
@@ -1063,6 +1102,7 @@ impl<'a> Analyzer<'a> {
                 borrowed_from: None,
                 owns_loan: false,
             };
+            self.refuse_function_shadow(&param.name, &parameter_type, param.span);
             if self.env.insert(param.name.clone(), binding).is_err() {
                 self.error(
                     param.span,
@@ -1112,7 +1152,9 @@ impl<'a> Analyzer<'a> {
             ExprKind::String(value) => {
                 self.typed(expr, Type::String, TExprKind::String(value.clone()))
             }
-            ExprKind::Var(name) => self.variable(expr, name, true),
+            ExprKind::Var { name, resolved } => {
+                self.variable(expr, name, resolved.as_deref(), true, expected)
+            }
             ExprKind::Let {
                 name,
                 mutable,
@@ -1138,6 +1180,7 @@ impl<'a> Analyzer<'a> {
                     borrowed_from,
                     owns_loan,
                 };
+                self.refuse_function_shadow(name, &value.ty, expr.span);
                 if self.env.insert(name.clone(), binding).is_err() {
                     self.error(
                         expr.span,
@@ -1228,8 +1271,30 @@ impl<'a> Analyzer<'a> {
         }
     }
 
-    fn variable(&mut self, expr: &Expr, name: &str, consume: bool) -> TExpr {
+    fn variable(
+        &mut self,
+        expr: &Expr,
+        name: &str,
+        resolved: Option<&str>,
+        consume: bool,
+        expected: Option<&Type>,
+    ) -> TExpr {
         let Some(id) = self.env.lookup_id(name) else {
+            // A fallback, never a namespace merge (`D-092`): the environment is
+            // consulted first, so no program that already compiles changes
+            // meaning, and a name that was a variable stays one.
+            //
+            // `resolved` is what `package.rs` says the name means as a
+            // top-level item, and it comes first because it is the one that
+            // accounts for imports. The bare name is tried after it for the
+            // sources that never went through the resolver.
+            let candidate = resolved
+                .filter(|candidate| self.signatures.contains_key(*candidate))
+                .map(str::to_owned)
+                .or_else(|| self.signatures.contains_key(name).then(|| name.to_owned()));
+            if let Some(candidate) = candidate {
+                return self.function_value(expr, &candidate, name, expected);
+            }
             self.error(expr.span, format!("undefined variable `{name}`"));
             return self.typed(expr, Type::Unit, TExprKind::Unit);
         };
@@ -1271,6 +1336,104 @@ impl<'a> Analyzer<'a> {
             self.move_sites.insert(id, expr.span);
         }
         self.typed(expr, binding.ty, TExprKind::Var(id))
+    }
+
+    /// A top-level `fn` named where a value is expected (`D-092`).
+    ///
+    /// A generic function needs its instance chosen here, because a value is
+    /// the address of one monomorphized body and there is no later point that
+    /// could pick it. The only evidence available is the expected type, so a
+    /// generic function value is legal exactly where the context says which
+    /// instance it is — and refused, by the diagnostic `generic_call` already
+    /// uses, where it does not.
+    fn function_value(
+        &mut self,
+        expr: &Expr,
+        name: &str,
+        written: &str,
+        expected: Option<&Type>,
+    ) -> TExpr {
+        let signature = self
+            .signatures
+            .get(name)
+            .cloned()
+            .expect("the caller checked the name is a signature");
+        if signature.is_extern {
+            self.diagnostics.push(
+                Diagnostic::error(
+                    codes::NAME_OR_TYPE,
+                    self.file,
+                    expr.span,
+                    format!("`{written}` is an `extern` and cannot be used as a value"),
+                )
+                .with_help(
+                    "wrap it in a `fn` and take that instead: an `extern` argument may cross \
+                     the boundary as more than one machine word, which a `Fn` type cannot say",
+                ),
+            );
+            return self.typed(expr, Type::Unit, TExprKind::Unit);
+        }
+        if signature.type_params.is_empty() {
+            let ty = Type::Fn {
+                params: signature.params.clone(),
+                result: Box::new(signature.result.clone()),
+            };
+            return self.typed(
+                expr,
+                ty,
+                TExprKind::FnRef {
+                    name: name.to_owned(),
+                    type_args: Vec::new(),
+                },
+            );
+        }
+        let parameters = signature
+            .type_params
+            .iter()
+            .cloned()
+            .collect::<HashSet<_>>();
+        let template = Type::Fn {
+            params: signature.params.clone(),
+            result: Box::new(signature.result.clone()),
+        };
+        let mut substitutions = HashMap::<String, Type>::new();
+        if let Some(expected) = expected {
+            // An error here is not reported: a mismatch against the expected
+            // type is the caller's to describe, and the missing-instance
+            // diagnostic below is the one that names what went wrong.
+            let _ = unify_type(&template, expected, &parameters, &mut substitutions);
+        }
+        let mut type_args = Vec::new();
+        for parameter in &signature.type_params {
+            match substitutions.get(parameter) {
+                Some(ty) => type_args.push(ty.clone()),
+                None => {
+                    self.error_with_code(
+                        codes::GENERIC,
+                        expr.span,
+                        format!("cannot infer generic parameter `{parameter}` for `{written}`"),
+                    );
+                    return self.typed(expr, Type::Unit, TExprKind::Unit);
+                }
+            }
+        }
+        let ty = Type::Fn {
+            params: signature
+                .params
+                .iter()
+                .map(|param| substitute_type(param, &substitutions))
+                .collect(),
+            result: Box::new(substitute_type(&signature.result, &substitutions)),
+        };
+        let ty = self.normalize_type(&ty, expr.span);
+        self.typed(
+            expr,
+            ty,
+            TExprKind::FnRef {
+                name: name.to_owned(),
+                type_args,
+            },
+        )
     }
 
     fn set(&mut self, expr: &Expr, name: &str, value: &Expr) -> TExpr {
@@ -1443,7 +1606,7 @@ impl<'a> Analyzer<'a> {
     }
 
     fn borrow(&mut self, expr: &Expr, mutable: bool, value: &Expr) -> TExpr {
-        let ExprKind::Var(name) = &value.kind else {
+        let ExprKind::Var { name, .. } = &value.kind else {
             self.error(value.span, "only named bindings can be borrowed");
             return self.typed(expr, Type::Unit, TExprKind::Unit);
         };
@@ -1755,6 +1918,7 @@ impl<'a> Analyzer<'a> {
                     borrowed_from: None,
                     owns_loan: false,
                 };
+                self.refuse_function_shadow(name, expected, pattern.span);
                 if self.env.insert(name.clone(), binding).is_err() {
                     self.error(pattern.span, format!("duplicate pattern binding `{name}`"));
                 }
@@ -1948,6 +2112,12 @@ impl<'a> Analyzer<'a> {
             return self.operator_call(expr, callee, args, expected);
         }
         let Some(signature) = self.signatures.get(callee).cloned() else {
+            // The mirror of the fallback in `variable`, and in the same
+            // direction: the signature table is consulted first, so a local
+            // never takes a call away from a `fn` of the same name (`D-092`).
+            if self.env.lookup_id(callee).is_some() {
+                return self.call_value(expr, callee, args);
+            }
             self.error(expr.span, format!("unknown function `{callee}`"));
             return self.typed(expr, Type::Unit, TExprKind::Unit);
         };
@@ -1973,6 +2143,74 @@ impl<'a> Analyzer<'a> {
             signature.result,
             TExprKind::Call {
                 callee: callee.to_owned(),
+                args: typed_args,
+            },
+        )
+    }
+
+    /// A call through a local of `Fn` type.
+    ///
+    /// The callee is read without consuming it: a function value is `Copy`, so
+    /// calling through the same local twice is not a move.
+    fn call_value(&mut self, expr: &Expr, callee: &str, args: &[Expr]) -> TExpr {
+        let id = self
+            .env
+            .lookup_id(callee)
+            .expect("the caller checked the name is bound");
+        let Some(binding) = self.env.bindings.get(&id).cloned() else {
+            self.error(expr.span, format!("undefined variable `{callee}`"));
+            return self.typed(expr, Type::Unit, TExprKind::Unit);
+        };
+        let Type::Fn { params, result } = binding.ty.clone() else {
+            self.diagnostics.push(
+                Diagnostic::error(
+                    codes::NAME_OR_TYPE,
+                    self.file,
+                    expr.span,
+                    format!("`{callee}` is a `{}`, not a function", binding.ty),
+                )
+                .with_label(binding.definition, "value was declared here"),
+            );
+            return self.typed(expr, Type::Unit, TExprKind::Unit);
+        };
+        // Unreachable while a function value is the only `Fn` there is: it is
+        // `Copy`, so nothing ever moves out of the binding. It is here because
+        // a closure is the same `CallValue` over a type that is not `Copy`, and
+        // this is the path that would have to notice (v0.7.2).
+        if binding.state == OwnershipState::Moved {
+            self.diagnostics.push(
+                Diagnostic::error(
+                    codes::OWNERSHIP,
+                    self.file,
+                    expr.span,
+                    format!("use of moved value `{callee}`"),
+                )
+                .with_label(binding.definition, "value was declared here"),
+            );
+        }
+        if args.len() != params.len() {
+            self.error(
+                expr.span,
+                format!(
+                    "`{callee}` expects {} arguments, found {}",
+                    params.len(),
+                    args.len()
+                ),
+            );
+        }
+        // Each argument is typed against the parameter and nothing more, which
+        // is exactly what an ordinary call does: the expected type is what
+        // reports a mismatch, and checking it again here said the same thing
+        // twice at the same span.
+        let mut typed_args = Vec::new();
+        for (index, arg) in args.iter().enumerate() {
+            typed_args.push(self.expr(arg, params.get(index)));
+        }
+        self.typed(
+            expr,
+            *result,
+            TExprKind::CallValue {
+                callee: id,
                 args: typed_args,
             },
         )
@@ -2088,7 +2326,9 @@ impl<'a> Analyzer<'a> {
             return self.typed(expr, Type::Unit, TExprKind::Unit);
         }
         let arg = match &args[0].kind {
-            ExprKind::Var(name) => self.variable(&args[0], name, false),
+            ExprKind::Var { name, resolved } => {
+                self.variable(&args[0], name, resolved.as_deref(), false, None)
+            }
             _ => self.expr(&args[0], None),
         };
         if matches!(arg.ty, Type::Ref { mutable: true, .. }) {
@@ -2144,7 +2384,7 @@ impl<'a> Analyzer<'a> {
             if pair.len() != 2 {
                 break;
             }
-            let ExprKind::Var(keyword) = &pair[0].kind else {
+            let ExprKind::Var { name: keyword, .. } = &pair[0].kind else {
                 self.error(pair[0].span, "field name must use `:name` syntax");
                 continue;
             };
@@ -2203,7 +2443,7 @@ impl<'a> Analyzer<'a> {
             if pair.len() != 2 {
                 break;
             }
-            let ExprKind::Var(keyword) = &pair[0].kind else {
+            let ExprKind::Var { name: keyword, .. } = &pair[0].kind else {
                 self.error(pair[0].span, "field name must use `:name` syntax");
                 continue;
             };
@@ -2279,14 +2519,20 @@ impl<'a> Analyzer<'a> {
             self.error(expr.span, "field access syntax is `(. binding field)`");
             return self.typed(expr, Type::Unit, TExprKind::Unit);
         }
-        let ExprKind::Var(base_name) = &args[0].kind else {
+        let ExprKind::Var {
+            name: base_name, ..
+        } = &args[0].kind
+        else {
             self.error(
                 args[0].span,
                 "field access currently requires a named binding",
             );
             return self.typed(expr, Type::Unit, TExprKind::Unit);
         };
-        let ExprKind::Var(field_name) = &args[1].kind else {
+        let ExprKind::Var {
+            name: field_name, ..
+        } = &args[1].kind
+        else {
             self.error(args[1].span, "field name must be an identifier");
             return self.typed(expr, Type::Unit, TExprKind::Unit);
         };
@@ -2836,9 +3082,16 @@ impl<'a> Analyzer<'a> {
                     self.materialize_typed_expr(&mut arm.body);
                 }
             }
-            TExprKind::Call { args, .. } | TExprKind::GenericCall { args, .. } => {
+            TExprKind::Call { args, .. }
+            | TExprKind::GenericCall { args, .. }
+            | TExprKind::CallValue { args, .. } => {
                 for argument in args {
                     self.materialize_typed_expr(argument);
+                }
+            }
+            TExprKind::FnRef { type_args, .. } => {
+                for argument in type_args {
+                    *argument = self.normalize_type(argument, expression.span);
                 }
             }
             TExprKind::Convert { value } => self.materialize_typed_expr(value),
@@ -2937,6 +3190,30 @@ impl<'a> Analyzer<'a> {
         self.error_with_code(codes::NAME_OR_TYPE, span, message);
     }
 
+    /// Refuses a local of `Fn` type that has the name of a top-level `fn`.
+    ///
+    /// Both lookups are fallbacks, so the collision has a winner already: the
+    /// signature table is consulted first, and the local would silently never
+    /// be the thing called. `STATUS.md` carries "a `fn` may silently shadow a
+    /// builtin" as a standing debt, and `D-092` says this must not become a
+    /// second one of the same shape — so it is named rather than resolved.
+    fn refuse_function_shadow(&mut self, name: &str, ty: &Type, span: Span) {
+        if !matches!(ty, Type::Fn { .. }) || !self.signatures.contains_key(name) {
+            return;
+        }
+        self.diagnostics.push(
+            Diagnostic::error(
+                codes::NAME_OR_TYPE,
+                self.file,
+                span,
+                format!("`{name}` is already a function, so it cannot also name a function value"),
+            )
+            .with_help(format!(
+                "rename the binding: `({name} ...)` would call the `fn`, not this value"
+            )),
+        );
+    }
+
     fn error_with_code(&mut self, code: &str, span: Span, message: impl Into<String>) {
         self.diagnostics
             .push(Diagnostic::error(code, self.file, span, message));
@@ -2951,7 +3228,7 @@ impl<'a> Analyzer<'a> {
 fn is_nothing_to_clone(ty: &Type) -> bool {
     matches!(
         ty,
-        Type::Unit | Type::Bool | Type::I32 | Type::I64 | Type::F64
+        Type::Unit | Type::Bool | Type::I32 | Type::I64 | Type::F64 | Type::Fn { .. }
     )
 }
 
@@ -2969,7 +3246,7 @@ fn is_text(ty: &Type) -> bool {
 
 fn collect_variable_names(expr: &Expr, output: &mut HashSet<String>) {
     match &expr.kind {
-        ExprKind::Var(name) => {
+        ExprKind::Var { name, .. } => {
             output.insert(name.clone());
         }
         ExprKind::Let { value, .. } => collect_variable_names(value, output),
@@ -3040,6 +3317,12 @@ fn contains_parameter(ty: &Type, parameters: &HashSet<String>) -> bool {
         Type::Apply { args, .. } => args
             .iter()
             .any(|argument| contains_parameter(argument, parameters)),
+        Type::Fn { params, result } => {
+            params
+                .iter()
+                .any(|param| contains_parameter(param, parameters))
+                || contains_parameter(result, parameters)
+        }
         _ => false,
     }
 }
@@ -3088,6 +3371,12 @@ fn contains_borrowed_type(ty: &Type) -> bool {
         Type::List(inner) => contains_borrowed_type(inner),
         Type::Array { element, .. } => contains_borrowed_type(element),
         Type::Apply { args, .. } => args.iter().any(contains_borrowed_type),
+        // A borrow in a function type is a parameter, not a stored value: the
+        // function it describes takes one, and nothing about the value being
+        // one machine word holds a loan open. `(Fn ((& String)) bool)` is a
+        // legal field type for the same reason a `fn` taking a borrow is a
+        // legal declaration.
+        Type::Fn { .. } => false,
         Type::Unit
         | Type::Bool
         | Type::I32
@@ -3165,6 +3454,25 @@ fn unify_type(
             }
             Ok(())
         }
+        // Structural, and invariant in the parameters rather than contravariant:
+        // the language has no subtyping, so a `(Fn (T) U)` template against a
+        // concrete `Fn(i64) -> bool` is how `(map opt double)` learns what `T`
+        // and `U` are.
+        (
+            Type::Fn {
+                params: left_params,
+                result: left_result,
+            },
+            Type::Fn {
+                params: right_params,
+                result: right_result,
+            },
+        ) if left_params.len() == right_params.len() => {
+            for (left, right) in left_params.iter().zip(right_params) {
+                unify_type(left, right, parameters, substitutions)?;
+            }
+            unify_type(left_result, right_result, parameters, substitutions)
+        }
         _ if template == actual => Ok(()),
         _ => Err(format!("expected `{template}`, found `{actual}`")),
     }
@@ -3192,6 +3500,13 @@ fn substitute_type(ty: &Type, substitutions: &HashMap<String, Type>) -> Type {
                 .iter()
                 .map(|argument| substitute_type(argument, substitutions))
                 .collect(),
+        },
+        Type::Fn { params, result } => Type::Fn {
+            params: params
+                .iter()
+                .map(|param| substitute_type(param, substitutions))
+                .collect(),
+            result: Box::new(substitute_type(result, substitutions)),
         },
         _ => ty.clone(),
     }
@@ -3303,10 +3618,27 @@ fn specialize_expr(
             }
         }
         TExprKind::Call { args, .. }
+        | TExprKind::CallValue { args, .. }
         | TExprKind::StructInit { fields: args, .. }
         | TExprKind::EnumInit { fields: args, .. } => {
             for argument in args {
                 specialize_expr(argument, substitutions, queue);
+            }
+        }
+        // A generic function taken as a value: this is the only path to the
+        // monomorphization queue, so without this arm the instance is named
+        // and never generated, and the link fails rather than the compile.
+        // `type_args` is emptied so a second pass over the same body is a
+        // no-op, the way rewriting `GenericCall` into `Call` is for a call.
+        TExprKind::FnRef { name, type_args } => {
+            if !type_args.is_empty() {
+                let concrete = type_args
+                    .iter()
+                    .map(|argument| substitute_type(argument, substitutions))
+                    .collect::<Vec<_>>();
+                queue.push_back((name.clone(), concrete.clone()));
+                *name = generic_instance_name(name, &concrete);
+                type_args.clear();
             }
         }
         TExprKind::GenericCall {
