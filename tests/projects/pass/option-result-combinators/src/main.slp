@@ -1,0 +1,95 @@
+; The combinators `D-088` named as the cost of refusing traits, and therefore
+; the fixture that says the cost is paid. Every one of these is a generic
+; function taking a generic enum, which is the shape `D-095` had to make legal
+; before any of it could be written.
+
+(take std:io println println-i64)
+(take std:string from-i64 to-i64 concat)
+(take std:option Option (map :as option-map) and-then unwrap-or or-else)
+(take std:result Result Ok Err (map :as result-map) map-err
+  (unwrap-or :as result-unwrap-or) (or-else :as result-or-else) ok)
+
+(fn double ((value i64)) -> i64
+  (* value 2))
+
+(fn halve ((value i64)) -> (Option i64)
+  (if (= 0 (- value (* (/ value 2) 2)))
+    (Option:Some (/ value 2))
+    (Option:None)))
+
+(fn nothing () -> (Option i64)
+  (Option:None))
+
+(fn fallback () -> (Option i64)
+  (Option:Some 99))
+
+; A `map` that changes the payload type, and to one that owns memory: the
+; instance the generic body builds is `Option$<String>`, whose drop glue is
+; generated for a body that never named it.
+(fn spell ((value i64)) -> String
+  (from-i64 value))
+
+(fn shout ((text String)) -> String
+  (let mark "!")
+  (concat (& text) (& mark)))
+
+(fn parse ((text (& String))) -> (Result i64 String)
+  (match (to-i64 text)
+    ((Option:Some value) (Result:Ok value))
+    ((Option:None) (Result:Err "not a number"))))
+
+(fn explain ((reason String)) -> String
+  (let prefix "error: ")
+  (concat (& prefix) (& reason)))
+
+(fn recover ((reason String)) -> (Result i64 String)
+  (Result:Ok (len (& reason))))
+
+(fn main () -> i32
+  (let text "21")
+  (println-i64 (unwrap-or (option-map (to-i64 (& text)) double) 0))
+  (println-i64 (unwrap-or (option-map (nothing) double) 7))
+  (println-i64 (unwrap-or (and-then (Option:Some 8) halve) 0))
+  (println-i64 (unwrap-or (and-then (Option:Some 9) halve) (- 0 1)))
+  (println-i64 (unwrap-or (or-else (nothing) fallback) 0))
+  (println-i64 (unwrap-or (or-else (Option:Some 1) fallback) 0))
+
+  ; An owned payload through two maps, so a wrong drop is a double free rather
+  ; than a type error.
+  (let spelled (option-map (Option:Some 42) spell))
+  (let loud (option-map spelled shout))
+  (let shown (unwrap-or loud "none"))
+  (println (& shown))
+
+  (println-i64 (result-unwrap-or (result-map (parse (& text)) double) 0))
+  (let bad "twenty")
+  (println-i64 (result-unwrap-or (result-map (parse (& bad)) double) (- 0 1)))
+  (println-i64 (unwrap-or (ok (parse (& text))) 0))
+  (println-i64 (unwrap-or (ok (parse (& bad))) 5))
+  (println-i64 (result-unwrap-or (result-or-else (parse (& bad)) recover) 0))
+  (match (map-err (parse (& bad)) explain)
+    ((Result:Ok value) (println-i64 value))
+    ((Result:Err reason) (println (& reason))))
+  0)
+
+(test "map carries a payload through and leaves the empty case empty"
+  (if (= 42 (unwrap-or (option-map (Option:Some 21) double) 0))
+    (= 7 (unwrap-or (option-map (nothing) double) 7))
+    false))
+
+(test "and-then does not nest"
+  (if (= 4 (unwrap-or (and-then (Option:Some 8) halve) 0))
+    (= 0 (unwrap-or (and-then (Option:Some 9) halve) 0))
+    false))
+
+(test "or-else runs only when there is nothing"
+  (if (= 99 (unwrap-or (or-else (nothing) fallback) 0))
+    (= 1 (unwrap-or (or-else (Option:Some 1) fallback) 0))
+    false))
+
+(test "a Result maps its value, and recovers from its error"
+  (let text "21")
+  (let bad "twenty")
+  (if (= 42 (result-unwrap-or (result-map (parse (& text)) double) 0))
+    (= 12 (result-unwrap-or (result-or-else (parse (& bad)) recover) 0))
+    false))

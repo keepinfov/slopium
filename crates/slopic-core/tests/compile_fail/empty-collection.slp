@@ -1,0 +1,5 @@
+(fn main () -> i32
+  (do
+    (let numbers (list))
+    (let fixed (array))
+    0))

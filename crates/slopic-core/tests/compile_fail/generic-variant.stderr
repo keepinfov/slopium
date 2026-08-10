@@ -1,0 +1,4 @@
+generic-variant.slp:11:6: error[SL0200]: variant `Pick:Just` does not belong to `(Either L R)`
+  |
+11 |     ((Pick:Just _) true)
+  |      ^^^^^^^^^^^^^

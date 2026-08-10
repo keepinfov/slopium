@@ -1235,7 +1235,14 @@ impl<'a> Analyzer<'a> {
             }
         }
         if !matches!(typed.ty, Type::Ref { .. } | Type::Slice(_)) {
-            if let TExprKind::Call { args, .. } | TExprKind::GenericCall { args, .. } = &typed.kind
+            // `CallValue` belongs here for the same reason the other two do,
+            // and v0.7.0 left it out: a borrow handed to a function *value*
+            // kept its loan for the rest of the scope, so a list could be
+            // shown to a predicate or never mutated again but not both. One
+            // call never noticed; `core:list:filter` is two.
+            if let TExprKind::Call { args, .. }
+            | TExprKind::GenericCall { args, .. }
+            | TExprKind::CallValue { args, .. } = &typed.kind
             {
                 for argument in args {
                     if let TExprKind::Borrow { id, .. } = &argument.kind {
@@ -1401,7 +1408,13 @@ impl<'a> Analyzer<'a> {
             // An error here is not reported: a mismatch against the expected
             // type is the caller's to describe, and the missing-instance
             // diagnostic below is the one that names what went wrong.
-            let _ = unify_type(&template, expected, &parameters, &mut substitutions);
+            let _ = unify_type(
+                &template,
+                expected,
+                &parameters,
+                &mut substitutions,
+                self.instances(),
+            );
         }
         let mut type_args = Vec::new();
         for parameter in &signature.type_params {
@@ -1691,7 +1704,17 @@ impl<'a> Analyzer<'a> {
                 expr.span,
                 format!("`try` expects Result, found `{}`", value.ty),
             );
-            return self.typed(expr, Type::Unit, TExprKind::Unit);
+            // A generic body's `(Result T E)` is the one case where the
+            // refusal still knows what the form would have produced, so it
+            // recovers as that rather than as `unit` and the one cause reports
+            // once instead of three times (`D-095`).
+            let recovered = match &value.ty {
+                Type::Apply { name, args } if name == &result_name && args.len() == 2 => {
+                    args[0].clone()
+                }
+                _ => Type::Unit,
+            };
+            return self.typed(expr, recovered, TExprKind::Unit);
         };
         let instance_name = instance_name.clone();
         let Some((base, arguments)) = self.enum_instances.get(&instance_name).cloned() else {
@@ -1781,22 +1804,14 @@ impl<'a> Analyzer<'a> {
         expected: Option<&Type>,
     ) -> TExpr {
         let value = self.expr(value, None);
-        let enum_name = match &value.ty {
-            Type::Named(name)
-                if self
-                    .variants
-                    .values()
-                    .any(|variant| &variant.enum_name == name)
-                    || self.enum_instances.contains_key(name) =>
-            {
-                Some(name.clone())
-            }
-            _ => None,
-        };
+        let enum_name = self.enum_of_type(&value.ty);
         let struct_name = match &value.ty {
             Type::Named(name)
                 if self.structs.contains_key(name) || self.generated_structs.contains_key(name) =>
             {
+                Some(name.clone())
+            }
+            Type::Apply { name, .. } if self.generic_structs.contains_key(name) => {
                 Some(name.clone())
             }
             _ => None,
@@ -1965,27 +1980,44 @@ impl<'a> Analyzer<'a> {
                         fields: Vec::new(),
                     }
                 };
-                if let Type::Named(expected_name) = expected {
-                    if let Some((base, arguments)) = self.enum_instances.get(expected_name) {
-                        if base == &info.enum_name {
-                            let substitutions = info
-                                .type_params
-                                .iter()
-                                .cloned()
-                                .zip(arguments.iter().cloned())
-                                .collect::<HashMap<_, _>>();
-                            info.enum_name = expected_name.clone();
-                            info.fields = info
-                                .fields
-                                .iter()
-                                .map(|(field, ty)| {
-                                    (field.clone(), substitute_type(ty, &substitutions))
-                                })
-                                .collect();
-                        }
+                // What the payloads are, and what to record the variant under.
+                // A `Named` scrutinee is an instance and names itself; an
+                // `Apply` one is a generic body's `(Option T)`, whose payloads
+                // substitute to parameters and whose instance is not chosen
+                // until materialization, so the base name stands in until then
+                // (`D-095`).
+                let arguments = match expected {
+                    Type::Named(expected_name) => self
+                        .enum_instances
+                        .get(expected_name)
+                        .filter(|(base, _)| base == &info.enum_name)
+                        .map(|(_, arguments)| (Some(expected_name.clone()), arguments.clone())),
+                    Type::Apply { name, args } if name == &info.enum_name => {
+                        Some((None, args.clone()))
                     }
+                    _ => None,
+                };
+                if let Some((instance, arguments)) = arguments {
+                    let substitutions = info
+                        .type_params
+                        .iter()
+                        .cloned()
+                        .zip(arguments)
+                        .collect::<HashMap<_, _>>();
+                    if let Some(instance) = instance {
+                        info.enum_name = instance;
+                    }
+                    info.fields = info
+                        .fields
+                        .iter()
+                        .map(|(field, ty)| (field.clone(), substitute_type(ty, &substitutions)))
+                        .collect();
                 }
-                if expected != &Type::Named(info.enum_name.clone()) {
+                let belongs = match expected {
+                    Type::Apply { name, .. } => name == &info.enum_name,
+                    other => other == &Type::Named(info.enum_name.clone()),
+                };
+                if !belongs {
                     self.error(
                         pattern.span,
                         format!("variant `{path}` does not belong to `{expected}`"),
@@ -2017,35 +2049,58 @@ impl<'a> Analyzer<'a> {
                 }
             }
             PatternKind::Struct { path, fields } => {
-                let expected_name = match expected {
-                    Type::Named(name) => name.clone(),
-                    _ => {
-                        self.error(
-                            pattern.span,
-                            format!("struct pattern `{path}` does not match `{expected}`"),
-                        );
-                        "<error>".into()
+                // What the pattern names, and the fields it therefore has. A
+                // plain struct names itself; a monomorphized instance is
+                // written with the base name the declaration used and carries
+                // its arguments in the instance table; a generic body's
+                // `(Pair T)` has neither and substitutes from the application
+                // (`D-095`).
+                let named = match expected {
+                    Type::Named(name) => {
+                        self.instances()
+                            .application_of(name)
+                            .map_or(name.as_str(), |(base, _)| base.as_str())
+                            == path
                     }
+                    Type::Apply { name, .. } => name == path,
+                    _ => false,
                 };
-                if &expected_name != path {
+                if !named {
                     self.error(
                         pattern.span,
                         format!("struct pattern `{path}` does not match `{expected}`"),
                     );
                 }
-                let declared_fields = self
-                    .structs
-                    .get(&expected_name)
-                    .cloned()
-                    .or_else(|| {
+                let declared_fields = match expected {
+                    Type::Apply { name, args } => self.generic_structs.get(name).map(|info| {
+                        let substitutions = info
+                            .type_params
+                            .iter()
+                            .cloned()
+                            .zip(args.iter().cloned())
+                            .collect::<HashMap<_, _>>();
+                        info.fields
+                            .iter()
+                            .map(|(field, ty)| (field.clone(), substitute_type(ty, &substitutions)))
+                            .collect::<Vec<_>>()
+                    }),
+                    Type::Named(name) => self.structs.get(name).cloned().or_else(|| {
                         self.generated_structs
-                            .get(&expected_name)
+                            .get(name)
                             .map(|structure| structure.fields.clone())
-                    })
-                    .unwrap_or_else(|| {
+                    }),
+                    _ => None,
+                };
+                let declared_fields = declared_fields.unwrap_or_else(|| {
+                    if named {
                         self.error(pattern.span, format!("unknown struct `{path}`"));
-                        Vec::new()
-                    });
+                    }
+                    Vec::new()
+                });
+                let expected_name = match expected {
+                    Type::Named(name) => name.clone(),
+                    _ => path.clone(),
+                };
                 let mut provided = HashMap::<String, &Pattern>::new();
                 for (name, field) in fields {
                     if provided.insert(name.clone(), field).is_some() {
@@ -2084,11 +2139,8 @@ impl<'a> Analyzer<'a> {
         if callee == "." {
             return self.field_access(expr, args);
         }
-        if callee == "list" {
-            return self.collection_literal(expr, callee, args);
-        }
-        if callee == "array" {
-            return self.collection_literal(expr, callee, args);
+        if callee == "list" || callee == "array" {
+            return self.collection_literal(expr, callee, args, expected);
         }
         if callee == "slice" {
             return self.slice_operation(expr, args);
@@ -2246,18 +2298,26 @@ impl<'a> Analyzer<'a> {
             let concrete_expected = template.filter(|ty| !contains_parameter(ty, &parameters));
             let typed = self.expr(argument, concrete_expected);
             if let Some(template) = template {
-                if let Err(message) =
-                    unify_type(template, &typed.ty, &parameters, &mut substitutions)
-                {
+                if let Err(message) = unify_type(
+                    template,
+                    &typed.ty,
+                    &parameters,
+                    &mut substitutions,
+                    self.instances(),
+                ) {
                     self.error(argument.span, message);
                 }
             }
             typed_args.push(typed);
         }
         if let Some(expected) = expected {
-            if let Err(message) =
-                unify_type(&signature.result, expected, &parameters, &mut substitutions)
-            {
+            if let Err(message) = unify_type(
+                &signature.result,
+                expected,
+                &parameters,
+                &mut substitutions,
+                self.instances(),
+            ) {
                 self.error(expr.span, message);
             }
         }
@@ -2460,17 +2520,8 @@ impl<'a> Analyzer<'a> {
         }
         let parameters = info.type_params.iter().cloned().collect::<HashSet<_>>();
         let mut substitutions = HashMap::new();
-        if let Some(Type::Named(expected_name)) = expected {
-            if let Some((base, arguments)) = self.struct_instances.get(expected_name) {
-                if base == name {
-                    substitutions.extend(
-                        info.type_params
-                            .iter()
-                            .cloned()
-                            .zip(arguments.iter().cloned()),
-                    );
-                }
-            }
+        if let Some(arguments) = self.expected_arguments(expected, name) {
+            substitutions.extend(info.type_params.iter().cloned().zip(arguments));
         }
         let mut typed_fields = Vec::new();
         for (field_name, template) in &info.fields {
@@ -2486,7 +2537,13 @@ impl<'a> Analyzer<'a> {
             let expected_field = (!contains_parameter(&partially_substituted, &parameters))
                 .then_some(&partially_substituted);
             let typed = self.expr(value, expected_field);
-            if let Err(message) = unify_type(template, &typed.ty, &parameters, &mut substitutions) {
+            if let Err(message) = unify_type(
+                template,
+                &typed.ty,
+                &parameters,
+                &mut substitutions,
+                self.instances(),
+            ) {
                 self.error(value.span, message);
             }
             typed_fields.push(typed);
@@ -2541,14 +2598,43 @@ impl<'a> Analyzer<'a> {
             return self.typed(expr, Type::Unit, TExprKind::Unit);
         };
         let binding = self.env.bindings.get(&id).cloned().expect("binding exists");
-        let Type::Named(struct_name) = &binding.ty else {
-            self.error(args[0].span, format!("`{base_name}` is not a struct"));
-            return self.typed(expr, Type::Unit, TExprKind::Unit);
+        // A generic body sees `(Pair T)` rather than an instance, so the
+        // fields come from the generic declaration with the application's
+        // arguments substituted in (`D-095`). The name recorded here reaches
+        // only the LSP — MIR indexes the field — and the base name is the
+        // better answer for it anyway, because that is where the source is.
+        let (struct_name, fields) = match &binding.ty {
+            Type::Named(struct_name) => match self.structs.get(struct_name) {
+                Some(fields) => (struct_name.clone(), fields.clone()),
+                None => {
+                    self.error(args[0].span, format!("`{struct_name}` is not a struct"));
+                    return self.typed(expr, Type::Unit, TExprKind::Unit);
+                }
+            },
+            Type::Apply {
+                name,
+                args: arguments,
+            } if self.generic_structs.contains_key(name) => {
+                let info = self.generic_structs[name].clone();
+                let substitutions = info
+                    .type_params
+                    .iter()
+                    .cloned()
+                    .zip(arguments.iter().cloned())
+                    .collect::<HashMap<_, _>>();
+                let fields = info
+                    .fields
+                    .iter()
+                    .map(|(field, ty)| (field.clone(), substitute_type(ty, &substitutions)))
+                    .collect::<Vec<_>>();
+                (name.clone(), fields)
+            }
+            _ => {
+                self.error(args[0].span, format!("`{base_name}` is not a struct"));
+                return self.typed(expr, Type::Unit, TExprKind::Unit);
+            }
         };
-        let Some(fields) = self.structs.get(struct_name) else {
-            self.error(args[0].span, format!("`{struct_name}` is not a struct"));
-            return self.typed(expr, Type::Unit, TExprKind::Unit);
-        };
+        let struct_name = &struct_name;
         let Some((index, (_, field_type))) = fields
             .iter()
             .enumerate()
@@ -2640,17 +2726,8 @@ impl<'a> Analyzer<'a> {
         }
         let parameters = info.type_params.iter().cloned().collect::<HashSet<_>>();
         let mut substitutions = HashMap::new();
-        if let Some(Type::Named(expected_name)) = expected {
-            if let Some((base, arguments)) = self.enum_instances.get(expected_name) {
-                if base == &info.enum_name {
-                    substitutions.extend(
-                        info.type_params
-                            .iter()
-                            .cloned()
-                            .zip(arguments.iter().cloned()),
-                    );
-                }
-            }
+        if let Some(arguments) = self.expected_arguments(expected, &info.enum_name) {
+            substitutions.extend(info.type_params.iter().cloned().zip(arguments));
         }
         let mut fields = Vec::new();
         for (index, argument) in args.iter().enumerate() {
@@ -2662,7 +2739,13 @@ impl<'a> Analyzer<'a> {
             let expected_field = (!contains_parameter(&partially_substituted, &parameters))
                 .then_some(&partially_substituted);
             let typed = self.expr(argument, expected_field);
-            if let Err(message) = unify_type(template, &typed.ty, &parameters, &mut substitutions) {
+            if let Err(message) = unify_type(
+                template,
+                &typed.ty,
+                &parameters,
+                &mut substitutions,
+                self.instances(),
+            ) {
                 self.error(argument.span, message);
             }
             fields.push(typed);
@@ -2719,8 +2802,34 @@ impl<'a> Analyzer<'a> {
             .collect()
     }
 
-    fn collection_literal(&mut self, expr: &Expr, callee: &str, args: &[Expr]) -> TExpr {
+    fn collection_literal(
+        &mut self,
+        expr: &Expr,
+        callee: &str,
+        args: &[Expr],
+        expected: Option<&Type>,
+    ) -> TExpr {
         if args.is_empty() {
+            // An empty literal has no element to read a type off, so the
+            // expected type is the only thing that can say what it holds — the
+            // same rule `(Option:None)` follows, carried by the same plumbing
+            // (`D-096`). Without it neither `map` nor `filter` can be written,
+            // because both must return an empty list when handed one.
+            let inferred = match expected {
+                Some(Type::List(_)) if callee == "list" => expected.cloned(),
+                Some(Type::Array { length: 0, .. }) if callee == "array" => expected.cloned(),
+                _ => None,
+            };
+            if let Some(ty) = inferred {
+                return self.typed(
+                    expr,
+                    ty,
+                    TExprKind::Call {
+                        callee: callee.into(),
+                        args: Vec::new(),
+                    },
+                );
+            }
             self.diagnostics.push(
                 Diagnostic::error(
                     codes::NAME_OR_TYPE,
@@ -2728,16 +2837,22 @@ impl<'a> Analyzer<'a> {
                     expr.span,
                     format!("cannot infer the type of an empty {callee}"),
                 )
-                .with_help(format!("provide at least one element in `({callee} ...)`")),
+                .with_help(format!(
+                    "provide at least one element in `({callee} ...)`, or write it where the \
+                     expected type says what it holds"
+                )),
             );
-            let ty = if callee == "array" {
+            // Recover as whatever was expected, so the one cause reports once.
+            // Inventing a `unit` element used to add "expected `List<i64>`,
+            // found `List<unit>`" underneath every empty literal.
+            let ty = expected.cloned().unwrap_or(if callee == "array" {
                 Type::Array {
                     element: Box::new(Type::Unit),
                     length: 0,
                 }
             } else {
                 Type::List(Box::new(Type::Unit))
-            };
+            });
             return self.typed(
                 expr,
                 ty,
@@ -3077,8 +3192,12 @@ impl<'a> Analyzer<'a> {
             }
             TExprKind::Match { value, arms } => {
                 self.materialize_typed_expr(value);
+                // The scrutinee is materialized first, so it is the thing that
+                // knows which instance an arm matches on. A pattern written in
+                // a generic body only ever recorded the base name (`D-095`).
+                let scrutinee = value.ty.clone();
                 for arm in arms {
-                    self.materialize_pattern(&mut arm.pattern, arm.span);
+                    self.materialize_pattern(&mut arm.pattern, &scrutinee, arm.span);
                     self.materialize_typed_expr(&mut arm.body);
                 }
             }
@@ -3138,7 +3257,14 @@ impl<'a> Analyzer<'a> {
         }
     }
 
-    fn materialize_pattern(&mut self, pattern: &mut TPattern, span: Span) {
+    /// Settle a pattern's types, and the aggregate it names, against the
+    /// materialized type of what it matches.
+    ///
+    /// The name comes from the scrutinee rather than from the pattern, because
+    /// a pattern written inside a generic body knows only the base name and
+    /// the instance does not exist until here. For concrete code the two agree
+    /// — the pattern already recorded the instance the scrutinee has.
+    fn materialize_pattern(&mut self, pattern: &mut TPattern, scrutinee: &Type, span: Span) {
         match pattern {
             TPattern::Binding(binding) => {
                 binding.ty = self.normalize_type(&binding.ty, span);
@@ -3148,10 +3274,10 @@ impl<'a> Analyzer<'a> {
             } => {
                 for field in fields {
                     field.ty = self.normalize_type(&field.ty, span);
-                    self.materialize_pattern(&mut field.pattern, span);
+                    let field_type = field.ty.clone();
+                    self.materialize_pattern(&mut field.pattern, &field_type, span);
                 }
-                let ty = self.normalize_type(&Type::Named(enum_name.clone()), span);
-                if let Type::Named(name) = ty {
+                if let Type::Named(name) = self.normalize_type(scrutinee, span) {
                     *enum_name = name;
                 }
             }
@@ -3161,14 +3287,61 @@ impl<'a> Analyzer<'a> {
             } => {
                 for field in fields {
                     field.ty = self.normalize_type(&field.ty, span);
-                    self.materialize_pattern(&mut field.pattern, span);
+                    let field_type = field.ty.clone();
+                    self.materialize_pattern(&mut field.pattern, &field_type, span);
                 }
-                let ty = self.normalize_type(&Type::Named(struct_name.clone()), span);
-                if let Type::Named(name) = ty {
+                if let Type::Named(name) = self.normalize_type(scrutinee, span) {
                     *struct_name = name;
                 }
             }
             TPattern::Wildcard | TPattern::Bool(_) | TPattern::Int(_) => {}
+        }
+    }
+
+    /// The type arguments an expected type supplies for a named generic
+    /// aggregate, whether it arrived as a monomorphized instance or as an
+    /// application a generic body has not instantiated yet (`D-095`).
+    fn expected_arguments(&self, expected: Option<&Type>, base_name: &str) -> Option<Vec<Type>> {
+        match expected? {
+            Type::Named(instance) => self
+                .instances()
+                .application_of(instance)
+                .filter(|(base, _)| base == base_name)
+                .map(|(_, arguments)| arguments.clone()),
+            Type::Apply { name, args } if name == base_name => Some(args.clone()),
+            _ => None,
+        }
+    }
+
+    /// The two instance tables, for the free functions that need to see
+    /// through a monomorphized name to the application it came from.
+    fn instances(&self) -> Instances<'_> {
+        Instances {
+            enums: &self.enum_instances,
+            structs: &self.struct_instances,
+        }
+    }
+
+    /// The variants of the enum a value of this type has, with the enum's type
+    /// parameters already substituted, and the base name to record them under.
+    ///
+    /// A `Named` is a monomorphized instance and its variants are already
+    /// concrete. An `Apply` is a generic body's view of one — `(Option T)` —
+    /// where the variants exist but their payloads are still parameters
+    /// (`D-095`).
+    fn enum_of_type(&self, ty: &Type) -> Option<String> {
+        match ty {
+            Type::Named(name)
+                if self
+                    .variants
+                    .values()
+                    .any(|variant| &variant.enum_name == name)
+                    || self.enum_instances.contains_key(name) =>
+            {
+                Some(name.clone())
+            }
+            Type::Apply { name, .. } if self.generic_enums.contains_key(name) => Some(name.clone()),
+            _ => None,
         }
     }
 
@@ -3392,6 +3565,7 @@ fn unify_type(
     actual: &Type,
     parameters: &HashSet<String>,
     substitutions: &mut HashMap<String, Type>,
+    instances: Instances<'_>,
 ) -> Result<(), String> {
     if let Type::Named(name) = template {
         if parameters.contains(name) {
@@ -3428,7 +3602,7 @@ fn unify_type(
                 mutable: true,
                 inner: right,
             },
-        ) => unify_type(left, right, parameters, substitutions),
+        ) => unify_type(left, right, parameters, substitutions, instances),
         (
             Type::Array {
                 element: left,
@@ -3438,7 +3612,9 @@ fn unify_type(
                 element: right,
                 length: right_length,
             },
-        ) if left_length == right_length => unify_type(left, right, parameters, substitutions),
+        ) if left_length == right_length => {
+            unify_type(left, right, parameters, substitutions, instances)
+        }
         (
             Type::Apply {
                 name: left_name,
@@ -3450,7 +3626,7 @@ fn unify_type(
             },
         ) if left_name == right_name && left_args.len() == right_args.len() => {
             for (left, right) in left_args.iter().zip(right_args) {
-                unify_type(left, right, parameters, substitutions)?;
+                unify_type(left, right, parameters, substitutions, instances)?;
             }
             Ok(())
         }
@@ -3469,12 +3645,52 @@ fn unify_type(
             },
         ) if left_params.len() == right_params.len() => {
             for (left, right) in left_params.iter().zip(right_params) {
-                unify_type(left, right, parameters, substitutions)?;
+                unify_type(left, right, parameters, substitutions, instances)?;
             }
-            unify_type(left_result, right_result, parameters, substitutions)
+            unify_type(
+                left_result,
+                right_result,
+                parameters,
+                substitutions,
+                instances,
+            )
+        }
+        // A generic body writes `(Option T)`; by the time a call site has a
+        // value, the application has already been instantiated and all that is
+        // left of it is the name `Option$<i64>`, which is not parseable back
+        // into one. The instance table is what connects the two (`D-095`).
+        (Type::Apply { name, args }, Type::Named(instance)) => {
+            match instances.application_of(instance) {
+                Some((base, arguments)) if base == name && arguments.len() == args.len() => {
+                    for (template, actual) in args.iter().zip(arguments) {
+                        unify_type(template, actual, parameters, substitutions, instances)?;
+                    }
+                    Ok(())
+                }
+                _ => Err(format!("expected `{template}`, found `{actual}`")),
+            }
         }
         _ if template == actual => Ok(()),
         _ => Err(format!("expected `{template}`, found `{actual}`")),
+    }
+}
+
+/// The monomorphized aggregates in scope, keyed by the instance name they were
+/// generated under. Unification is a free function and the two tables live on
+/// `Sema`, so they travel together rather than as two arguments nobody would
+/// keep in step.
+#[derive(Clone, Copy)]
+struct Instances<'a> {
+    enums: &'a HashMap<String, (String, Vec<Type>)>,
+    structs: &'a HashMap<String, (String, Vec<Type>)>,
+}
+
+impl Instances<'_> {
+    /// The generic type and arguments an instance name was generated from.
+    fn application_of(&self, instance: &str) -> Option<&(String, Vec<Type>)> {
+        self.enums
+            .get(instance)
+            .or_else(|| self.structs.get(instance))
     }
 }
 

@@ -1,0 +1,16 @@
+(enum Either (L R)
+  (Left ((value L)))
+  (Right ((value R))))
+
+(enum Pick (T)
+  Nothing
+  (Just ((value T))))
+
+(fn choose (L R) ((value (Either L R))) -> bool
+  (match value
+    ((Pick:Just _) true)
+    ((Either:Left _) true)
+    ((Either:Right _) false)))
+
+(fn main () -> i32
+  0)

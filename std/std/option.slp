@@ -1,0 +1,13 @@
+; The `Option` combinators a hosted package reaches.
+;
+; They are `core`'s, re-exported the way `std:string` re-exports the string
+; functions (`D-083`). They live in a module of their own rather than in
+; `prelude` because `core:option` and `core:result` both call theirs `map`, and
+; a prelude that exported both would have to rename one of them.
+
+(export
+  (core:option:Option :as Option)
+  (core:option:map :as map)
+  (core:option:and-then :as and-then)
+  (core:option:unwrap-or :as unwrap-or)
+  (core:option:or-else :as or-else))

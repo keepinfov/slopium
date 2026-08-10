@@ -1,5 +1,54 @@
-(export Result (Result:Ok :as Ok) (Result:Err :as Err))
+; A value or the reason there is not one, and the combinators over it.
+;
+; The same shape as `core:option` and for the same reason (`D-088`, `D-095`),
+; with one addition: a `Result` has two payloads, so it has two things to map
+; over. `map-err` is what lets a caller widen an error type without a `match`.
+;
+; `try` is still the shorter way to write early return, and it stays the right
+; tool for a chain inside one function. These are for the cases `try` cannot
+; reach: a `Result` handled somewhere other than the function that produced it,
+; and any generic body at all — `try` reads the error type out of the instance
+; table, which a generic body has no entry in (`D-095`).
+
+(take core:option Option)
+
+(export Result (Result:Ok :as Ok) (Result:Err :as Err)
+  map map-err and-then unwrap-or or-else ok)
 
 (enum Result (T E)
   (Ok ((value T)))
   (Err ((error E))))
+
+(fn map (T E U) ((value (Result T E)) (f (Fn (T) U))) -> (Result U E)
+  (match value
+    ((Result:Ok inner) (Result:Ok (f inner)))
+    ((Result:Err reason) (Result:Err reason))))
+
+(fn map-err (T E F) ((value (Result T E)) (f (Fn (E) F))) -> (Result T F)
+  (match value
+    ((Result:Ok inner) (Result:Ok inner))
+    ((Result:Err reason) (Result:Err (f reason)))))
+
+(fn and-then (T E U) ((value (Result T E)) (f (Fn (T) (Result U E)))) -> (Result U E)
+  (match value
+    ((Result:Ok inner) (f inner))
+    ((Result:Err reason) (Result:Err reason))))
+
+(fn unwrap-or (T E) ((value (Result T E)) (fallback T)) -> T
+  (match value
+    ((Result:Ok inner) inner)
+    ((Result:Err _) fallback)))
+
+; The recovery sees the error, which is the whole difference from
+; `core:option`'s `or-else`: there is something to recover *from*.
+(fn or-else (T E) ((value (Result T E)) (f (Fn (E) (Result T E)))) -> (Result T E)
+  (match value
+    ((Result:Ok inner) (Result:Ok inner))
+    ((Result:Err reason) (f reason))))
+
+; Forget why it failed. The bridge to `core:option`, and the only place in the
+; library where one of these two modules names the other.
+(fn ok (T E) ((value (Result T E))) -> (Option T)
+  (match value
+    ((Result:Ok inner) (Option:Some inner))
+    ((Result:Err _) (Option:None))))

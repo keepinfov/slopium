@@ -34,6 +34,8 @@ cat >"$check_dir/runtime.slp" <<'SLOPIUM'
 (take std:process arg args-len)
 (take std:fs delete exists read write Error)
 (take std:prelude Option Result)
+(take std:list (map :as list-map) (sort-by :as list-sort-by))
+(take std:option (map :as option-map) unwrap-or)
 
 (struct Pair ((left String) (right String)))
 (enum Message Empty (Text ((value String))))
@@ -48,6 +50,13 @@ cat >"$check_dir/runtime.slp" <<'SLOPIUM'
 (fn run-label ((item Labelled) (text (& String))) -> String
   (let render (. item render))
   (render text))
+
+(fn decorate ((text String)) -> String
+  (let mark "?")
+  (concat (& text) (& mark)))
+
+(fn shorter ((items (& (List String))) (left i64) (right i64)) -> bool
+  (< (len (get-ref items left)) (len (get-ref items right))))
 
 (extern "probe_strlen" (probe-strlen (text (& String))) -> i64)
 (extern "probe_slice" (probe-slice (values (& (Slice i64)))) -> i64)
@@ -98,6 +107,18 @@ cat >"$check_dir/runtime.slp" <<'SLOPIUM'
   (let labelled (Labelled :name (clone (& rendered)) :render shout))
   (let shouted (run-label labelled (& suffix)))
   (println (& shouted))
+  ; `core:list` and `core:option` over elements that own memory. Every one of
+  ; these moves a `String` out of a list, hands it to a function value, and
+  ; puts a different one back; `sort-by` additionally reorders them and drops
+  ; the list they came from. A wrong ownership decision anywhere in that is a
+  ; leak or a double free, and nothing else in the suite would see it.
+  (let decorated (list-map (list "alpha" "bee" "c") decorate))
+  (let sorted (list-sort-by decorated shorter))
+  (println (get-ref (& sorted) 0))
+  (println-i64 (len (& sorted)))
+  (let maybe-name (option-map (Option:Some (clone (& rendered))) decorate))
+  (let name (unwrap-or maybe-name "none"))
+  (println (& name))
   (let message (Message:Text "payload"))
   (let mut values (list number 2 3))
   (do (push (&mut values) 4))

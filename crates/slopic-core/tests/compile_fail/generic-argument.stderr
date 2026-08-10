@@ -1,0 +1,4 @@
+generic-argument.slp:15:18: error[SL0200]: expected `(Pick T)`, found `Pair$<i64>`
+  |
+15 |     (unwrap-pick pair 0)
+  |                  ^^^^

@@ -1,0 +1,173 @@
+; Lists, over function pointers.
+;
+; The list itself is built into the language; this is what you do with one. It
+; is `core` (`D-083`): a `(List T)` is the runtime's `SlList`, which needs an
+; allocator and not an operating system.
+;
+; **Two shapes of function, and the reason there are two.** A function that
+; consumes each element takes the element — `map` and `fold`. A function that
+; only wants to *look* at one takes the borrowed list and an index — `filter`,
+; `find` and `sort-by`. That asymmetry is not a style choice. A `(List T)` owns
+; its elements, so looking at one without consuming it means borrowing it, and
+; there is no way to read a `(& T)`: the language has no dereference, and `get`
+; copies only a `Copy` element, which a generic `T` is not known to be. A
+; borrowed list and an index is the one form that works for every `T`, because
+; the caller writing the predicate knows what `T` is and can use `get`,
+; `get-ref` or `len` on it.
+;
+; Every consuming function removes from the front, which is a move of the rest
+; of the list each time. That is quadratic, and it is the honest first version:
+; fixing it is a `reverse` and a second pass, and it changes no signature here.
+
+(take core:option Option)
+
+(export map filter fold find sort-by)
+
+; `f` is handed each element in order and owns it. This is the one function
+; here that can return a list of a different type, and therefore the one that
+; needs `(list)` to mean an empty `(List U)` — there is no input to hand back
+; when there is nothing to map (`D-096`).
+(fn map (T U) ((items (List T)) (f (Fn (T) U))) -> (List U)
+  (let mut input items)
+  (if (= (len (& input)) 0)
+    (list)
+    (do
+      (let head (remove (&mut input) 0))
+      (let mut output (list (f head)))
+      (while (> (len (& input)) 0)
+        (let next (remove (&mut input) 0))
+        (push (&mut output) (f next)))
+      output)))
+
+; `keep` is asked about each index of the list as it arrived, before anything
+; is removed, which is why every question is answered first and the removals
+; happen afterwards and from the back.
+(fn filter (T) ((items (List T)) (keep (Fn ((& (List T)) i64) bool))) -> (List T)
+  (let mut result items)
+  (let size (len (& result)))
+  (if (= size 0)
+    result
+    (do
+      (let mut flags (list (keep (& result) 0)))
+      (let mut index 1)
+      (while (< index size)
+        (push (&mut flags) (keep (& result) index))
+        (set index (+ index 1)))
+      (let mut back size)
+      (while (> back 0)
+        (set back (- back 1))
+        (if (get (& flags) back)
+          ()
+          (drop-at (&mut result) back)))
+      result)))
+
+; Removing and discarding, as its own function because the discarded binding
+; has to go out of scope for the loan to close.
+(fn drop-at (T) ((items (&mut (List T))) (index i64)) -> unit
+  (let dropped (remove items index))
+  ())
+
+(fn fold (T A) ((items (List T)) (initial A) (f (Fn (A T) A))) -> A
+  (let mut input items)
+  (let mut total initial)
+  (while (> (len (& input)) 0)
+    (let head (remove (&mut input) 0))
+    (set total (f total head)))
+  total)
+
+; The index of the first element `holds` accepts, like `core:string:find`
+; returns the index of a match rather than the thing found. Returning the
+; element would have to move it out of a list the caller still owns.
+(fn find (T) ((items (& (List T))) (holds (Fn ((& (List T)) i64) bool))) -> (Option i64)
+  (let size (len items))
+  (let mut index 0)
+  (let mut found (- 0 1))
+  (while (< index size)
+    (if (holds items index)
+      (do
+        (set found index)
+        (break))
+      ())
+    (set index (+ index 1)))
+  (if (< found 0)
+    (Option:None)
+    (Option:Some found)))
+
+; `before` answers whether the element at the first index belongs ahead of the
+; element at the second. A sort parameterised by a function is what a language
+; with traits gets from `Ord`, and this is the parametric answer to it
+; (`D-088`).
+;
+; Selection sort: every comparison happens against the list as it arrived, and
+; only then is anything moved, because `before` holds a borrow and removing
+; needs the list back. Quadratic in comparisons, which for a sort is the point
+; at which it stops being an implementation detail — a better algorithm sorts
+; in place, and in place needs a way to overwrite one element, which the
+; language does not have.
+(fn sort-by (T) ((items (List T)) (before (Fn ((& (List T)) i64 i64) bool))) -> (List T)
+  (let mut source items)
+  (let size (len (& source)))
+  (if (< size 2)
+    source
+    (do
+      (let order (selection-order (& source) before size))
+      (take-in-order source order))))
+
+; The indices of the list in sorted order. Nothing is moved out of `items`
+; here, so `before` sees the same list for every comparison it is asked to
+; make. What shrinks instead is the list of indices still to be placed.
+(fn selection-order (T) ((items (& (List T)))
+    (before (Fn ((& (List T)) i64 i64) bool)) (size i64)) -> (List i64)
+  (let mut remaining (list 0))
+  (let mut fill 1)
+  (while (< fill size)
+    (push (&mut remaining) fill)
+    (set fill (+ fill 1)))
+  (let head (least-slot items before (& remaining)))
+  (let mut order (list (remove (&mut remaining) head)))
+  (while (> (len (& remaining)) 0)
+    (let slot (least-slot items before (& remaining)))
+    (push (&mut order) (remove (&mut remaining) slot)))
+  order)
+
+; Where in `remaining` the smallest element is. `before` is strict and ties
+; keep the slot they already had, so the sort is stable.
+(fn least-slot (T) ((items (& (List T)))
+    (before (Fn ((& (List T)) i64 i64) bool))
+    (remaining (& (List i64)))) -> i64
+  (let size (len remaining))
+  (let mut best 0)
+  (let mut slot 1)
+  (while (< slot size)
+    (if (before items (get remaining slot) (get remaining best))
+      (set best slot)
+      ())
+    (set slot (+ slot 1)))
+  best)
+
+; Move the elements out in the order given. An index counts positions in the
+; list as it arrived, and every earlier removal has shifted the ones after it,
+; so the position to remove is the original minus how many already went.
+(fn take-in-order (T) ((items (List T)) (order (List i64))) -> (List T)
+  (let mut source items)
+  (let mut sequence order)
+  (let first (remove (&mut sequence) 0))
+  (let mut gone (list first))
+  (let mut output (list (remove (&mut source) first)))
+  (while (> (len (& sequence)) 0)
+    (let original (remove (&mut sequence) 0))
+    (let position (- original (earlier-than (& gone) original)))
+    (push (&mut output) (remove (&mut source) position))
+    (push (&mut gone) original))
+  output)
+
+(fn earlier-than ((gone (& (List i64))) (index i64)) -> i64
+  (let size (len gone))
+  (let mut count 0)
+  (let mut position 0)
+  (while (< position size)
+    (if (< (get gone position) index)
+      (set count (+ count 1))
+      ())
+    (set position (+ position 1)))
+  count)

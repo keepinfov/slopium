@@ -47,6 +47,7 @@ pub const TOOLCHAIN_PACKAGES: &[ToolchainPackage] = &[
         modules: &[
             ("option", include_str!("../../../std/core/option.slp")),
             ("result", include_str!("../../../std/core/result.slp")),
+            ("list", include_str!("../../../std/core/list.slp")),
             ("string", include_str!("../../../std/core/string.slp")),
         ],
         dependencies: &[],
@@ -61,6 +62,9 @@ pub const TOOLCHAIN_PACKAGES: &[ToolchainPackage] = &[
         name: STD_PACKAGE,
         modules: &[
             ("prelude", include_str!("../../../std/std/prelude.slp")),
+            ("option", include_str!("../../../std/std/option.slp")),
+            ("result", include_str!("../../../std/std/result.slp")),
+            ("list", include_str!("../../../std/std/list.slp")),
             ("string", include_str!("../../../std/std/string.slp")),
             ("io", include_str!("../../../std/std/io.slp")),
             ("process", include_str!("../../../std/std/process.slp")),

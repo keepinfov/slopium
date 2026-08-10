@@ -1,0 +1,13 @@
+; The `Result` combinators a hosted package reaches. `core`'s, re-exported
+; (`D-083`), and separate from `std:option` because the two share four names.
+
+(export
+  (core:result:Result :as Result)
+  (core:result:Ok :as Ok)
+  (core:result:Err :as Err)
+  (core:result:map :as map)
+  (core:result:map-err :as map-err)
+  (core:result:and-then :as and-then)
+  (core:result:unwrap-or :as unwrap-or)
+  (core:result:or-else :as or-else)
+  (core:result:ok :as ok))

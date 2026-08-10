@@ -1,0 +1,11 @@
+empty-collection.slp:3:18: error[SL0200]: cannot infer the type of an empty list
+  |
+ 3 |     (let numbers (list))
+  |                  ^^^^^^
+  = help: provide at least one element in `(list ...)`, or write it where the expected type says what it holds
+
+empty-collection.slp:4:16: error[SL0200]: cannot infer the type of an empty array
+  |
+ 4 |     (let fixed (array))
+  |                ^^^^^^^
+  = help: provide at least one element in `(array ...)`, or write it where the expected type says what it holds

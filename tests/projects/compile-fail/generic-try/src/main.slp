@@ -1,0 +1,12 @@
+; `try` reads the error type out of the instance table, and a generic body has
+; no entry in it — the `Result` here is still an application, not an instance
+; (`D-095`). It refuses with a diagnostic rather than miscompiling, and
+; `and-then` is the answer in the meantime.
+
+(take std:prelude Result)
+
+(fn chain (T E) ((value (Result T E))) -> (Result T E)
+  (let inner (try value))
+  (Result:Ok inner))
+
+(fn main () -> i32 0)

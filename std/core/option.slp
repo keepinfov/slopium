@@ -1,5 +1,43 @@
-(export Option)
+; An optional value, and the combinators that make refusing traits honest.
+;
+; `D-088` refused traits for 1.0 and named this module as the cost: without a
+; function type there is nothing for `map` to take, so `Option` was an enum and
+; no more. `D-092` made a function a value and `D-095` let a generic function
+; take a generic type, so the cost is paid here.
+;
+; Every function takes its `Option` **by ownership**, because `match` does not
+; work through a borrow — in any code, not only generic code. That is also why
+; there is no `is-some`: asking which variant a value is would consume it, and
+; a combinator that consumes what it only wanted to look at is worse than not
+; having one.
+
+(export Option map and-then unwrap-or or-else)
 
 (enum Option (T)
   None
   (Some ((value T))))
+
+(fn map (T U) ((value (Option T)) (f (Fn (T) U))) -> (Option U)
+  (match value
+    ((Option:Some inner) (Option:Some (f inner)))
+    ((Option:None) (Option:None))))
+
+; `f` returns an `Option` of its own, so nesting does not accumulate.
+(fn and-then (T U) ((value (Option T)) (f (Fn (T) (Option U)))) -> (Option U)
+  (match value
+    ((Option:Some inner) (f inner))
+    ((Option:None) (Option:None))))
+
+; The fallback is evaluated by the caller either way. `or-else` is the lazy
+; form, and the pair is deliberate rather than an oversight: a `(Fn () T)` is
+; the only way to defer work in a language with no closures, and it cannot
+; carry anything computed nearby.
+(fn unwrap-or (T) ((value (Option T)) (fallback T)) -> T
+  (match value
+    ((Option:Some inner) inner)
+    ((Option:None) fallback)))
+
+(fn or-else (T) ((value (Option T)) (f (Fn () (Option T)))) -> (Option T)
+  (match value
+    ((Option:Some inner) (Option:Some inner))
+    ((Option:None) (f))))

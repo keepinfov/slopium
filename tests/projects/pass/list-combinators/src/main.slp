@@ -1,0 +1,135 @@
+; `core:list`, and the convention that makes it work without closures: a
+; function that consumes an element takes the element, and a function that only
+; looks at one takes the borrowed list and an index. There is no way to read a
+; `(& T)`, so the second form is the only one that works for every `T`.
+
+(take std:io println println-i64)
+(take std:string from-i64 concat)
+(take std:list map filter fold find sort-by)
+(take std:option Option unwrap-or)
+
+(fn double ((value i64)) -> i64
+  (* value 2))
+
+(fn spell ((value i64)) -> String
+  (from-i64 value))
+
+(fn shout ((text String)) -> String
+  (let mark "!")
+  (concat (& text) (& mark)))
+
+(fn odd ((items (& (List i64))) (index i64)) -> bool
+  (let value (get items index))
+  (= 1 (- value (* (/ value 2) 2))))
+
+(fn over-three ((items (& (List i64))) (index i64)) -> bool
+  (> (get items index) 3))
+
+(fn add ((total i64) (value i64)) -> i64
+  (+ total value))
+
+(fn ascending ((items (& (List i64))) (left i64) (right i64)) -> bool
+  (< (get items left) (get items right)))
+
+(fn descending ((items (& (List i64))) (left i64) (right i64)) -> bool
+  (> (get items left) (get items right)))
+
+; A comparator over elements that own memory, which is the case the borrowed
+; list exists for: `get` would refuse to copy a `String` out.
+(fn shorter ((items (& (List String))) (left i64) (right i64)) -> bool
+  (< (len (get-ref items left)) (len (get-ref items right))))
+
+(fn empty-numbers () -> (List i64)
+  (list))
+
+(fn join-numbers ((items (List i64))) -> String
+  (let mut input items)
+  (let mut text "")
+  (while (> (len (& input)) 0)
+    (let head (remove (&mut input) 0))
+    (let piece (from-i64 head))
+    (let gap " ")
+    (let joined (concat (& text) (& piece)))
+    (set text (concat (& joined) (& gap))))
+  text)
+
+(fn join-text ((items (List String))) -> String
+  (let mut input items)
+  (let mut text "")
+  (while (> (len (& input)) 0)
+    (let head (remove (&mut input) 0))
+    (let gap " ")
+    (let joined (concat (& text) (& head)))
+    (set text (concat (& joined) (& gap))))
+  text)
+
+(fn show ((items (List i64))) -> unit
+  (let text (join-numbers items))
+  (println (& text)))
+
+(fn show-text ((items (List String))) -> unit
+  (let text (join-text items))
+  (println (& text)))
+
+(fn main () -> i32
+  (show (map (list 1 2 3) double))
+  ; The empty case is why `(list)` has to mean an empty `(List U)` (`D-096`):
+  ; there is no input to hand back when the element type changes.
+  (show (map (empty-numbers) double))
+  (show (filter (list 1 2 3 4 5) odd))
+  (show (filter (list 2 4) odd))
+  (println-i64 (fold (list 1 2 3 4) 0 add))
+  (println-i64 (fold (empty-numbers) 100 add))
+
+  (let haystack (list 1 2 9 4))
+  (println-i64 (unwrap-or (find (& haystack) over-three) (- 0 1)))
+  (let small (list 1 2))
+  (println-i64 (unwrap-or (find (& small) over-three) (- 0 1)))
+
+  (show (sort-by (list 5 3 9 1 3) ascending))
+  (show (sort-by (list 5 3 9 1 3) descending))
+  (show (sort-by (list 7) ascending))
+
+  ; Owned elements through every stage, so a wrong ownership decision here is a
+  ; double free rather than a type error.
+  (show-text (sort-by (list "ccc" "a" "bb") shorter))
+  (show-text (map (list "x" "y") shout))
+  0)
+
+(test "map keeps the order and handles the empty list"
+  (let mapped (map (list 1 2 3) double))
+  (let none (map (empty-numbers) double))
+  (if (= 3 (len (& mapped)))
+    (if (= 6 (get (& mapped) 2))
+      (= 0 (len (& none)))
+      false)
+    false))
+
+(test "filter keeps what the predicate accepts"
+  (let kept (filter (list 1 2 3 4 5) odd))
+  (if (= 3 (len (& kept)))
+    (if (= 1 (get (& kept) 0))
+      (= 5 (get (& kept) 2))
+      false)
+    false))
+
+(test "fold sees every element once"
+  (if (= 10 (fold (list 1 2 3 4) 0 add))
+    (= 100 (fold (empty-numbers) 100 add))
+    false))
+
+(test "find answers with an index, or with nothing"
+  (let haystack (list 1 2 9 4))
+  (let small (list 1 2))
+  (if (= 2 (unwrap-or (find (& haystack) over-three) (- 0 1)))
+    (= (- 0 1) (unwrap-or (find (& small) over-three) (- 0 1)))
+    false))
+
+(test "sort-by orders by the comparator it is given"
+  (let up (sort-by (list 5 3 9 1 3) ascending))
+  (let down (sort-by (list 5 3 9 1 3) descending))
+  (if (= 1 (get (& up) 0))
+    (if (= 9 (get (& up) 4))
+      (= 9 (get (& down) 0))
+      false)
+    false))

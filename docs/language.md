@@ -51,7 +51,15 @@ All module dependency cycles are rejected.
 
 Generic applications use S-expressions, for example `(Box String)` and
 `(Result i64 Error)`. Type arguments are inferred at calls and constructors.
-The compiler monomorphizes only reachable concrete instances. The language has
+The compiler monomorphizes only reachable concrete instances. A generic
+function may take, match, build and return a generic type, so
+`(fn map (T U) ((value (Option T)) (f (Fn (T) U))) -> (Option U) ...)` is an
+ordinary declaration; inside such a body the type is still an application and
+not an instance, which is why `try` refuses one (`D-095`). Inference is
+positional and left to right: an argument is typed against the parameter it is
+passed to, so a value that says nothing about a parameter on its own — an empty
+`(list)`, an `(Option:None)` — needs an earlier argument or the expected type
+to have settled it. The language has
 no traits and no bounds, and none are planned for 1.0 (`D-088`). A bound can be
 added later to a parameter that is unconstrained today without invalidating a
 program that already satisfies it, which is why refusing them now costs a
@@ -205,6 +213,11 @@ runtime errors with exit status 101.
 non-owning range descriptor tied to the lifetime of a borrowed list or array.
 `len` also accepts `(& String)`, where it is the length in bytes.
 
+An empty `(list)` or `(array)` is legal wherever the expected type says what it
+holds — a return position, an argument, an arm of an `if` or a `match` — and an
+error only where nothing does (`D-096`). It is the same rule `(Option:None)`
+follows.
+
 ## Standard `Option`, `Result`, and `try`
 
 The bundled `std` dependency exports generic `Option` and `Result`. A project
@@ -233,10 +246,12 @@ ordinary modules of the bundled library, written in Slopium over `extern`
 declarations, and a program that uses one says so.
 
 The library is two packages. `core` is what a program with no C library under
-it can have — `option`, `result` and `string`. `std` is `core` plus what needs
-an operating system — `io`, `process` and `fs` — and it re-exports `core`
-through `std:prelude` and `std:string`, so a package that depends on `std`
-alone reaches everything by that name.
+it can have — `option`, `result`, `list` and `string`. `std` is `core` plus
+what needs an operating system — `io`, `process` and `fs` — and it re-exports
+`core` through `std:prelude`, `std:option`, `std:result`, `std:list` and
+`std:string`, so a package that depends on `std` alone reaches everything by
+that name. The combinators live in modules of their own rather than in
+`prelude` because `option` and `result` both call theirs `map`.
 
 ```lisp
 (take std:io println println-i64 read-i64)
@@ -256,6 +271,45 @@ set: each is `None`, and a file operation that fails is an `Err` carrying an
 `errno`. The runtime errors that remain — an index out of bounds, a division by
 zero, an overflow — are the language's own, and they still print a normalized
 message and exit with status 101.
+
+`std:option` and `std:result` are the combinators. `Option` has `map`,
+`and-then`, `unwrap-or` and `or-else`; `Result` has those plus `map-err` and
+`ok`, which forgets why it failed and gives back an `Option`. These are what
+refusing traits costs, and having them is what makes the refusal honest
+(`D-088`). Each takes its value **by ownership**, because `match` does not work
+through a borrow; that is also why there is no `is-some`, which would have to
+consume what it only wanted to look at.
+
+`std:list` is `map`, `filter`, `fold`, `find` and `sort-by`. Two shapes of
+function appear here, and the difference is not stylistic. A function that
+consumes each element takes the element: `map` is `(Fn (T) U)` and `fold` is
+`(Fn (A T) A)`. A function that only looks at one takes **the borrowed list and
+an index**: `filter` and `find` are `(Fn ((& (List T)) i64) bool)` and
+`sort-by` is `(Fn ((& (List T)) i64 i64) bool)`, answering whether the first
+index belongs ahead of the second. Looking at an element without consuming it
+means borrowing it, and there is no way to read a `(& T)` — the language has no
+dereference, and `get` copies only a `Copy` element, which an unconstrained `T`
+is not. A borrowed list and an index is the one form that works for every `T`,
+because the caller writing the predicate knows what `T` is. `find` answers with
+an index, like `core:string:find`, because answering with the element would
+have to move it out of a list the caller still owns.
+
+```lisp
+(take std:list filter sort-by)
+
+(fn odd ((items (& (List i64))) (index i64)) -> bool
+  (let value (get items index))
+  (= 1 (- value (* (/ value 2) 2))))
+
+(fn ascending ((items (& (List i64))) (left i64) (right i64)) -> bool
+  (< (get items left) (get items right)))
+
+(let kept (sort-by (filter (list 5 2 3 9) odd) ascending))
+```
+
+`sort-by` is stable, and both it and every consuming function here are
+quadratic: sorting in place would need a way to overwrite one element, and the
+language has none.
 
 `std:string` is bytes: `byte-at`, `substring`, `concat`, `from-bytes`,
 `equals`, `starts-with`, `find`, `contains`, `trim`, `split` on a separator
