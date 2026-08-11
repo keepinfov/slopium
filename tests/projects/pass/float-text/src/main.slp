@@ -1,0 +1,164 @@
+; `f64` becomes observable. The printed form is plain decimal with seventeen
+; significant digits and no exponent, so a float that has been printed is also
+; a float the compiler could read back (`D-098`) — which is what the last test
+; here checks, by pasting one in.
+
+(take std:io println print)
+(take std:float from-f64 to-f64 println-f64 print-f64)
+(take std:string equals concat)
+(take std:option Option unwrap-or)
+
+(fn read ((text (& String))) -> f64
+  (unwrap-or (to-f64 text) (- 0.0 1.0)))
+
+(fn refused ((text (& String))) -> bool
+  (match (to-f64 text)
+    ((Option:Some _) false)
+    ((Option:None) true)))
+
+; `-0.0` has no literal: negating zero by subtraction gives `+0.0` back, and
+; multiplying is what carries the sign across.
+(fn negative-zero () -> f64
+  (* (- 0.0 1.0) 0.0))
+
+(fn infinity () -> f64
+  (/ 1.0 0.0))
+
+(fn not-a-number () -> f64
+  (- (infinity) (infinity)))
+
+; Built rather than written: the literal for a number past either end of the
+; range is three hundred characters of source, because there is no exponent to
+; write it with.
+(fn one-and-zeros ((count i64)) -> String
+  (let zero "0")
+  (let mut text "1")
+  (let mut index 0)
+  (while (< index count)
+    (let next (concat (& text) (& zero)))
+    (set text next)
+    (set index (+ index 1)))
+  text)
+
+(fn zeros-then-one ((count i64)) -> String
+  (let zero "0")
+  (let mut text "0.")
+  (let mut index 0)
+  (while (< index count)
+    (let next (concat (& text) (& zero)))
+    (set text next)
+    (set index (+ index 1)))
+  (let one "1")
+  (concat (& text) (& one)))
+
+(fn round-trips ((value f64)) -> bool
+  (let text (from-f64 value))
+  (= (read (& text)) value))
+
+(fn main () -> unit
+  (println-f64 1.0)
+  (println-f64 (- 0.0 3.75))
+  (println-f64 0.1)
+  (println-f64 (/ 1.0 3.0))
+  (println-f64 100.0)
+  (println-f64 0.0)
+  (println-f64 (negative-zero))
+  (println-f64 (infinity))
+  (println-f64 (- 0.0 (infinity)))
+  (println-f64 (not-a-number))
+  (print-f64 2.5)
+  (let space " ")
+  (print (& space))
+  (print-f64 (- 0.0 0.5))
+  (println (& space))
+  (let text (from-f64 (/ 2.0 7.0)))
+  (println (& text)))
+
+(test "a whole number keeps a fractional digit"
+  (let one (from-f64 1.0))
+  (let hundred (from-f64 100.0))
+  (let expected-one "1.0")
+  (let expected-hundred "100.0")
+  (if (equals (& one) (& expected-one))
+    (equals (& hundred) (& expected-hundred))
+    false))
+
+(test "seventeen digits is the width that comes back"
+  (let tenth (from-f64 0.1))
+  (let expected "0.10000000000000001")
+  (equals (& tenth) (& expected)))
+
+(test "every shape of value survives the trip"
+  (if (round-trips 0.1)
+    (if (round-trips (/ 1.0 3.0))
+      (if (round-trips (- 0.0 3.75))
+        (round-trips 12345.6789)
+        false)
+      false)
+    false))
+
+(test "a zero keeps the sign it had"
+  (let plain (from-f64 0.0))
+  (let signed (from-f64 (negative-zero)))
+  (let expected-plain "0.0")
+  (let expected-signed "-0.0")
+  (if (equals (& plain) (& expected-plain))
+    (equals (& signed) (& expected-signed))
+    false))
+
+(test "the three values with no digits have names"
+  (let up (from-f64 (infinity)))
+  (let down (from-f64 (- 0.0 (infinity))))
+  (let none (from-f64 (not-a-number)))
+  (let expected-up "inf")
+  (let expected-down "-inf")
+  (let expected-none "nan")
+  (if (equals (& up) (& expected-up))
+    (if (equals (& down) (& expected-down))
+      (equals (& none) (& expected-none))
+      false)
+    false))
+
+(test "a name reads back as the value it names"
+  (let up "inf")
+  (let down "-inf")
+  (if (= (read (& up)) (infinity))
+    (do
+      (let value (read (& down)))
+      (= value (- 0.0 (infinity))))
+    false))
+
+(test "text that is not a number is refused"
+  (let doubled "1.2.3")
+  (let letters "abc")
+  (let trailing "1.")
+  (let leading ".5")
+  (let empty "")
+  (if (refused (& doubled))
+    (if (refused (& letters))
+      (if (refused (& trailing))
+        (if (refused (& leading)) (refused (& empty)) false)
+        false)
+      false)
+    false))
+
+(test "a whole number needs no point to be read"
+  (let text "42")
+  (= (read (& text)) 42.0))
+
+(test "past the top of the range is an infinity, and past the bottom a zero"
+  (let huge (one-and-zeros 400))
+  (let tiny (zeros-then-one 400))
+  (if (= (read (& huge)) (infinity))
+    (= (read (& tiny)) 0.0)
+    false))
+
+(test "a subnormal is a value like any other"
+  (let text (zeros-then-one 322))
+  (let value (read (& text)))
+  (if (> value 0.0) (round-trips value) false))
+
+; The claim `D-098` rests on, made by a program rather than by prose: this
+; literal was pasted from the output of `(from-f64 (/ 2.0 7.0))`.
+(test "printed output is source the compiler reads"
+  (= 0.2857142857142857 (/ 2.0 7.0)))

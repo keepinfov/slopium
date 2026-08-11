@@ -319,3 +319,26 @@ void *sl_rt_slice_get(const SlSlice *slice, uint64_t index) {
 void sl_rt_slice_drop(SlSlice *slice) {
     sl_rt_free(slice);
 }
+
+/* The two the library cannot write for itself, for the same reason the four
+ * string primitives exist: an `f64` is a value the language can compute with
+ * and cannot look inside, and every digit of a decimal expansion comes from
+ * the sign, exponent and significand. A union is the bit reinterpretation C
+ * defines; nothing here rounds, traps, or reads a floating-point flag, so an
+ * object built from this file still has no undefined symbol. */
+typedef union SlF64Bits {
+    double value;
+    int64_t bits;
+} SlF64Bits;
+
+int64_t sl_rt_f64_bits(double value) {
+    SlF64Bits pun;
+    pun.value = value;
+    return pun.bits;
+}
+
+double sl_rt_f64_from_bits(int64_t bits) {
+    SlF64Bits pun;
+    pun.bits = bits;
+    return pun.value;
+}

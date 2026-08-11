@@ -49,6 +49,7 @@ pub const TOOLCHAIN_PACKAGES: &[ToolchainPackage] = &[
             ("result", include_str!("../../../std/core/result.slp")),
             ("list", include_str!("../../../std/core/list.slp")),
             ("string", include_str!("../../../std/core/string.slp")),
+            ("float", include_str!("../../../std/core/float.slp")),
         ],
         dependencies: &[],
         language_items: &[
@@ -67,6 +68,7 @@ pub const TOOLCHAIN_PACKAGES: &[ToolchainPackage] = &[
             ("list", include_str!("../../../std/std/list.slp")),
             ("string", include_str!("../../../std/std/string.slp")),
             ("io", include_str!("../../../std/std/io.slp")),
+            ("float", include_str!("../../../std/std/float.slp")),
             ("process", include_str!("../../../std/std/process.slp")),
             ("fs", include_str!("../../../std/std/fs.slp")),
         ],

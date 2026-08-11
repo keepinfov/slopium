@@ -1,0 +1,486 @@
+; Floats, as text.
+;
+; This is `core` and not `std` (`D-097`): the algorithm needs no C library, so
+; a freestanding program can print a number it computed, and
+; `scripts/core-check.sh` links one that does.
+;
+; One thing cannot be written here, and it is the same shape as the four
+; `core:string` cannot write: an `f64` is a value the language computes with
+; and cannot look inside. So the bit pattern comes from the runtime and
+; everything else below is Slopium over it.
+;
+; The reason there is an exact answer at all: a finite double is
+; `significand * 2^exponent` with a 53-bit integer significand, and that
+; product is a finite decimal. For a positive exponent it is the significand
+; doubled that many times. For a negative one, `2^-k` is `5^k / 10^k`, so it is
+; the significand multiplied by five that many times with the decimal point
+; moved. Neither step divides, and no float is ever scaled by a power of ten,
+; which is where a formatter written the other way loses its digits.
+;
+; The printed form is plain decimal, seventeen significant digits, ties to even
+; (`D-098`). There is no exponent form because the language has no exponent
+; literal, and output that the compiler cannot read back would be a seam.
+
+(take core:option Option)
+(take core:string byte-at concat equals substring)
+
+(export from-f64 to-f64)
+
+(extern "sl_rt_f64_bits" (raw-bits (value f64)) -> i64)
+
+(extern "sl_rt_f64_from_bits" (raw-from-bits (bits i64)) -> f64)
+
+; A finite double is `significand * 2^exponent`; `kind` is `0` for one of
+; those, `1` for an infinity and `2` for a NaN.
+(struct Parts
+  ((kind i64) (negative bool) (significand i64) (exponent i64)))
+
+; The seventeen kept digits and where their decimal point falls, which is what
+; rounding can move and the digits alone cannot say.
+(struct Rounded ((digits (List i64)) (point i64)))
+
+; There are no bitwise operators and `2^63` is not a literal, so the sign bit
+; comes off in two halves that are.
+(fn without-sign ((bits i64)) -> i64
+  (if (< bits 0)
+    (+ (+ bits 4611686018427387904) 4611686018427387904)
+    bits))
+
+(fn with-sign ((bits i64) (negative bool)) -> i64
+  (if negative
+    (- (- bits 4611686018427387904) 4611686018427387904)
+    bits))
+
+; The exponent field is biased by 1023 and the significand carries an implicit
+; bit, except at the bottom of the range where every subnormal shares the one
+; exponent and carries none.
+(fn classify ((value f64)) -> Parts
+  (let bits (raw-bits value))
+  (let negative (< bits 0))
+  (let magnitude (without-sign bits))
+  (let biased (/ magnitude 4503599627370496))
+  (let fraction (- magnitude (* biased 4503599627370496)))
+  (if (= biased 2047)
+    (if (= fraction 0)
+      (Parts :kind 1 :negative negative :significand 0 :exponent 0)
+      (Parts :kind 2 :negative negative :significand 0 :exponent 0))
+    (if (= biased 0)
+      (Parts
+        :kind 0
+        :negative negative
+        :significand fraction
+        :exponent (- 0 1074))
+      (Parts
+        :kind 0
+        :negative negative
+        :significand (+ fraction 4503599627370496)
+        :exponent (- biased 1075)))))
+
+; A number is a list of decimal digits, least significant first, with no
+; leading zero and never empty — zero is one digit and not none.
+
+(fn digits-of ((value i64)) -> (List i64)
+  (let mut rest (/ value 10))
+  (let mut out (list (- value (* rest 10))))
+  (while (> rest 0)
+    (let next (/ rest 10))
+    (push (&mut out) (- rest (* next 10)))
+    (set rest next))
+  out)
+
+; A position off either end of the list is a zero: dropping a leading zero did
+; not move the digits below it, and a fraction may be shorter than its own
+; point.
+(fn digit-at ((number (& (List i64))) (index i64)) -> i64
+  (if (< index (len number)) (get number index) 0))
+
+; Digits counted from the most significant end instead.
+(fn digit-from-top ((number (& (List i64))) (width i64) (place i64)) -> i64
+  (let index (- (- width 1) place))
+  (if (< index 0) 0 (get number index)))
+
+; `base^exponent`, for the exponents the scaling loops group by.
+(fn power ((base i64) (exponent i64)) -> i64
+  (let mut total 1)
+  (let mut remaining exponent)
+  (while (> remaining 0)
+    (set total (* total base))
+    (set remaining (- remaining 1)))
+  total)
+
+; One pass of schoolbook multiplication. Nothing can assign an element, so the
+; answer is a new list; the first digit is done outside the loop because a
+; `let` has no expected type and an empty `(list)` needs one (`D-096`).
+;
+; The factor is not limited to a digit. A carry settles at no more than the
+; factor itself, so the product stays inside an `i64` for any factor below
+; `2^63 / 10`, and one pass by `5^25` does the work of twenty-five by five.
+; Arithmetic traps, so a factor chosen too large would abort rather than wrap.
+(fn multiply-small ((number (& (List i64))) (factor i64)) -> (List i64)
+  (let size (len number))
+  (let first (* (get number 0) factor))
+  (let mut carry (/ first 10))
+  (let mut out (list (- first (* carry 10))))
+  (let mut index 1)
+  (while (< index size)
+    (let product (+ (* (get number index) factor) carry))
+    (set carry (/ product 10))
+    (push (&mut out) (- product (* carry 10)))
+    (set index (+ index 1)))
+  (while (> carry 0)
+    (let next (/ carry 10))
+    (push (&mut out) (- carry (* next 10)))
+    (set carry next))
+  out)
+
+(fn tail-from ((number (& (List i64))) (start i64)) -> (List i64)
+  (let size (len number))
+  (let mut out (list (get number start)))
+  (let mut index (+ start 1))
+  (while (< index size)
+    (push (&mut out) (get number index))
+    (set index (+ index 1)))
+  out)
+
+; Leading zeros sit at the top of a least-significant-first list. One digit
+; always survives.
+(fn without-high-zeros ((number (& (List i64)))) -> (List i64)
+  (let mut top (- (len number) 1))
+  (while (if (> top 0) (= (get number top) 0) false)
+    (set top (- top 1)))
+  (let mut out (list (get number 0)))
+  (let mut index 1)
+  (while (< index (+ top 1))
+    (push (&mut out) (get number index))
+    (set index (+ index 1)))
+  out)
+
+; Trailing zeros sit at the bottom. One digit always survives here too, so a
+; whole number still has something after its point.
+(fn without-low-zeros ((number (& (List i64)))) -> (List i64)
+  (let size (len number))
+  (let mut start 0)
+  (while (if (< start (- size 1)) (= (get number start) 0) false)
+    (set start (+ start 1)))
+  (tail-from number start))
+
+; `+1` at the least significant end. Nines become a one and zeros, one digit
+; longer, and the caller is what knows the point moved.
+(fn increment ((number (& (List i64)))) -> (List i64)
+  (let size (len number))
+  (let first (+ (get number 0) 1))
+  (let mut carry (/ first 10))
+  (let mut out (list (- first (* carry 10))))
+  (let mut index 1)
+  (while (< index size)
+    (let sum (+ (get number index) carry))
+    (set carry (/ sum 10))
+    (push (&mut out) (- sum (* carry 10)))
+    (set index (+ index 1)))
+  (if (> carry 0) (push (&mut out) carry) ())
+  out)
+
+; The exact digits of `significand * 2^exponent`. When the exponent is negative
+; they are the digits of `significand * 5^-exponent`, and the caller puts the
+; point that many places from the bottom.
+(fn scaled-digits ((significand i64) (exponent i64)) -> (List i64)
+  (let below (< exponent 0))
+  (let base (if below 5 2))
+  ; The largest grouping each base allows: `5^25` and `2^59` are both under
+  ; `2^63 / 10`, and one more of either is not.
+  (let group (if below 25 59))
+  (let mut remaining (if below (- 0 exponent) exponent))
+  (let mut out (digits-of significand))
+  (while (> remaining 0)
+    (let step (if (< remaining group) remaining group))
+    (let next (multiply-small (& out) (power base step)))
+    (set out next)
+    (set remaining (- remaining step)))
+  out)
+
+; Half rounds to even, and telling half from just over it means reading every
+; digit below the cut — but only until one of them is not a zero.
+(fn rounds-up ((number (& (List i64))) (kept i64) (lowest-kept i64)) -> bool
+  (let cut (- (- (len number) kept) 1))
+  (let next (get number cut))
+  (if (> next 5)
+    true
+    (if (< next 5)
+      false
+      (do
+        (let mut index (- cut 1))
+        (let mut rest false)
+        (while (> index (- 0 1))
+          (if (> (get number index) 0) (do (set rest true) (break)) ())
+          (set index (- index 1)))
+        (if rest true (= (- lowest-kept (* (/ lowest-kept 2) 2)) 1))))))
+
+; Seventeen digits is the round-trip width, and fewer than that are exact
+; already (`D-098`).
+(fn round-to-width ((number (List i64)) (point i64)) -> Rounded
+  (let size (len (& number)))
+  (if (< size 18)
+    (Rounded :digits number :point point)
+    (do
+      (let lowest-kept (get (& number) (- size 17)))
+      (let up (rounds-up (& number) 17 lowest-kept))
+      (let kept (tail-from (& number) (- size 17)))
+      (if up
+        (do
+          (let raised (increment (& kept)))
+          (if (> (len (& raised)) 17)
+            (Rounded :digits (tail-from (& raised) 1) :point (+ point 1))
+            (Rounded :digits raised :point point)))
+        (Rounded :digits kept :point point)))))
+
+; A `String` is built by concatenation and a one-character one is the smallest
+; thing to start from, which is why `core:string:from-i64` keeps a table like
+; this too. Going through `from-bytes` instead would need a `Slice`, and then
+; every program that prints anything would link the slice runtime.
+(fn digit-text ((digit i64)) -> String
+  (let table "0123456789")
+  (substring (& table) digit (+ digit 1)))
+
+(fn with-digit ((text (& String)) (digit i64)) -> String
+  (let glyph (digit-text digit))
+  (concat text (& glyph)))
+
+; `point` counts digits before the decimal point, from the most significant
+; one. It can be zero or less, which is a value below one, and it can pass the
+; digit count, which is a whole number with zeros before the point.
+(fn render-digits ((number (& (List i64))) (point i64)) -> String
+  (let width (len number))
+  (let mut text
+    (if (< point 1) "0" (digit-text (get number (- width 1)))))
+  (let mut place (if (< point 1) 0 1))
+  (while (< place point)
+    (let next (with-digit (& text) (digit-from-top number width place)))
+    (set text next)
+    (set place (+ place 1)))
+  (let dot ".")
+  (let mut whole (concat (& text) (& dot)))
+  (let mut gap point)
+  (while (< gap 0)
+    (let next (with-digit (& whole) 0))
+    (set whole next)
+    (set gap (+ gap 1)))
+  (let mut index (if (< point 0) 0 point))
+  (while (< index width)
+    (let next (with-digit (& whole) (digit-from-top number width index)))
+    (set whole next)
+    (set index (+ index 1)))
+  (if (< point width) whole (with-digit (& whole) 0)))
+
+(fn render ((number (& (List i64))) (point i64) (negative bool)) -> String
+  (let body (render-digits number point))
+  (if negative
+    (do
+      (let sign "-")
+      (concat (& sign) (& body)))
+    body))
+
+(fn from-f64 ((value f64)) -> String
+  (let parts (classify value))
+  (if (= (. parts kind) 2)
+    "nan"
+    (if (= (. parts kind) 1)
+      (if (. parts negative) "-inf" "inf")
+      (if (= (. parts significand) 0)
+        (if (. parts negative) "-0.0" "0.0")
+        (do
+          (let below
+            (if (< (. parts exponent) 0) (- 0 (. parts exponent)) 0))
+          (let scaled
+            (scaled-digits (. parts significand) (. parts exponent)))
+          (let point (- (len (& scaled)) below))
+          ; A field cannot be borrowed and a struct is how two answers come
+          ; back, so the pair is taken apart the way any other one is.
+          (match (round-to-width scaled point)
+            ((Rounded :digits chosen :point placed)
+              (do
+                (let kept (without-low-zeros (& chosen)))
+                (render (& kept) placed (. parts negative))))))))))
+
+; The value read as an integer, when it is known to have at most sixteen digits
+; and therefore to fit.
+(fn integer-part ((number (& (List i64))) (below i64)) -> i64
+  (let mut index (- (len number) 1))
+  (let mut total 0)
+  (while (> index (- below 1))
+    (set total (+ (* total 10) (get number index)))
+    (set index (- index 1)))
+  total)
+
+; Where the integer part stands against the two powers of two a normal
+; significand lies between. Sixteen digits is the only width that can be either
+; side of both, so it is the only one that has to be added up.
+(fn compare-magnitude ((number (& (List i64))) (below i64)) -> i64
+  (let width (- (len number) below))
+  (if (> width 16)
+    1
+    (if (< width 16)
+      (- 0 1)
+      (do
+        (let value (integer-part number below))
+        (if (> value 9007199254740991)
+          1
+          (if (< value 4503599627370496) (- 0 1) 0))))))
+
+; The same half-to-even rule the printer uses, read off the digits below the
+; point instead of below a cut.
+(fn fraction-rounds-up
+  ((number (& (List i64))) (below i64) (mantissa i64)) -> bool
+  (if (< below 1)
+    false
+    (do
+      (let lead (digit-at number (- below 1)))
+      (if (> lead 5)
+        true
+        (if (< lead 5)
+          false
+          (do
+            (let mut index (- below 2))
+            (let mut rest false)
+            (while (> index (- 0 1))
+              (if (> (digit-at number index) 0)
+                (do (set rest true) (break))
+                ())
+              (set index (- index 1)))
+            (if rest
+              true
+              (= (- mantissa (* (/ mantissa 2) 2)) 1))))))))
+
+; `mantissa * 2^exponent` as the bits spell it: a subnormal is the shared
+; exponent with no implicit bit, and everything else carries one.
+(fn encode ((mantissa i64) (exponent i64) (negative bool)) -> f64
+  (if (< mantissa 4503599627370496)
+    (raw-from-bits (with-sign mantissa negative))
+    (do
+      (let biased (+ exponent 1075))
+      (let fraction (- mantissa 4503599627370496))
+      (raw-from-bits
+        (with-sign (+ (* biased 4503599627370496) fraction) negative)))))
+
+; Halving is `* 5` with the point one place further in, doubling is `* 2`, and
+; the two loops are exclusive: halving stops below `2^53` and doubling from
+; below `2^52` cannot reach it. Doubling also stops at the exponent every
+; subnormal shares, which is where a mantissa is allowed to stay small.
+(fn assemble
+  ((number (List i64)) (below i64) (negative bool)) -> f64
+  (let infinity 9218868437227405312)
+  (if (if (= (len (& number)) 1) (= (get (& number) 0) 0) false)
+    (raw-from-bits (with-sign 0 negative))
+    (do
+      (let mut digits number)
+      (let mut point below)
+      (let mut exponent 0)
+      (let mut huge false)
+      (while (if huge false (> (compare-magnitude (& digits) point) 0))
+        ; Three halvings per surplus digit is fewer than the 3.32 it takes to
+        ; lose one, so a group never passes the target and the last few steps
+        ; are single ones.
+        (let excess (- (- (len (& digits)) point) 17))
+        (let step
+          (if (< excess 1) 1 (if (> excess 8) 25 (* excess 3))))
+        (let next (multiply-small (& digits) (power 5 step)))
+        (set digits next)
+        (set point (+ point step))
+        (set exponent (+ exponent step))
+        (if (> exponent 972) (set huge true) ()))
+      (if huge
+        (raw-from-bits (with-sign infinity negative))
+        (do
+          (while (if (> exponent (- 0 1074))
+              (< (compare-magnitude (& digits) point) 0)
+              false)
+            (let deficit (- 16 (- (len (& digits)) point)))
+            (let room (+ exponent 1074))
+            (let wanted
+              (if (< deficit 1) 1 (if (> deficit 19) 59 (* deficit 3))))
+            (let step (if (< room wanted) room wanted))
+            (let next (multiply-small (& digits) (power 2 step)))
+            (set digits next)
+            (set exponent (- exponent step)))
+          (let mut mantissa (integer-part (& digits) point))
+          (if (fraction-rounds-up (& digits) point mantissa)
+            (set mantissa (+ mantissa 1))
+            ())
+          (if (= mantissa 9007199254740992)
+            (do
+              (set mantissa 4503599627370496)
+              (set exponent (+ exponent 1)))
+            ())
+          (if (> exponent 971)
+            (raw-from-bits (with-sign infinity negative))
+            (encode mantissa exponent negative)))))))
+
+; `-1` when there is no point.
+(fn find-point ((text (& String)) (start i64) (size i64)) -> i64
+  (let mut index start)
+  (let mut found (- 0 1))
+  (while (< index size)
+    (if (= (byte-at text index) 46) (do (set found index) (break)) ())
+    (set index (+ index 1)))
+  found)
+
+; Digits, with at most one point and a digit on each side of it. A second point
+; fails the digit test and is refused there.
+(fn well-formed
+  ((text (& String)) (start i64) (size i64) (point i64)) -> bool
+  (if (< size (+ start 1))
+    false
+    (if (if (> point (- 0 1))
+        (if (= point start) true (= point (- size 1)))
+        false)
+      false
+      (do
+        (let mut index start)
+        (let mut ok true)
+        (while (< index size)
+          (let byte (byte-at text index))
+          (if (= index point)
+            ()
+            (if (if (< byte 48) true (> byte 57))
+              (do (set ok false) (break))
+              ()))
+          (set index (+ index 1)))
+        ok))))
+
+; Backwards, because a number is stored least significant first and the last
+; character is always a digit.
+(fn collect-digits
+  ((text (& String)) (start i64) (size i64) (point i64)) -> (List i64)
+  (let mut out (list (- (byte-at text (- size 1)) 48)))
+  (let mut index (- size 2))
+  (while (> index (- start 1))
+    (if (= index point)
+      ()
+      (push (&mut out) (- (byte-at text index) 48)))
+    (set index (- index 1)))
+  out)
+
+; Everything `from-f64` writes, and a whole number with no point. Anything else
+; is `None`; a value too large for the type reads as an infinity and one too
+; small as a zero, because both are values of the type (`D-098`).
+(fn to-f64 ((text (& String))) -> (Option f64)
+  (let nan-name "nan")
+  (let infinity-name "inf")
+  (let negative-infinity-name "-inf")
+  (if (equals text (& nan-name))
+    (Option:Some (raw-from-bits 9221120237041090560))
+    (if (equals text (& infinity-name))
+      (Option:Some (raw-from-bits 9218868437227405312))
+      (if (equals text (& negative-infinity-name))
+        (Option:Some (raw-from-bits (with-sign 9218868437227405312 true)))
+        (do
+          (let size (len text))
+          (let negative (if (= size 0) false (= (byte-at text 0) 45)))
+          (let start (if negative 1 0))
+          (let point (find-point text start size))
+          (if (well-formed text start size point)
+            (do
+              (let below (if (< point 0) 0 (- (- size point) 1)))
+              (let raw (collect-digits text start size point))
+              (let digits (without-high-zeros (& raw)))
+              (Option:Some (assemble digits below negative)))
+            (Option:None)))))))

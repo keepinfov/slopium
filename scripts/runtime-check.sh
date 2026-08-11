@@ -31,6 +31,7 @@ PROBE
 cat >"$check_dir/runtime.slp" <<'SLOPIUM'
 (take std:io println println-i64 read-i64)
 (take std:string concat from-i64 split substring to-i64 trim)
+(take std:float from-f64 println-f64 to-f64)
 (take std:process arg args-len)
 (take std:fs delete exists read write Error)
 (take std:prelude Option Result)
@@ -57,6 +58,19 @@ cat >"$check_dir/runtime.slp" <<'SLOPIUM'
 
 (fn shorter ((items (& (List String))) (left i64) (right i64)) -> bool
   (< (len (get-ref items left)) (len (get-ref items right))))
+
+; A subnormal, spelled out, because there is no exponent literal to spell it
+; with (`D-098`). It is the value whose conversion allocates the most.
+(fn tiny-text () -> String
+  (let zero "0")
+  (let mut text "0.")
+  (let mut index 0)
+  (while (< index 322)
+    (let next (concat (& text) (& zero)))
+    (set text next)
+    (set index (+ index 1)))
+  (let one "1")
+  (concat (& text) (& one)))
 
 (extern "probe_strlen" (probe-strlen (text (& String))) -> i64)
 (extern "probe_slice" (probe-slice (values (& (Slice i64)))) -> i64)
@@ -119,6 +133,16 @@ cat >"$check_dir/runtime.slp" <<'SLOPIUM'
   (let maybe-name (option-map (Option:Some (clone (& rendered))) decorate))
   (let name (unwrap-or maybe-name "none"))
   (println (& name))
+  ; `core:float`. One conversion builds and discards several hundred
+  ; intermediate digit lists and as many strings, and the subnormal path is
+  ; where that count is highest — a formatter that kept one of them would leak
+  ; here and nowhere else in the suite.
+  (println-f64 (/ 1.0 3.0))
+  (let tiny (tiny-text))
+  (let subnormal (unwrap-or (to-f64 (& tiny)) 0.0))
+  (println-f64 subnormal)
+  (let written (from-f64 subnormal))
+  (println-i64 (len (& written)))
   (let message (Message:Text "payload"))
   (let mut values (list number 2 3))
   (do (push (&mut values) 4))

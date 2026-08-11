@@ -230,7 +230,7 @@ itself lives one level lower again, in `slopium-std`: the sources are ordinary
 `.slp` files under `std/`, and the compiler hands them to name resolution while
 the manager hashes them into the lock, so those two cannot disagree about what
 the library contains (`D-076`). There are two bundled packages — `core`, which
-carries `Option`, `Result`, `string` and the language items, and `std`, which
+carries `Option`, `Result`, `string`, `float` and the language items, and `std`, which
 carries `io`, `process` and `fs`, depends on `core`, and re-exports its
 language items through a `prelude` module so that exactly one direct dependency
 ever declares them (`D-082`). `std:string` re-exports `core:string` for the
@@ -306,7 +306,10 @@ Generated programs link a small C runtime through the stable `sl_rt_*` ABI. It
 provides allocation, strings, owned lists/arrays, borrowed slice descriptors,
 printing, input, files, and process arguments. It does not evaluate source or
 own language semantics, and since v0.5.3 it does not format or parse a number
-either — that is Slopium, in `core:string` (`D-086`, `D-087`). Generated clone/drop helpers recursively copy and destroy
+either — that is Slopium, in `core:string` (`D-086`, `D-087`). A float is the
+same: `sl_rt_f64_bits` and `sl_rt_f64_from_bits` reinterpret one machine word
+and do nothing else, and every digit of a decimal expansion is computed in
+`core:float` (`D-097`). Generated clone/drop helpers recursively copy and destroy
 collection elements, structs, and enum payloads.
 
 It is two translation units, and the seam between them is the boundary a
@@ -340,8 +343,9 @@ freestanding half before a `-none` triple exists.
 
 `scripts/core-check.sh` is the check that makes this real rather than
 aspirational. It builds a `core`-only program — one that sends its answer out
-through `core:string` and reads it back, so the string library is covered too
-(`D-083`) — links it against `slop_rt_core.o` with `-nostdlib` and a supplied
+through `core:string` and `core:float` and reads it back, so the string and
+float libraries are covered too (`D-083`, `D-097`) — links it against
+`slop_rt_core.o` with `-nostdlib` and a supplied
 `_start`, requires `nm -u` to show nothing but the four hooks, and runs it. The runtime ABI freezes at v0.8,
 and freezing a half nothing had ever linked would be freezing a guess.
 

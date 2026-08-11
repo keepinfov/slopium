@@ -36,9 +36,16 @@ allowed_undefined="sl_rt_abort sl_rt_alloc sl_rt_free sl_rt_panic"
 # The answer goes out through `core:string` and comes back, so the string half
 # of the library is linked with `-nostdlib` on every run (`D-083`). A primitive
 # that reached for libc fails here.
+#
+# Since v0.7.2 it goes out through `core:float` as well. That is the exit
+# condition of the milestone in one line — a program with no C library prints a
+# float — and `-1/3` is the value that makes it mean something: negative,
+# non-terminating in binary, and needing all seventeen digits to come back as
+# itself (`D-097`, `D-098`).
 cat > "$work/program.slp" <<'SLP'
 (take core:option Option)
 (take core:string from-i64 to-i64)
+(take core:float from-f64 to-f64)
 
 (export answer)
 
@@ -48,7 +55,13 @@ cat > "$work/program.slp" <<'SLP'
   (let total (+ (get (& values) 0) (+ (get (& values) 1) (get (& values) 2))))
   (let text (from-i64 total))
   (match (to-i64 (& text))
-    ((Option:Some parsed) parsed)
+    ((Option:Some parsed)
+      (do
+        (let third (/ (- 0.0 1.0) 3.0))
+        (let written (from-f64 third))
+        (match (to-f64 (& written))
+          ((Option:Some restored) (if (= restored third) parsed 0))
+          ((Option:None) 0))))
     ((Option:None) 0)))
 SLP
 

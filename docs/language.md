@@ -72,7 +72,8 @@ Numeric conversions are never implicit. `(as i64 value)` is the one that exists
 (`D-090`): it widens an `i32`, and every other pair — narrowing, truncating,
 anything touching `f64` — is refused by name. The form takes a target type
 rather than a value, so what it converts to is read the way a type is read and
-not the way a variable is.
+not the way a variable is. Turning an `f64` into an integer is not in the
+vocabulary at all; turning one into text is `from-f64`, in the library.
 
 `+`, `-`, `*`, `/`, `<`, and `>` take two operands of one numeric type. `=`
 takes two `bool`, `i32`, `i64`, or `f64` operands and nothing else (`D-089`):
@@ -246,10 +247,11 @@ ordinary modules of the bundled library, written in Slopium over `extern`
 declarations, and a program that uses one says so.
 
 The library is two packages. `core` is what a program with no C library under
-it can have — `option`, `result`, `list` and `string`. `std` is `core` plus
-what needs an operating system — `io`, `process` and `fs` — and it re-exports
-`core` through `std:prelude`, `std:option`, `std:result`, `std:list` and
-`std:string`, so a package that depends on `std` alone reaches everything by
+it can have — `option`, `result`, `list`, `string` and `float`. `std` is `core`
+plus what needs an operating system — `io`, `process` and `fs` — and it
+re-exports `core` through `std:prelude`, `std:option`, `std:result`,
+`std:list`, `std:string` and `std:float`, so a package that depends on `std`
+alone reaches everything by
 that name. The combinators live in modules of their own rather than in
 `prelude` because `option` and `result` both call theirs `map`.
 
@@ -317,6 +319,43 @@ byte, and `from-i64` and `to-i64` between a number and its text. `to-i64`
 returns `(Option i64)` and refuses anything that is not an optional `-`
 followed by digits, including a number too large to hold.
 
+`std:float` is the float, kept apart from `std:string` and `std:io` rather
+than split between them: `from-f64`, `to-f64`, `print-f64`, `println-f64` and
+`read-f64`. A whole module is one section of code, so taking one brings
+everything it calls, and putting these beside `from-i64` and `println-i64` made
+the smallest program that prints a word grow from 11,692 bytes of code to
+26,484. A program pays for a float when it mentions one.
+
+**A printed `f64` is plain decimal** — an optional `-`, digits, a
+`.`, and digits, with at least one digit on each side of the point — rounded to
+seventeen significant digits, ties to even, with trailing fractional zeros
+removed and one always kept, so `1.0` prints as `1.0` and `0.1` prints as
+`0.10000000000000001`. `nan`, `inf` and `-inf` name the three values that have
+no digits, and `-0.0` prints its sign.
+
+There is no exponent form and there will not be one while the language has no
+exponent literal (`D-098`): `1.5e10` is not source, so printing an exponent
+would produce text the compiler could not read back. Plain decimal costs
+nothing but length, and only at the extremes — the largest `f64` is 309 digits
+and the smallest subnormal is 342 characters. Seventeen digits is the width at
+which `(to-f64 (from-f64 v))` is `v` for every `v`, and `from-f64` is the only
+way to observe an `f64`, so it does not round away bits that nothing else could
+recover.
+
+`to-f64` accepts everything `from-f64` writes, plus a whole number with no
+point, and answers `None` for anything else. It is correctly rounded, ties to
+even, over the whole range: a value too large for the type reads as an infinity
+and one too small as a zero, because both are values of the type. That is
+unlike `to-i64`, which answers `None` on overflow — an `i64` has nothing to
+overflow to.
+
+None of this is C. `core:float` is Slopium over two runtime primitives that
+read and write the bit pattern of a double and do nothing else, so a program
+with no C library can print a number it computed (`D-097`). The digits are
+exact rather than approximate: a double is `significand * 2^exponent`, and that
+product is a finite decimal, reached by multiplying an integer by two or by
+five and never by scaling the float itself.
+
 `std:io` has `print` and `println` over `(& String)`, `print-i64`,
 `println-i64`, `print-bool` and `println-bool`, `read-line` returning
 `(Option String)` without LF/CRLF, and `read-i64` returning `(Option i64)`.
@@ -324,7 +363,9 @@ There are no traits and none are planned (`D-088`), so one name cannot print
 every printable type (`D-078`); the widths are separate functions, and their
 bodies are Slopium over `from-i64`. There is no `println-i32` and there will
 not be one: an `i32` reaches `println-i64` as `(println-i64 (as i64 value))`,
-which is the debt `D-086` named and `D-090` paid.
+which is the debt `D-086` named and `D-090` paid. `println-f64` is in
+`std:float` for the size reason above, not because it is a different kind of
+thing.
 
 `std:fs` reads and writes whole files: `read`, `write`, `exists` and `delete`,
 each taking a path, returning `(Result T Error)` where `Error` carries an

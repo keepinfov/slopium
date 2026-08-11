@@ -1,0 +1,45 @@
+; Floats, for a hosted package.
+;
+; A module of its own rather than `from-f64` in `std:string` beside `from-i64`
+; and `println-f64` in `std:io` beside `println-i64`, which is where symmetry
+; would have put them. A whole Slopium module is one `.text` section, so taking
+; one brings everything it calls, and a decimal formatter is not small: with
+; these five in `std:io` and `std:string`, the smallest program that prints a
+; word grew from 11,692 bytes of code to 26,484 (`D-097`).
+;
+; So the rule the rest of the library already follows applies here too — a type
+; gets a module, the way `option`, `result` and `list` do — and a program pays
+; for a float only when it mentions one.
+
+(take core:option Option)
+(take core:float from-f64 to-f64)
+(take std:io print println read-line)
+(take std:string trim)
+
+(export
+  print-f64
+  println-f64
+  read-f64
+  (core:float:from-f64 :as from-f64)
+  (core:float:to-f64 :as to-f64))
+
+; Plain decimal, seventeen significant digits, and no exponent form ever
+; (`D-098`) — so a printed float is also something the compiler can read.
+(fn print-f64 ((value f64)) -> unit
+  (let text (from-f64 value))
+  (print (& text)))
+
+(fn println-f64 ((value f64)) -> unit
+  (let text (from-f64 value))
+  (println (& text)))
+
+; A line off a terminal usually has spaces around it, and a line that is only
+; spaces is not a number, so the trim happens here and not in `to-f64` — the
+; same division `read-i64` makes.
+(fn read-f64 () -> (Option f64)
+  (match (read-line)
+    ((Option:Some line)
+      (do
+        (let text (trim (& line)))
+        (to-f64 (& text))))
+    ((Option:None) (Option:None))))
