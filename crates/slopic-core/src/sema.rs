@@ -453,6 +453,15 @@ struct Analyzer<'a> {
     /// Where each binding was consumed, so a loop can point at the move that
     /// its next iteration would repeat.
     move_sites: HashMap<BindingId, Span>,
+    /// Set while the arms of a `match` whose scrutinee is a borrow are typed
+    /// (`D-099`), holding the binding that borrow came from when it had one.
+    ///
+    /// Every binding a pattern makes underneath this is a borrow of the field it
+    /// names rather than the field itself, at every depth, which is why it is
+    /// state on the analyzer and not an argument: `type_pattern` recurses
+    /// through struct and enum fields and the answer never changes on the way
+    /// down.
+    pattern_borrow: Option<Option<BindingId>>,
     env: Environment,
 }
 
@@ -580,6 +589,7 @@ impl<'a> Analyzer<'a> {
             diagnostics: Vec::new(),
             next_binding: 0,
             move_sites: HashMap::new(),
+            pattern_borrow: None,
             env: Environment::default(),
         }
     }
@@ -1240,14 +1250,25 @@ impl<'a> Analyzer<'a> {
             // kept its loan for the rest of the scope, so a list could be
             // shown to a predicate or never mutated again but not both. One
             // call never noticed; `core:list:filter` is two.
+            //
+            // The argument is asked what loan it *carries* rather than whether
+            // it is spelled `(& x)`, which is the same omission one level down:
+            // `(get-ref (& items) index)` is a borrow of `items` and does not
+            // look like one, so handing the element to a predicate used to hold
+            // the list for the rest of the scope. A named borrow keeps its loan
+            // — `reference_loan` says it does not own one — because it can be
+            // used again after the call and the value behind it must stay put.
             if let TExprKind::Call { args, .. }
             | TExprKind::GenericCall { args, .. }
             | TExprKind::CallValue { args, .. } = &typed.kind
             {
-                for argument in args {
-                    if let TExprKind::Borrow { id, .. } = &argument.kind {
-                        self.env.discharge_loan(*id);
-                    }
+                for origin in args
+                    .iter()
+                    .filter_map(|argument| self.reference_loan(argument))
+                    .filter_map(|(origin, owns)| owns.then_some(origin))
+                    .collect::<Vec<_>>()
+                {
+                    self.env.discharge_loan(origin);
                 }
             }
         }
@@ -1804,8 +1825,24 @@ impl<'a> Analyzer<'a> {
         expected: Option<&Type>,
     ) -> TExpr {
         let value = self.expr(value, None);
-        let enum_name = self.enum_of_type(&value.ty);
-        let struct_name = match &value.ty {
+        // A `match` may look through a shared borrow (`D-099`), in which case
+        // everything below asks about what is behind it and every binding a
+        // pattern makes is a borrow.
+        let borrowed = matches!(value.ty, Type::Ref { mutable: false, .. });
+        if matches!(value.ty, Type::Ref { mutable: true, .. }) {
+            self.diagnostics.push(
+                Diagnostic::error(
+                    codes::NAME_OR_TYPE,
+                    self.file,
+                    value.span,
+                    format!("`match` does not look through `{}`", value.ty),
+                )
+                .with_help("a shared borrow can be matched; an exclusive one cannot"),
+            );
+        }
+        let scrutinee = value.ty.strip_ref().clone();
+        let enum_name = self.enum_of_type(&scrutinee);
+        let struct_name = match &scrutinee {
             Type::Named(name)
                 if self.structs.contains_key(name) || self.generated_structs.contains_key(name) =>
             {
@@ -1816,14 +1853,33 @@ impl<'a> Analyzer<'a> {
             }
             _ => None,
         };
-        if !matches!(value.ty, Type::Bool | Type::I32 | Type::I64)
-            && enum_name.is_none()
-            && struct_name.is_none()
-        {
-            self.error(
-                value.span,
-                format!("`match` does not support `{}`", value.ty),
-            );
+        if enum_name.is_none() && struct_name.is_none() {
+            if borrowed {
+                // Through a borrow the scalar cases have no meaning worth
+                // giving them: there is nothing to take apart, and the only
+                // thing anyone wants is the value itself.
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        codes::NAME_OR_TYPE,
+                        self.file,
+                        value.span,
+                        format!(
+                            "`match` through a borrow needs an enum or a struct, found `{}`",
+                            value.ty
+                        ),
+                    )
+                    .with_help("read a borrowed scalar with `clone` and match the value"),
+                );
+            } else if !matches!(scrutinee, Type::Bool | Type::I32 | Type::I64) {
+                self.error(
+                    value.span,
+                    format!("`match` does not support `{}`", value.ty),
+                );
+            }
+        }
+        let outer_borrow = self.pattern_borrow.take();
+        if borrowed {
+            self.pattern_borrow = Some(self.reference_loan(&value).map(|(origin, _)| origin));
         }
         let base = self.env.clone();
         let mut typed_arms = Vec::new();
@@ -1834,7 +1890,7 @@ impl<'a> Analyzer<'a> {
         for arm in arms {
             self.env = base.clone();
             self.env.push();
-            let pattern = self.type_pattern(&arm.pattern, &value.ty);
+            let pattern = self.type_pattern(&arm.pattern, &scrutinee);
             if pattern_irrefutable(&pattern) {
                 wildcard = true;
             }
@@ -1871,6 +1927,7 @@ impl<'a> Analyzer<'a> {
                 span: arm.span,
             });
         }
+        self.pattern_borrow = outer_borrow;
         self.env = base;
         if !arm_environments.is_empty() {
             for (id, binding) in &mut self.env.bindings {
@@ -1884,7 +1941,7 @@ impl<'a> Analyzer<'a> {
             }
         }
         let exhaustive = wildcard
-            || (value.ty == Type::Bool
+            || (scrutinee == Type::Bool
                 && seen.contains("bool:true")
                 && seen.contains("bool:false"))
             || enum_name.as_ref().is_some_and(|enum_name| {
@@ -1897,10 +1954,18 @@ impl<'a> Analyzer<'a> {
                     .filter(|variant| variant.enum_name == base)
                     .all(|variant| seen.contains(&format!("enum:{enum_name}:{}", variant.variant)))
             });
-        if !exhaustive {
+        // A scrutinee the analyzer could make no sense of has already been
+        // reported, and every arm's pattern with it. Saying the match is also
+        // non-exhaustive is a second diagnostic for the first one's cause, and
+        // the help it reaches for — a final `_` arm — is advice for an integer
+        // match the author is not writing.
+        let understood = enum_name.is_some()
+            || struct_name.is_some()
+            || matches!(scrutinee, Type::Bool | Type::I32 | Type::I64);
+        if !exhaustive && understood {
             self.diagnostics.push(
                 Diagnostic::error(codes::MATCH, self.file, expr.span, "non-exhaustive match")
-                    .with_help(if value.ty == Type::Bool {
+                    .with_help(if scrutinee == Type::Bool {
                         "cover both `true` and `false`, or add `_`"
                     } else if enum_name.is_some() {
                         "cover every enum variant, or add `_`"
@@ -1909,9 +1974,21 @@ impl<'a> Analyzer<'a> {
                     }),
             );
         }
+        let result_type = result_type.unwrap_or(Type::Unit);
+        // The loan a borrowed scrutinee took, released the way a call releases
+        // the one an argument took, and for the same reason: a value shown to a
+        // `match` and never mutated again is one thing, and a value that can
+        // never be mutated again because it was once matched is another. The
+        // arms have been typed and their bindings popped, so nothing derived
+        // from it is still live. A result that is itself a borrow keeps it.
+        if borrowed && !matches!(result_type, Type::Ref { .. } | Type::Slice(_)) {
+            if let TExprKind::Borrow { id, .. } = &value.kind {
+                self.env.discharge_loan(*id);
+            }
+        }
         self.typed(
             expr,
-            result_type.unwrap_or(Type::Unit),
+            result_type,
             TExprKind::Match {
                 value: Box::new(value),
                 arms: typed_arms,
@@ -1924,23 +2001,35 @@ impl<'a> Analyzer<'a> {
             PatternKind::Wildcard => TPattern::Wildcard,
             PatternKind::Binding(name) => {
                 let id = self.fresh_id();
+                // Through a borrow the pattern names a field it does not own,
+                // so what it binds is a borrow of that field (`D-099`). The
+                // type is the same for every field type, including one that is
+                // `Copy`: whether `T` is `Copy` is not known inside a generic
+                // body, and a binding's type has to be.
+                let ty = match self.pattern_borrow {
+                    Some(_) => Type::Ref {
+                        mutable: false,
+                        inner: Box::new(expected.clone()),
+                    },
+                    None => expected.clone(),
+                };
                 let binding = Binding {
                     id,
-                    ty: expected.clone(),
+                    ty: ty.clone(),
                     mutable: false,
                     state: OwnershipState::Available,
                     definition: pattern.span,
-                    borrowed_from: None,
+                    borrowed_from: self.pattern_borrow.flatten(),
                     owns_loan: false,
                 };
-                self.refuse_function_shadow(name, expected, pattern.span);
+                self.refuse_function_shadow(name, &ty, pattern.span);
                 if self.env.insert(name.clone(), binding).is_err() {
                     self.error(pattern.span, format!("duplicate pattern binding `{name}`"));
                 }
                 TPattern::Binding(TPatternBinding {
                     id,
                     name: name.clone(),
-                    ty: expected.clone(),
+                    ty,
                 })
             }
             PatternKind::Bool(value) => {
@@ -2397,8 +2486,13 @@ impl<'a> Analyzer<'a> {
         // `clone` crosses a borrow (`D-091`). Returning the borrow it was handed
         // made the call a no-op, and left the language with no way at all to
         // turn a `(& String)` into a `String`.
+        let borrowed = matches!(arg.ty, Type::Ref { .. });
         let result = arg.ty.strip_ref().clone();
-        if is_nothing_to_clone(&result) {
+        // Only an *owned* scalar has nothing to clone (`D-100`). A borrowed one
+        // has everything to clone: `(+ r 0)` and `(println-i64 r)` refuse a
+        // `(& i64)` too, so this is the only way to read one, and refusing it
+        // here is what left a borrowed scalar unreadable by any means.
+        if !borrowed && is_nothing_to_clone(&result) {
             self.diagnostics.push(
                 Diagnostic::error(
                     codes::NAME_OR_TYPE,
@@ -3397,7 +3491,9 @@ impl<'a> Analyzer<'a> {
 ///
 /// A scalar is copied by being used, so a `clone` of one is silence dressed as
 /// a call, and `D-091` makes it an error rather than let it read as a deep
-/// copy. The argument has already crossed its borrow when this is asked.
+/// copy. Asked only of an argument that was **owned**: through a borrow the
+/// same scalar is a load and the only reading of one the language has
+/// (`D-100`).
 fn is_nothing_to_clone(ty: &Type) -> bool {
     matches!(
         ty,

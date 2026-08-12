@@ -1,0 +1,119 @@
+; Reading through a borrow. `match` looks through a shared borrow and binds
+; every payload as a borrow of itself (`D-099`), and `clone` reads one out for
+; any type at all, scalars included (`D-100`). Together they are the
+; dereference the language had been missing, and neither adds a form.
+
+(take std:io println println-i64)
+(take std:string concat equals from-i64)
+(take std:option Option is-some is-none unwrap-or)
+(take std:result Result is-ok is-err)
+
+(struct Point ((x i64) (label String)))
+
+(enum Shape
+  Nothing
+  (Dot ((at Point)))
+  (Tag ((name String))))
+
+; The case that used to be a silent miscompile: a generic body reading a
+; borrowed element, instantiated once at a scalar and once at a `String`. Asking
+; the *generic* `T` whether a clone had anything to do answered no, and the
+; scalar instance returned a pointer.
+(fn first-of (T) ((items (& (List T)))) -> T
+  (clone (get-ref items 0)))
+
+; A borrow is what a payload binds to, so this reads a `(& T)` and not a `T`.
+(fn payload-or (T) ((value (& (Option T))) (fallback T)) -> T
+  (match value
+    ((Option:Some inner) (clone inner))
+    ((Option:None) fallback)))
+
+(fn label-of ((shape (& Shape))) -> String
+  (match shape
+    ((Shape:Nothing) "nothing")
+    ; Nested: the `Point` behind the borrow is borrowed too, and so is each of
+    ; its fields — one pointer-shaped and one not.
+    ((Shape:Dot (Point :x x :label label))
+      (do
+        (let number (from-i64 (clone x)))
+        (let gap "@")
+        (let head (concat label (& gap)))
+        (concat (& head) (& number))))
+    ((Shape:Tag name) (clone name))))
+
+(fn none-i64 () -> (Option i64)
+  (Option:None))
+
+(fn ok-i64 () -> (Result i64 String)
+  (Result:Ok 3))
+
+(fn err-i64 () -> (Result i64 String)
+  (Result:Err "no"))
+
+(fn main () -> i32
+  (let numbers (list 10 20))
+  (println-i64 (first-of (& numbers)))
+  (let words (list "alpha" "beta"))
+  (let word (first-of (& words)))
+  (println (& word))
+  (let some-number (Option:Some 41))
+  (println-i64 (payload-or (& some-number) 0))
+  (let some-text (Option:Some "text"))
+  (let text (payload-or (& some-text) "none"))
+  (println (& text))
+  (let dot (Shape:Dot (Point :x 42 :label "answer")))
+  ; Twice, because looking through a borrow consumes nothing.
+  (let once (label-of (& dot)))
+  (println (& once))
+  (let twice (label-of (& dot)))
+  (println (& twice))
+  (let tag (Shape:Tag "bare"))
+  (let named (label-of (& tag)))
+  (println (& named))
+  (let nothing (Shape:Nothing))
+  (let blank (label-of (& nothing)))
+  (println (& blank))
+  0)
+
+(test "a borrowed scalar reads as itself"
+  (let n 7)
+  (= 7 (clone (& n))))
+
+(test "a generic read works at a scalar and at a string"
+  (let numbers (list 5 6))
+  (let words (list "a"))
+  (let first (first-of (& words)))
+  (let expected "a")
+  (if (= 5 (first-of (& numbers)))
+    (equals (& first) (& expected))
+    false))
+
+(test "matching through a borrow leaves the value alone"
+  (let value (Option:Some 9))
+  (if (= 9 (payload-or (& value) 0))
+    (= 9 (payload-or (& value) 0))
+    false))
+
+(test "a question about an option does not consume it"
+  (let value (Option:Some 1))
+  (let missing (none-i64))
+  (if (is-some (& value))
+    (if (is-none (& missing))
+      (= 1 (unwrap-or value 0))
+      false)
+    false))
+
+(test "a question about a result does not consume it"
+  (let good (ok-i64))
+  (let bad (err-i64))
+  (if (is-ok (& good))
+    (if (is-err (& bad))
+      (if (is-ok (& good)) (is-err (& bad)) false)
+      false)
+    false))
+
+(test "a nested pattern borrows every field it reaches"
+  (let dot (Shape:Dot (Point :x 42 :label "answer")))
+  (let first (label-of (& dot)))
+  (let second (label-of (& dot)))
+  (equals (& first) (& second)))

@@ -649,8 +649,11 @@ impl<'a> Generator<'a> {
                 | Instruction::Binary { .. }
                 | Instruction::FnAddr { .. }
                 | Instruction::FieldLoad { .. }
+                | Instruction::FieldAddr { .. }
+                | Instruction::Load { .. }
                 | Instruction::EnumTag { .. }
-                | Instruction::EnumFieldLoad { .. } => false,
+                | Instruction::EnumFieldLoad { .. }
+                | Instruction::EnumFieldAddr { .. } => false,
             })
     }
 
@@ -801,6 +804,35 @@ impl<'a> Generator<'a> {
                 self.inst(Inst::Movq(destination, Reg("rax")));
             }
         }
+    }
+
+    /// `dst = base + offset`, the address of a field inside a pointer-shaped
+    /// aggregate.
+    ///
+    /// At offset zero the field's address *is* the base, so the arithmetic is a
+    /// copy — which also spares the assembler a `lea` with a zero displacement,
+    /// a form it and this encoder spell differently.
+    fn field_address(&mut self, dst: LocalId, base: LocalId, offset: usize) {
+        if offset == 0 {
+            self.copy(dst, base);
+            return;
+        }
+        self.inst(Inst::Mov(
+            reg("rax"),
+            operand(&self.alloc, self.registers, base),
+        ));
+        self.inst(Inst::Lea(
+            Reg("rcx"),
+            Operand::Mem(Mem {
+                size: None,
+                base: Reg("rax"),
+                disp: Some(offset as i64),
+            }),
+        ));
+        self.inst(Inst::Mov(
+            operand(&self.alloc, self.registers, dst),
+            reg("rcx"),
+        ));
     }
 
     /// Copies one local to another, going through `rax` only when both ends are
@@ -971,6 +1003,35 @@ impl<'a> Generator<'a> {
                 self.inst(Inst::Mov(
                     reg("rcx"),
                     Operand::slot(Size::Qword, Reg("rax"), (index * 8) as i64),
+                ));
+                self.inst(Inst::Mov(
+                    operand(&self.alloc, self.registers, *dst),
+                    reg("rcx"),
+                ));
+            }
+            // The address of a field, rather than the word in it (`D-099`). The
+            // zero-offset case is the base itself, and saying so keeps the
+            // assembler from being asked for `lea rcx, [rax+0]`.
+            Instruction::FieldAddr { dst, base, index } => {
+                self.field_address(*dst, *base, index * 8);
+            }
+            Instruction::EnumFieldAddr { dst, base, index } => {
+                self.field_address(*dst, *base, (index + 1) * 8);
+            }
+            // The dereference (`D-100`), and the same two moves `EnumTag` makes
+            // — a tag is the word at offset zero, which is what this is.
+            Instruction::Load { dst, src } => {
+                self.inst(Inst::Mov(
+                    reg("rax"),
+                    operand(&self.alloc, self.registers, *src),
+                ));
+                self.inst(Inst::Mov(
+                    reg("rcx"),
+                    Operand::Mem(Mem {
+                        size: Some(Size::Qword),
+                        base: Reg("rax"),
+                        disp: None,
+                    }),
                 ));
                 self.inst(Inst::Mov(
                     operand(&self.alloc, self.registers, *dst),

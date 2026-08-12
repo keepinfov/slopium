@@ -40,9 +40,12 @@ pub fn defs(instruction: &Instruction) -> Option<LocalId> {
         | Instruction::CallValue { dst, .. }
         | Instruction::StructNew { dst, .. }
         | Instruction::FieldLoad { dst, .. }
+        | Instruction::FieldAddr { dst, .. }
+        | Instruction::Load { dst, .. }
         | Instruction::EnumNew { dst, .. }
         | Instruction::EnumTag { dst, .. }
-        | Instruction::EnumFieldLoad { dst, .. } => Some(*dst),
+        | Instruction::EnumFieldLoad { dst, .. }
+        | Instruction::EnumFieldAddr { dst, .. } => Some(*dst),
         Instruction::Drop { .. } | Instruction::Free { .. } => None,
     }
 }
@@ -58,7 +61,9 @@ pub fn uses(instruction: &Instruction, out: &mut Vec<LocalId>) {
         | Instruction::ConstBool { .. }
         | Instruction::StringNew { .. }
         | Instruction::FnAddr { .. } => {}
-        Instruction::Assign { src, .. } | Instruction::AddressOf { src, .. } => out.push(*src),
+        Instruction::Assign { src, .. }
+        | Instruction::AddressOf { src, .. }
+        | Instruction::Load { src, .. } => out.push(*src),
         Instruction::Binary { lhs, rhs, .. } => {
             out.push(*lhs);
             out.push(*rhs);
@@ -75,8 +80,10 @@ pub fn uses(instruction: &Instruction, out: &mut Vec<LocalId>) {
             out.extend(fields.iter().copied())
         }
         Instruction::FieldLoad { base, .. }
+        | Instruction::FieldAddr { base, .. }
         | Instruction::EnumTag { base, .. }
-        | Instruction::EnumFieldLoad { base, .. } => out.push(*base),
+        | Instruction::EnumFieldLoad { base, .. }
+        | Instruction::EnumFieldAddr { base, .. } => out.push(*base),
         Instruction::Drop { local, .. } | Instruction::Free { local } => out.push(*local),
     }
 }

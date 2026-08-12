@@ -5,6 +5,8 @@
   (core:result:Result :as Result)
   (core:result:Ok :as Ok)
   (core:result:Err :as Err)
+  (core:result:is-ok :as is-ok)
+  (core:result:is-err :as is-err)
   (core:result:map :as map)
   (core:result:map-err :as map-err)
   (core:result:and-then :as and-then)

@@ -143,11 +143,14 @@ or be stored in aggregate fields or collection elements. Borrowed slices
 cannot be returned either. `clone` recursively copies strings, lists, arrays,
 structs, and enums. Generated drop glue recursively destroys them.
 
-`clone` crosses a borrow (`D-091`): `(clone text)` on a `(& String)` is a
-`String`, which is how a borrowed value is copied into an owned one. It refuses
-a `&mut`, and it refuses a scalar — a `bool`, an `i32`, an `i64` or an `f64` is
-copied by being used, so `(clone 42)` is an error rather than a call that does
-nothing.
+`clone` crosses a borrow (`D-091`, `D-100`): `(clone text)` on a `(& String)` is
+a `String`, and `(clone n)` on a `(& i64)` is an `i64`. This is how a borrowed
+value is read, and it is the only way — the language has no dereference operator
+and none is planned, because through a borrow this form already is one. It
+refuses a `&mut`. It refuses an *owned* scalar: a `bool`, an `i32`, an `i64` or
+an `f64` is copied by being used, so `(clone 42)` is an error rather than a call
+that does nothing. Reading one out of a borrow is never nothing, which is why
+the two cases differ.
 
 ## Control flow
 
@@ -185,6 +188,27 @@ Patterns can nest enum and named struct patterns. A bare name binds and moves
 the matched value; `_` discards it. Boolean and enum matches must be
 exhaustive or contain an irrefutable arm. Integer matches require a final
 irrefutable arm.
+
+A `match` also looks through a **shared borrow** of an enum or a struct
+(`D-099`), and then it takes nothing apart: the value stays where it was, and
+every name a pattern binds is a borrow of the field it names.
+
+```lisp
+(fn is-pointed ((message (& Message))) -> bool
+  (match message
+    ((Message:Pointed _) true)
+    ((Message:Empty) false)))
+
+(fn x-of ((point (& Point))) -> i64
+  (match point
+    ((Point :x x :label _) (clone x))))
+```
+
+`x` there is a `(& i64)`, not an `i64`, and `clone` is what reads it. The
+binding is a borrow for **every** field type, including a `Copy` one: inside a
+generic body, whether `T` is `Copy` is not known, and a binding's type has to
+be. An exclusive borrow cannot be matched, and a borrowed scalar has nothing to
+take apart — use `clone` and match the value.
 
 ## Collections
 
@@ -274,37 +298,33 @@ set: each is `None`, and a file operation that fails is an `Err` carrying an
 zero, an overflow — are the language's own, and they still print a normalized
 message and exit with status 101.
 
-`std:option` and `std:result` are the combinators. `Option` has `map`,
-`and-then`, `unwrap-or` and `or-else`; `Result` has those plus `map-err` and
-`ok`, which forgets why it failed and gives back an `Option`. These are what
-refusing traits costs, and having them is what makes the refusal honest
-(`D-088`). Each takes its value **by ownership**, because `match` does not work
-through a borrow; that is also why there is no `is-some`, which would have to
-consume what it only wanted to look at.
+`std:option` and `std:result` are the combinators. `Option` has `is-some`,
+`is-none`, `map`, `and-then`, `unwrap-or` and `or-else`; `Result` has `is-ok`,
+`is-err`, those four, plus `map-err` and `ok`, which forgets why it failed and
+gives back an `Option`. These are what refusing traits costs, and having them is
+what makes the refusal honest (`D-088`). A combinator takes its value **by
+ownership**, because it makes a new one out of it; a question takes a borrow and
+leaves the value where it was.
 
 `std:list` is `map`, `filter`, `fold`, `find` and `sort-by`. Two shapes of
-function appear here, and the difference is not stylistic. A function that
-consumes each element takes the element: `map` is `(Fn (T) U)` and `fold` is
-`(Fn (A T) A)`. A function that only looks at one takes **the borrowed list and
-an index**: `filter` and `find` are `(Fn ((& (List T)) i64) bool)` and
-`sort-by` is `(Fn ((& (List T)) i64 i64) bool)`, answering whether the first
-index belongs ahead of the second. Looking at an element without consuming it
-means borrowing it, and there is no way to read a `(& T)` — the language has no
-dereference, and `get` copies only a `Copy` element, which an unconstrained `T`
-is not. A borrowed list and an index is the one form that works for every `T`,
-because the caller writing the predicate knows what `T` is. `find` answers with
-an index, like `core:string:find`, because answering with the element would
-have to move it out of a list the caller still owns.
+function appear here, and the difference is ownership rather than style. A
+function that consumes each element takes the element: `map` is `(Fn (T) U)` and
+`fold` is `(Fn (A T) A)`. A function that only looks at one takes a borrow of
+it: `filter` and `find` are `(Fn ((& T)) bool)` and `sort-by` is
+`(Fn ((& T) (& T)) bool)`, answering whether the first element belongs ahead of
+the second. `find` answers with an index, like `core:string:find`, because
+answering with the element would have to move it out of a list the caller still
+owns.
 
 ```lisp
 (take std:list filter sort-by)
 
-(fn odd ((items (& (List i64))) (index i64)) -> bool
-  (let value (get items index))
+(fn odd ((item (& i64))) -> bool
+  (let value (clone item))
   (= 1 (- value (* (/ value 2) 2))))
 
-(fn ascending ((items (& (List i64))) (left i64) (right i64)) -> bool
-  (< (get items left) (get items right)))
+(fn ascending ((left (& i64)) (right (& i64))) -> bool
+  (< (clone left) (clone right)))
 
 (let kept (sort-by (filter (list 5 2 3 9) odd) ascending))
 ```

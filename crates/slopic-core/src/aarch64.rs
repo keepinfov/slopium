@@ -523,6 +523,26 @@ impl<'a> Generator<'a> {
         }
     }
 
+    /// `dst = base + offset`, the address of a field inside a pointer-shaped
+    /// aggregate.
+    ///
+    /// A field offset is a small multiple of eight, so the immediate form always
+    /// reaches; at zero the field's address is the base and the add is a copy.
+    fn field_address(&mut self, dst: LocalId, base: LocalId, offset: usize) {
+        let source = self.read(base, 1);
+        if offset == 0 {
+            self.write(dst, source);
+            return;
+        }
+        self.inst(Inst::ArithImm {
+            op: Arith::Add,
+            dst: X16,
+            src: source,
+            imm: offset as u32,
+        });
+        self.write(dst, X16);
+    }
+
     /// Builds a 64-bit constant, one 16-bit field at a time.
     ///
     /// AArch64 has no instruction that takes a 64-bit immediate, so every
@@ -896,6 +916,24 @@ impl<'a> Generator<'a> {
                     dst: X16,
                     base,
                     offset: Some(((index + 1) * 8) as u32),
+                });
+                self.write(*dst, X16);
+            }
+            // The address of a field rather than the word in it (`D-099`), and
+            // the dereference (`D-100`) — the second is `EnumTag` under another
+            // name, because a tag is the word at offset zero.
+            Instruction::FieldAddr { dst, base, index } => {
+                self.field_address(*dst, *base, index * 8);
+            }
+            Instruction::EnumFieldAddr { dst, base, index } => {
+                self.field_address(*dst, *base, (index + 1) * 8);
+            }
+            Instruction::Load { dst, src } => {
+                let base = self.read(*src, 1);
+                self.inst(Inst::Load {
+                    dst: X16,
+                    base,
+                    offset: None,
                 });
                 self.write(*dst, X16);
             }
@@ -1666,8 +1704,11 @@ fn calls_something(module: &MirModule, function: &MirFunction) -> bool {
             | Instruction::Binary { .. }
             | Instruction::FnAddr { .. }
             | Instruction::FieldLoad { .. }
+            | Instruction::FieldAddr { .. }
+            | Instruction::Load { .. }
             | Instruction::EnumTag { .. }
-            | Instruction::EnumFieldLoad { .. } => false,
+            | Instruction::EnumFieldLoad { .. }
+            | Instruction::EnumFieldAddr { .. } => false,
         })
 }
 

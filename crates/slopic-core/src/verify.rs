@@ -51,6 +51,7 @@ fn verify_module_after(file: &str, module: &MirModule, phase: Option<&str>) -> V
     {
         verify_extern_calls(file, module, function, phase, &mut errors);
         verify_indirect_calls(file, function, phase, &mut errors);
+        verify_borrow_reads(file, function, phase, &mut errors);
     }
     errors
 }
@@ -206,6 +207,88 @@ fn verify_indirect_calls(
                     "{where_} taking `{result:?}` as the result, which its type declares \
                      `{declared:?}`"
                 ));
+            }
+        }
+    }
+}
+
+/// Checks every read and every address taken through a borrow.
+///
+/// The split these three instructions rest on is invisible in the MIR itself: a
+/// borrow of a pointer-shaped value is that pointer, and a borrow of anything
+/// else is the address of a slot, so `EnumFieldLoad` and `EnumFieldAddr` are the
+/// right answer for different field types and each is garbage in the other's
+/// place. Getting it wrong reads a pointer as an integer or an integer as a
+/// pointer, which is exactly the miscompile `D-100` was written about — and the
+/// version of it that shipped was one lowering asking a *generic* type a
+/// question only the concrete one can answer.
+fn verify_borrow_reads(
+    file: &str,
+    function: &MirFunction,
+    phase: Option<&str>,
+    errors: &mut Vec<Diagnostic>,
+) {
+    let after = phase.map_or(String::new(), |phase| format!(" after {phase}"));
+    let mut report = |message: String| {
+        errors.push(Diagnostic::error(
+            codes::INTERNAL,
+            file,
+            function.span,
+            format!(
+                "internal compiler error: MIR verification failed{after} in `{}`: {message}; \
+                 this is a compiler bug",
+                function.name
+            ),
+        ));
+    };
+
+    let type_of = |local: usize| function.locals.get(local).map(|local| &local.ty);
+    for (index, block) in function.blocks.iter().enumerate() {
+        for (position, instruction) in block.instructions().enumerate() {
+            let where_ = format!("block {index} instruction {position}");
+            match instruction {
+                Instruction::Load { dst, src } => {
+                    // Out-of-range locals are already reported by the operand
+                    // check, so a missing type is not this pass's complaint.
+                    let (Some(dst_ty), Some(src_ty)) = (type_of(*dst), type_of(*src)) else {
+                        continue;
+                    };
+                    let Type::Ref { inner, .. } = src_ty else {
+                        report(format!(
+                            "{where_} reads through _{src}, which holds `{src_ty:?}` rather than \
+                             a borrow"
+                        ));
+                        continue;
+                    };
+                    if crate::lowering::is_pointer_like(inner) {
+                        report(format!(
+                            "{where_} reads through a borrow of `{inner:?}`, which is a pointer \
+                             already and has nothing behind it to load"
+                        ));
+                    }
+                    if dst_ty != inner.as_ref() {
+                        report(format!(
+                            "{where_} reads `{inner:?}` into a local of `{dst_ty:?}`"
+                        ));
+                    }
+                }
+                Instruction::FieldAddr { dst, .. } | Instruction::EnumFieldAddr { dst, .. } => {
+                    let Some(dst_ty) = type_of(*dst) else {
+                        continue;
+                    };
+                    match dst_ty {
+                        Type::Ref { inner, .. } if !crate::lowering::is_pointer_like(inner) => {}
+                        Type::Ref { inner, .. } => report(format!(
+                            "{where_} takes the address of a `{inner:?}` field, whose borrow is \
+                             the word in the slot and not the slot"
+                        )),
+                        _ => report(format!(
+                            "{where_} takes an address into a local of `{dst_ty:?}` rather than a \
+                             borrow"
+                        )),
+                    }
+                }
+                _ => {}
             }
         }
     }

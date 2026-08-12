@@ -1,7 +1,8 @@
-; `core:list`, and the convention that makes it work without closures: a
+; `core:list`, and the ownership that makes it work without closures: a
 ; function that consumes an element takes the element, and a function that only
-; looks at one takes the borrowed list and an index. There is no way to read a
-; `(& T)`, so the second form is the only one that works for every `T`.
+; looks at one takes a borrow of it. Until v0.7.3 the second kind took the
+; borrowed list and an index instead, on the belief that a `(& T)` could not be
+; used for anything — it always could, by whoever knows what `T` is (`D-099`).
 
 (take std:io println println-i64)
 (take std:string from-i64 concat)
@@ -18,26 +19,30 @@
   (let mark "!")
   (concat (& text) (& mark)))
 
-(fn odd ((items (& (List i64))) (index i64)) -> bool
-  (let value (get items index))
+; A borrowed scalar, which nothing could read before `D-100` and `clone` reads
+; now. The predicate is where the difference shows: this is an ordinary `i64`
+; from here on.
+(fn odd ((item (& i64))) -> bool
+  (let value (clone item))
   (= 1 (- value (* (/ value 2) 2))))
 
-(fn over-three ((items (& (List i64))) (index i64)) -> bool
-  (> (get items index) 3))
+(fn over-three ((item (& i64))) -> bool
+  (> (clone item) 3))
 
 (fn add ((total i64) (value i64)) -> i64
   (+ total value))
 
-(fn ascending ((items (& (List i64))) (left i64) (right i64)) -> bool
-  (< (get items left) (get items right)))
+(fn ascending ((left (& i64)) (right (& i64))) -> bool
+  (< (clone left) (clone right)))
 
-(fn descending ((items (& (List i64))) (left i64) (right i64)) -> bool
-  (> (get items left) (get items right)))
+(fn descending ((left (& i64)) (right (& i64))) -> bool
+  (> (clone left) (clone right)))
 
-; A comparator over elements that own memory, which is the case the borrowed
-; list exists for: `get` would refuse to copy a `String` out.
-(fn shorter ((items (& (List String))) (left i64) (right i64)) -> bool
-  (< (len (get-ref items left)) (len (get-ref items right))))
+; A comparator over elements that own memory. Two borrows of the same list are
+; alive at once here, which is what a comparator has always needed and what the
+; old shape hid inside `core:list`.
+(fn shorter ((left (& String)) (right (& String))) -> bool
+  (< (len left) (len right)))
 
 (fn empty-numbers () -> (List i64)
   (list))

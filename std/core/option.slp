@@ -5,17 +5,30 @@
 ; no more. `D-092` made a function a value and `D-095` let a generic function
 ; take a generic type, so the cost is paid here.
 ;
-; Every function takes its `Option` **by ownership**, because `match` does not
-; work through a borrow — in any code, not only generic code. That is also why
-; there is no `is-some`: asking which variant a value is would consume it, and
-; a combinator that consumes what it only wanted to look at is worse than not
-; having one.
+; A combinator takes its `Option` by ownership because it produces a new one out
+; of it; a question about one takes a borrow and leaves it where it was. Until
+; `D-099` there was no second kind — `match` did not work through a borrow, so
+; asking which variant a value is consumed it, and `is-some` could not be
+; written at all.
 
-(export Option map and-then unwrap-or or-else)
+(export Option is-some is-none map and-then unwrap-or or-else)
 
 (enum Option (T)
   None
   (Some ((value T))))
+
+; Asking without taking. The `_` matters: a payload bound through a borrow is a
+; `(& T)` and binding one here would say this function cares what is inside,
+; which it does not.
+(fn is-some (T) ((value (& (Option T)))) -> bool
+  (match value
+    ((Option:Some _) true)
+    ((Option:None) false)))
+
+(fn is-none (T) ((value (& (Option T)))) -> bool
+  (match value
+    ((Option:Some _) false)
+    ((Option:None) true)))
 
 (fn map (T U) ((value (Option T)) (f (Fn (T) U))) -> (Option U)
   (match value

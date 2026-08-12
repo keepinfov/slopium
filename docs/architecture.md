@@ -39,8 +39,13 @@ command-line protocol is internal and versioned.
    layout, call arity, operand types, and that every read has a reaching
    definition. A call through a function value is checked against the callee
    local's own `Fn` type, because a wrong indirect call is the one kind that
-   assembles and links (`D-092`). It reports `SL0700` internal errors rather
-   than panicking, and runs in debug builds or under `SLOPIUM_VERIFY_MIR=1`.
+   assembles and links (`D-092`). So is every read and address taken through a
+   borrow: a borrow of a pointer-shaped value is that pointer and a borrow of
+   anything else is the address of a slot, so the two field instructions are
+   each garbage in the other's place, and getting it wrong reads an integer as
+   a pointer rather than failing (`D-099`, `D-100`). It reports `SL0700`
+   internal errors rather than panicking, and runs in debug builds or under
+   `SLOPIUM_VERIFY_MIR=1`.
 10. Backward liveness dataflow yields live intervals over a linear block order,
     and a linear-scan allocator places every local in a register or a frame
     slot. Allocation runs in both profiles: it is part of code generation

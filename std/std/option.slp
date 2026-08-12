@@ -7,6 +7,8 @@
 
 (export
   (core:option:Option :as Option)
+  (core:option:is-some :as is-some)
+  (core:option:is-none :as is-none)
   (core:option:map :as map)
   (core:option:and-then :as and-then)
   (core:option:unwrap-or :as unwrap-or)

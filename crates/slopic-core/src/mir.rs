@@ -200,6 +200,25 @@ pub enum Instruction {
         base: LocalId,
         index: usize,
     },
+    /// `dst = *src`, one machine word.
+    ///
+    /// The dereference the language spells `clone` (`D-100`). Only ever emitted
+    /// for a borrow of something that is *not* pointer-like, because borrowing
+    /// a pointer-shaped value copies the pointer and there is nothing to load.
+    Load {
+        dst: LocalId,
+        src: LocalId,
+    },
+    /// `dst = base + index * 8`, the address of a struct field.
+    ///
+    /// What a pattern binds for a non-pointer-like field when the scrutinee is a
+    /// borrow (`D-099`); the pointer-like case is a `FieldLoad`, because there
+    /// the word in the slot already *is* the borrow.
+    FieldAddr {
+        dst: LocalId,
+        base: LocalId,
+        index: usize,
+    },
     EnumNew {
         dst: LocalId,
         enum_name: String,
@@ -211,6 +230,15 @@ pub enum Instruction {
         base: LocalId,
     },
     EnumFieldLoad {
+        dst: LocalId,
+        base: LocalId,
+        index: usize,
+    },
+    /// `dst = base + (index + 1) * 8`, the address of an enum payload slot.
+    ///
+    /// `FieldAddr`'s twin, off by the word the tag occupies — the same offset
+    /// `EnumFieldLoad` reads through.
+    EnumFieldAddr {
         dst: LocalId,
         base: LocalId,
         index: usize,
@@ -302,6 +330,16 @@ fn mir_pattern_irrefutable(pattern: &TPattern) -> bool {
             .all(|field| mir_pattern_irrefutable(&field.pattern)),
         TPattern::Bool(_) | TPattern::Int(_) | TPattern::Enum { .. } => false,
     }
+}
+
+/// Whether a borrow of this type has to be *read* to get the value out.
+///
+/// A borrow of a pointer-shaped value is that pointer, so it already holds
+/// everything there is; a borrow of anything else is the address of a slot, and
+/// the value is one load away. This is the same split `AddressOf` makes when it
+/// creates the borrow, asked in the other direction.
+fn reads_through_borrow(ty: &Type) -> bool {
+    matches!(ty, Type::Ref { inner, .. } if !crate::lowering::is_pointer_like(inner))
 }
 
 fn lower_function(function: &TypedFunction) -> MirFunction {
@@ -693,6 +731,20 @@ impl Builder {
                         lhs: lowered[0],
                         rhs: lowered[1],
                         ty: args[0].ty.clone(),
+                    });
+                } else if callee == "clone" && arg_types.first().is_some_and(reads_through_borrow) {
+                    // The dereference (`D-100`). A borrow of a pointer-shaped
+                    // value is that pointer, so cloning one is the runtime glue
+                    // below; a borrow of anything else is the address of a slot,
+                    // and reading it is a load and not a call. Deciding here
+                    // rather than in `lowering::builtin` is what makes the
+                    // choice from the *concrete* type: a generic body reaches
+                    // this only after specialization, and asking the generic
+                    // `T` instead is what returned a pointer where an `i64` was
+                    // asked for.
+                    self.emit(Instruction::Load {
+                        dst,
+                        src: lowered[0],
                     });
                 } else {
                     self.emit(Instruction::Call {
@@ -1152,16 +1204,24 @@ impl Builder {
         });
     }
 
+    /// Binds what an arm's pattern names, and disposes of what it does not.
+    ///
+    /// `borrowed` is the whole difference between taking a value apart and
+    /// looking inside one (`D-099`): through a borrow nothing is freed, nothing
+    /// is dropped, and each field is bound as a borrow of itself rather than
+    /// moved out. The scrutinee belongs to someone else and is still theirs when
+    /// the arm ends.
     fn consume_pattern(
         &mut self,
         pattern: &TPattern,
         value: LocalId,
         value_type: &Type,
         scope: usize,
+        borrowed: bool,
     ) {
         match pattern {
             TPattern::Wildcard => {
-                if !value_type.is_copy() {
+                if !borrowed && !value_type.is_copy() {
                     self.emit(Instruction::Drop {
                         local: value,
                         ty: value_type.clone(),
@@ -1181,33 +1241,71 @@ impl Builder {
             TPattern::Bool(_) | TPattern::Int(_) => {}
             TPattern::Enum { fields, .. } => {
                 for (index, field) in fields.iter().enumerate() {
-                    let local = self.temp(field.ty.clone());
-                    self.emit(Instruction::EnumFieldLoad {
-                        dst: local,
-                        base: value,
-                        index,
-                    });
-                    self.consume_pattern(&field.pattern, local, &field.ty, scope);
+                    let local = self.pattern_field(value, index, &field.ty, true, borrowed);
+                    self.consume_pattern(&field.pattern, local, &field.ty, scope, borrowed);
                 }
-                self.emit(Instruction::Free { local: value });
+                if !borrowed {
+                    self.emit(Instruction::Free { local: value });
+                }
             }
             TPattern::Struct { fields, .. } => {
                 for (index, field) in fields.iter().enumerate() {
-                    let local = self.temp(field.ty.clone());
-                    self.emit(Instruction::FieldLoad {
-                        dst: local,
-                        base: value,
-                        index,
-                    });
-                    self.consume_pattern(&field.pattern, local, &field.ty, scope);
+                    let local = self.pattern_field(value, index, &field.ty, false, borrowed);
+                    self.consume_pattern(&field.pattern, local, &field.ty, scope, borrowed);
                 }
-                self.emit(Instruction::Free { local: value });
+                if !borrowed {
+                    self.emit(Instruction::Free { local: value });
+                }
             }
         }
     }
 
+    /// One field of an aggregate a pattern is taking apart, moved out of it or
+    /// borrowed in place.
+    ///
+    /// Borrowing splits on the same question `AddressOf` asks: a pointer-shaped
+    /// field *is* its own borrow, so the word in the slot is what to take, and
+    /// anything else is borrowed by the address of the slot holding it.
+    fn pattern_field(
+        &mut self,
+        base: LocalId,
+        index: usize,
+        field_type: &Type,
+        enumeration: bool,
+        borrowed: bool,
+    ) -> LocalId {
+        if !borrowed {
+            let dst = self.temp(field_type.clone());
+            self.emit(if enumeration {
+                Instruction::EnumFieldLoad { dst, base, index }
+            } else {
+                Instruction::FieldLoad { dst, base, index }
+            });
+            return dst;
+        }
+        let dst = self.temp(Type::Ref {
+            mutable: false,
+            inner: Box::new(field_type.clone()),
+        });
+        self.emit(
+            match (enumeration, crate::lowering::is_pointer_like(field_type)) {
+                (true, true) => Instruction::EnumFieldLoad { dst, base, index },
+                (true, false) => Instruction::EnumFieldAddr { dst, base, index },
+                (false, true) => Instruction::FieldLoad { dst, base, index },
+                (false, false) => Instruction::FieldAddr { dst, base, index },
+            },
+        );
+        dst
+    }
+
     fn lower_match(&mut self, expr: &TExpr, value: &TExpr, arms: &[TMatchArm]) -> Option<Value> {
         let scrutinee = self.expr(value)?;
+        // Matching through a shared borrow (`D-099`). Branching needs no help:
+        // an enum is a pointer, so a borrow of one is the same word, and the
+        // tag and the fields a refutable pattern compares are read through it
+        // either way. It is binding that differs, and freeing.
+        let borrowed = matches!(value.ty, Type::Ref { .. });
+        let pattern_type = value.ty.strip_ref().clone();
         let merge_block = self.block();
         let result = if expr.ty == Type::Unit {
             None
@@ -1222,7 +1320,7 @@ impl Builder {
             self.branch_pattern(
                 &arm.pattern,
                 scrutinee.local,
-                &value.ty,
+                &pattern_type,
                 arm_block,
                 next_check,
             );
@@ -1230,7 +1328,13 @@ impl Builder {
             self.live = base_live.clone();
             self.scopes.push(Vec::new());
             let scope = self.scopes.len() - 1;
-            self.consume_pattern(&arm.pattern, scrutinee.local, &value.ty, scope);
+            self.consume_pattern(
+                &arm.pattern,
+                scrutinee.local,
+                &pattern_type,
+                scope,
+                borrowed,
+            );
             let arm_value = self.expr(&arm.body);
             if let (Some(result), Some(value)) = (result, arm_value.as_ref()) {
                 self.emit(Instruction::Assign {

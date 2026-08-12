@@ -453,8 +453,14 @@ fn is_pure(instruction: &Instruction) -> bool {
         | Instruction::Assign { .. }
         | Instruction::AddressOf { .. }
         | Instruction::FieldLoad { .. }
+        | Instruction::FieldAddr { .. }
         | Instruction::EnumTag { .. }
         | Instruction::EnumFieldLoad { .. }
+        | Instruction::EnumFieldAddr { .. }
+        // Reading through a borrow observes memory and changes none of it. The
+        // borrow checker is what says the memory is live, so an unused load is
+        // as dead as an unused field read.
+        | Instruction::Load { .. }
         // Taking a function's address reads nothing and writes nothing; an
         // unused one is as dead as an unused constant.
         | Instruction::FnAddr { .. } => true,

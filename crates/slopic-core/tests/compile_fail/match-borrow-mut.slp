@@ -1,0 +1,9 @@
+(enum Message
+  Empty
+  (Text ((value String))))
+
+(fn main () -> i32
+  (let mut message (Message:Text "hello"))
+  (match (&mut message)
+    ((Message:Text value) 1)
+    ((Message:Empty) 0)))

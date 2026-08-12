@@ -403,6 +403,15 @@ fn remap_instruction(instruction: &Instruction, map: &impl Fn(LocalId) -> LocalI
             base: m(*base),
             index: *index,
         },
+        Instruction::FieldAddr { dst, base, index } => Instruction::FieldAddr {
+            dst: m(*dst),
+            base: m(*base),
+            index: *index,
+        },
+        Instruction::Load { dst, src } => Instruction::Load {
+            dst: m(*dst),
+            src: m(*src),
+        },
         Instruction::EnumNew {
             dst,
             enum_name,
@@ -419,6 +428,11 @@ fn remap_instruction(instruction: &Instruction, map: &impl Fn(LocalId) -> LocalI
             base: m(*base),
         },
         Instruction::EnumFieldLoad { dst, base, index } => Instruction::EnumFieldLoad {
+            dst: m(*dst),
+            base: m(*base),
+            index: *index,
+        },
+        Instruction::EnumFieldAddr { dst, base, index } => Instruction::EnumFieldAddr {
             dst: m(*dst),
             base: m(*base),
             index: *index,

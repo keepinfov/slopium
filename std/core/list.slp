@@ -6,14 +6,16 @@
 ;
 ; **Two shapes of function, and the reason there are two.** A function that
 ; consumes each element takes the element — `map` and `fold`. A function that
-; only wants to *look* at one takes the borrowed list and an index — `filter`,
-; `find` and `sort-by`. That asymmetry is not a style choice. A `(List T)` owns
-; its elements, so looking at one without consuming it means borrowing it, and
-; there is no way to read a `(& T)`: the language has no dereference, and `get`
-; copies only a `Copy` element, which a generic `T` is not known to be. A
-; borrowed list and an index is the one form that works for every `T`, because
-; the caller writing the predicate knows what `T` is and can use `get`,
-; `get-ref` or `len` on it.
+; only wants to *look* at one takes a borrow of it — `filter`, `find` and
+; `sort-by`. That is the whole distinction, and it is the ownership the language
+; already has rather than a convention on top of it.
+;
+; Until v0.7.3 these three took the borrowed list *and an index*, on the grounds
+; that there was no way to read a `(& T)`. That was true of this module's own
+; body and irrelevant to its callers: a predicate is written by someone who
+; knows what `T` is, and handing one a `(& T)` has always worked. The
+; convention was a workaround for a hole that was not there, it was about to be
+; frozen at v0.9, and deleting it is most of why v0.7.3 exists (`D-099`).
 ;
 ; Every consuming function removes from the front, which is a move of the rest
 ; of the list each time. That is quadratic, and it is the honest first version:
@@ -39,19 +41,19 @@
         (push (&mut output) (f next)))
       output)))
 
-; `keep` is asked about each index of the list as it arrived, before anything
+; `keep` is asked about each element of the list as it arrived, before anything
 ; is removed, which is why every question is answered first and the removals
 ; happen afterwards and from the back.
-(fn filter (T) ((items (List T)) (keep (Fn ((& (List T)) i64) bool))) -> (List T)
+(fn filter (T) ((items (List T)) (keep (Fn ((& T)) bool))) -> (List T)
   (let mut result items)
   (let size (len (& result)))
   (if (= size 0)
     result
     (do
-      (let mut flags (list (keep (& result) 0)))
+      (let mut flags (list (keep (get-ref (& result) 0))))
       (let mut index 1)
       (while (< index size)
-        (push (&mut flags) (keep (& result) index))
+        (push (&mut flags) (keep (get-ref (& result) index)))
         (set index (+ index 1)))
       (let mut back size)
       (while (> back 0)
@@ -78,12 +80,12 @@
 ; The index of the first element `holds` accepts, like `core:string:find`
 ; returns the index of a match rather than the thing found. Returning the
 ; element would have to move it out of a list the caller still owns.
-(fn find (T) ((items (& (List T))) (holds (Fn ((& (List T)) i64) bool))) -> (Option i64)
+(fn find (T) ((items (& (List T))) (holds (Fn ((& T)) bool))) -> (Option i64)
   (let size (len items))
   (let mut index 0)
   (let mut found (- 0 1))
   (while (< index size)
-    (if (holds items index)
+    (if (holds (get-ref items index))
       (do
         (set found index)
         (break))
@@ -93,10 +95,11 @@
     (Option:None)
     (Option:Some found)))
 
-; `before` answers whether the element at the first index belongs ahead of the
-; element at the second. A sort parameterised by a function is what a language
-; with traits gets from `Ord`, and this is the parametric answer to it
-; (`D-088`).
+; `before` answers whether the first element belongs ahead of the second. A sort
+; parameterised by a function is what a language with traits gets from `Ord`,
+; and this is the parametric answer to it (`D-088`). It is also where two
+; borrows of the same list are alive at once, which shared borrows have always
+; allowed and nothing in the library had asked for.
 ;
 ; Selection sort: every comparison happens against the list as it arrived, and
 ; only then is anything moved, because `before` holds a borrow and removing
@@ -104,7 +107,7 @@
 ; at which it stops being an implementation detail — a better algorithm sorts
 ; in place, and in place needs a way to overwrite one element, which the
 ; language does not have.
-(fn sort-by (T) ((items (List T)) (before (Fn ((& (List T)) i64 i64) bool))) -> (List T)
+(fn sort-by (T) ((items (List T)) (before (Fn ((& T) (& T)) bool))) -> (List T)
   (let mut source items)
   (let size (len (& source)))
   (if (< size 2)
@@ -117,7 +120,7 @@
 ; here, so `before` sees the same list for every comparison it is asked to
 ; make. What shrinks instead is the list of indices still to be placed.
 (fn selection-order (T) ((items (& (List T)))
-    (before (Fn ((& (List T)) i64 i64) bool)) (size i64)) -> (List i64)
+    (before (Fn ((& T) (& T)) bool)) (size i64)) -> (List i64)
   (let mut remaining (list 0))
   (let mut fill 1)
   (while (< fill size)
@@ -133,13 +136,15 @@
 ; Where in `remaining` the smallest element is. `before` is strict and ties
 ; keep the slot they already had, so the sort is stable.
 (fn least-slot (T) ((items (& (List T)))
-    (before (Fn ((& (List T)) i64 i64) bool))
+    (before (Fn ((& T) (& T)) bool))
     (remaining (& (List i64)))) -> i64
   (let size (len remaining))
   (let mut best 0)
   (let mut slot 1)
   (while (< slot size)
-    (if (before items (get remaining slot) (get remaining best))
+    (if (before
+        (get-ref items (get remaining slot))
+        (get-ref items (get remaining best)))
       (set best slot)
       ())
     (set slot (+ slot 1)))

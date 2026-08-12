@@ -1,0 +1,5 @@
+match-borrow-scalar.slp:3:10: error[SL0200]: `match` through a borrow needs an enum or a struct, found `&i64`
+  |
+ 3 |   (match (& number)
+  |          ^^^^^^^^^^
+  = help: read a borrowed scalar with `clone` and match the value

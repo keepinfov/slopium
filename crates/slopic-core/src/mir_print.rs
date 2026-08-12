@@ -221,6 +221,8 @@ fn render_instruction(instruction: &Instruction) -> String {
             format!("_{dst} = {name} {{ {} }};", locals(fields))
         }
         Instruction::FieldLoad { dst, base, index } => format!("_{dst} = _{base}.{index};"),
+        Instruction::FieldAddr { dst, base, index } => format!("_{dst} = &_{base}.{index};"),
+        Instruction::Load { dst, src } => format!("_{dst} = *_{src};"),
         Instruction::EnumNew {
             dst,
             enum_name,
@@ -230,6 +232,9 @@ fn render_instruction(instruction: &Instruction) -> String {
         Instruction::EnumTag { dst, base } => format!("_{dst} = tag(_{base});"),
         Instruction::EnumFieldLoad { dst, base, index } => {
             format!("_{dst} = payload(_{base}, {index});")
+        }
+        Instruction::EnumFieldAddr { dst, base, index } => {
+            format!("_{dst} = &payload(_{base}, {index});")
         }
         Instruction::Free { local } => format!("free(_{local});"),
     }

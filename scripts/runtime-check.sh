@@ -56,8 +56,23 @@ cat >"$check_dir/runtime.slp" <<'SLOPIUM'
   (let mark "?")
   (concat (& text) (& mark)))
 
-(fn shorter ((items (& (List String))) (left i64) (right i64)) -> bool
-  (< (len (get-ref items left)) (len (get-ref items right))))
+(fn shorter ((left (& String)) (right (& String))) -> bool
+  (< (len left) (len right)))
+
+; Matching through a shared borrow (`D-099`) must free nothing and drop nothing:
+; the payload is a `(& String)` the enum still owns. Getting that wrong is a
+; double free on the second call and a use-after-free in the caller, neither of
+; which is a type error, so this is the only thing in the suite that would say
+; so. The `Labelled` case adds a field that is *not* pointer-shaped beside one
+; that is, which is where the two payload-address forms differ.
+(fn text-of ((message (& Message))) -> String
+  (match message
+    ((Message:Empty) "empty")
+    ((Message:Text value) (clone value))))
+
+(fn width-of ((item (& Labelled))) -> i64
+  (match item
+    ((Labelled :name name :render _) (len name))))
 
 ; A subnormal, spelled out, because there is no exponent literal to spell it
 ; with (`D-098`). It is the value whose conversion allocates the most.
@@ -119,6 +134,10 @@ cat >"$check_dir/runtime.slp" <<'SLOPIUM'
   ; owns a `String`. A wrong drop decision for either is a double free here
   ; rather than a type error anywhere.
   (let labelled (Labelled :name (clone (& rendered)) :render shout))
+  ; Looked at through a borrow before it is consumed, twice, so a payload that
+  ; was freed or dropped by the first look is a double free at the second.
+  (println-i64 (width-of (& labelled)))
+  (println-i64 (width-of (& labelled)))
   (let shouted (run-label labelled (& suffix)))
   (println (& shouted))
   ; `core:list` and `core:option` over elements that own memory. Every one of
@@ -144,6 +163,10 @@ cat >"$check_dir/runtime.slp" <<'SLOPIUM'
   (let written (from-f64 subnormal))
   (println-i64 (len (& written)))
   (let message (Message:Text "payload"))
+  (let looked (text-of (& message)))
+  (println (& looked))
+  (let again (text-of (& message)))
+  (println (& again))
   (let mut values (list number 2 3))
   (do (push (&mut values) 4))
   (println-i64 (get (& values) 0))

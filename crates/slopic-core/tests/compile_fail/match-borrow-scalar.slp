@@ -1,0 +1,5 @@
+(fn main () -> i32
+  (let number 3)
+  (match (& number)
+    (1 1)
+    (_ 0)))

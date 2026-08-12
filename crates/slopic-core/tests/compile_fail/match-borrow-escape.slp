@@ -1,0 +1,16 @@
+(enum Message
+  Empty
+  (Text ((value String))))
+
+(fn consume ((message Message)) -> unit
+  ())
+
+(fn main () -> i32
+  (let message (Message:Text "hello"))
+  (let fallback "none")
+  (let kept
+    (match (& message)
+      ((Message:Text value) value)
+      ((Message:Empty) (& fallback))))
+  (consume message)
+  0)

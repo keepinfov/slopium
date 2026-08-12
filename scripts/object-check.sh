@@ -28,6 +28,10 @@ programs=(
   "tests/projects/pass/process-io/src/main.slp"
   "tests/projects/pass/ownership-borrows/src/main.slp"
   "tests/projects/pass/function-values/src/main.slp"
+  # A field address and a load through a borrow (`D-099`, `D-100`): the same
+  # `lea` and `add` the backends already emitted, now off a heap pointer rather
+  # than the frame, which is an operand combination neither had assembled.
+  "tests/projects/pass/borrow-reads/src/main.slp"
   "examples/fibonacci.slp"
   "examples/lists.slp"
   "examples/match.slp"
