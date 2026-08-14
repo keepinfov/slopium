@@ -381,15 +381,42 @@ fn partition_codegen(module: &mut MirModule, input: &package::PackageInput, sele
             .max_by_key(|module| module.len())
             .map(String::as_str)
     };
+    // A `lambda` body and its environment are named `<owner>$lambda$n` and
+    // `<owner>$closure$n`, so what they belong to is the part before the first
+    // `$` — which is the whole reason they are named that way. `main` and a
+    // test body have no module in their names at all, and this is what keeps a
+    // closure written in one of them from being emitted by nobody.
+    let base = |name: &str| name.split('$').next().unwrap_or(name).to_owned();
+    let mut emitted = std::collections::HashMap::new();
+    for function in &module.functions {
+        if !function.name.contains('$') {
+            emitted.insert(
+                function.name.clone(),
+                owner(&function.name) == Some(selected),
+            );
+        }
+    }
+    for test in &module.tests {
+        emitted.insert(
+            test.function.name.clone(),
+            owner(&test.name) == Some(selected),
+        );
+    }
     for function in &mut module.functions {
-        function.emit = owner(&function.name) == Some(selected);
+        function.emit = emitted
+            .get(&base(&function.name))
+            .copied()
+            .unwrap_or_else(|| owner(&function.name) == Some(selected));
     }
     for test in &mut module.tests {
         test.emit = owner(&test.name) == Some(selected);
         test.function.emit = test.emit;
     }
     for structure in &mut module.structs {
-        structure.emit = owner(&structure.name) == Some(selected);
+        structure.emit = emitted
+            .get(&base(&structure.name))
+            .copied()
+            .unwrap_or_else(|| owner(&structure.name) == Some(selected));
     }
     for enumeration in &mut module.enums {
         enumeration.emit = owner(&enumeration.name) == Some(selected);

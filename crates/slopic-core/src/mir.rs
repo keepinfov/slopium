@@ -1,7 +1,8 @@
 use crate::ast::Type;
 use crate::diagnostic::Span;
 use crate::sema::{
-    BindingId, TExpr, TExprKind, TMatchArm, TPattern, TypedFunction, TypedProgram, TypedTest,
+    BindingId, TCapture, TExpr, TExprKind, TMatchArm, TPattern, TypedFunction, TypedParam,
+    TypedProgram, TypedTest,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
@@ -275,8 +276,29 @@ pub enum Terminator {
 }
 
 pub fn lower(program: &TypedProgram) -> MirModule {
+    let mut functions = Vec::new();
+    let mut tests = Vec::new();
+    // Lifted `lambda` bodies join the functions and their environments join the
+    // structs, which is what makes a closure need nothing of either backend:
+    // the block is a struct, so the clone and drop helpers generated for every
+    // struct are its glue (`D-101`).
+    let mut layouts = Vec::new();
+    let mut collect = |lowered: Lowered| {
+        functions.push(lowered.function);
+        functions.extend(lowered.lifted);
+        layouts.extend(lowered.layouts);
+    };
+    for function in &program.functions {
+        collect(lower_function(function));
+    }
+    for (index, test) in program.tests.iter().enumerate() {
+        let (test, lowered) = lower_test(index, test);
+        tests.push(test);
+        functions.extend(lowered.lifted);
+        layouts.extend(lowered.layouts);
+    }
     MirModule {
-        functions: program.functions.iter().map(lower_function).collect(),
+        functions,
         externs: program
             .externs
             .iter()
@@ -287,12 +309,7 @@ pub fn lower(program: &TypedProgram) -> MirModule {
                 result: declaration.result.clone(),
             })
             .collect(),
-        tests: program
-            .tests
-            .iter()
-            .enumerate()
-            .map(|(index, test)| lower_test(index, test))
-            .collect(),
+        tests,
         structs: program
             .structs
             .iter()
@@ -301,6 +318,7 @@ pub fn lower(program: &TypedProgram) -> MirModule {
                 fields: item.fields.clone(),
                 emit: true,
             })
+            .chain(layouts)
             .collect(),
         enums: program
             .enums
@@ -342,7 +360,18 @@ fn reads_through_borrow(ty: &Type) -> bool {
     matches!(ty, Type::Ref { inner, .. } if !crate::lowering::is_pointer_like(inner))
 }
 
-fn lower_function(function: &TypedFunction) -> MirFunction {
+/// One typed function, and everything lowering it produced beside it.
+///
+/// A `lambda` body becomes a function of its own and its environment becomes a
+/// struct, and both are named after the function they were written in, so
+/// neither needs a table to be found again.
+struct Lowered {
+    function: MirFunction,
+    lifted: Vec<MirFunction>,
+    layouts: Vec<MirStruct>,
+}
+
+fn lower_function(function: &TypedFunction) -> Lowered {
     let mut builder = Builder::new(
         function.name.clone(),
         function.return_type.clone(),
@@ -356,7 +385,53 @@ fn lower_function(function: &TypedFunction) -> MirFunction {
         builder.live.insert(param.id, true);
         builder.scopes[0].push(param.id);
     }
-    let value = builder.expr(&function.body);
+    lower_body(builder, &function.body)
+}
+
+/// A `lambda` body as a function of its own (`D-102`).
+///
+/// The parameters are the ones written, and then the block, which is what
+/// makes a named function usable as a function value without an adapter: it
+/// has no such parameter and never reads the extra word.
+fn lower_lambda(
+    name: String,
+    captures: &[TCapture],
+    params: &[TypedParam],
+    result: &Type,
+    body: &TExpr,
+    span: Span,
+) -> Lowered {
+    let mut builder = Builder::new(name, result.clone(), span);
+    builder.scopes.push(Vec::new());
+    for param in params {
+        let local = builder.local(param.ty.clone(), Some(param.name.clone()), true);
+        builder.params.push(local);
+        builder.bindings.insert(param.id, local);
+        builder.live.insert(param.id, true);
+        builder.scopes[0].push(param.id);
+    }
+    // The block is typed `i64` rather than as the function it is: a parameter
+    // of an owning type would be dropped when this body returns, and the block
+    // belongs to whoever built it, not to a call of it.
+    let block = builder.local(Type::I64, Some("closure".to_owned()), true);
+    builder.params.push(block);
+    // Each capture is read out of the block, and none of them is registered
+    // live: the block owns them and its drop helper releases them, so a body
+    // that also dropped one would free it twice.
+    for (index, capture) in captures.iter().enumerate() {
+        let local = builder.local(capture.ty.clone(), Some(capture.name.clone()), false);
+        builder.emit(Instruction::FieldLoad {
+            dst: local,
+            base: block,
+            index: crate::lowering::CLOSURE_HEADER + index,
+        });
+        builder.bindings.insert(capture.id, local);
+    }
+    lower_body(builder, body)
+}
+
+fn lower_body(mut builder: Builder, body: &TExpr) -> Lowered {
+    let value = builder.expr(body);
     builder.drop_scope_except(0, value.as_ref().map(|value| value.local));
     if builder.blocks[builder.current].terminator.is_none() {
         builder.blocks[builder.current].terminator = Some(Terminator::Return(
@@ -365,10 +440,16 @@ fn lower_function(function: &TypedFunction) -> MirFunction {
                 .map(|value| value.local),
         ));
     }
-    builder.finish()
+    let lifted = std::mem::take(&mut builder.lifted);
+    let layouts = std::mem::take(&mut builder.layouts);
+    Lowered {
+        function: builder.finish(),
+        lifted,
+        layouts,
+    }
 }
 
-fn lower_test(index: usize, test: &TypedTest) -> MirTest {
+fn lower_test(index: usize, test: &TypedTest) -> (MirTest, Lowered) {
     let function = TypedFunction {
         name: format!("__slop_test_{index}"),
         type_params: Vec::new(),
@@ -377,11 +458,15 @@ fn lower_test(index: usize, test: &TypedTest) -> MirTest {
         body: test.body.clone(),
         span: test.span,
     };
-    MirTest {
-        name: test.name.clone(),
-        function: lower_function(&function),
-        emit: true,
-    }
+    let lowered = lower_function(&function);
+    (
+        MirTest {
+            name: test.name.clone(),
+            function: lowered.function.clone(),
+            emit: true,
+        },
+        lowered,
+    )
 }
 
 #[derive(Clone, Debug)]
@@ -423,6 +508,14 @@ struct Builder {
     /// `expr` maintains this around its recursion so that `emit` can attach a
     /// span without every one of its call sites having to pass one.
     current_span: Span,
+    /// The `lambda` bodies lifted out of this function, and the layouts of the
+    /// blocks that carry them (`D-101`, `D-102`).
+    ///
+    /// Both are named after the function they came out of, so the pass that
+    /// decides which module emits what finds the owner by looking at the name,
+    /// exactly as it does for the function itself.
+    lifted: Vec<MirFunction>,
+    layouts: Vec<MirStruct>,
 }
 
 #[derive(Clone, Copy)]
@@ -451,7 +544,71 @@ impl Builder {
             scopes: Vec::new(),
             loop_targets: Vec::new(),
             current_span: span,
+            lifted: Vec::new(),
+            layouts: Vec::new(),
         }
+    }
+
+    /// Builds the block a function value is: the code address, the two helpers
+    /// that free and copy it, then one word per capture (`D-101`).
+    fn closure(&mut self, ty: Type, code: LocalId, captures: &[(LocalId, Type)]) -> LocalId {
+        let layout = self.layout(captures);
+        let drop = self.temp(Type::I64);
+        self.emit(Instruction::FnAddr {
+            dst: drop,
+            symbol: crate::lowering::struct_drop_symbol(&layout),
+        });
+        let clone = self.temp(Type::I64);
+        self.emit(Instruction::FnAddr {
+            dst: clone,
+            symbol: crate::lowering::struct_clone_symbol(&layout),
+        });
+        let mut fields = vec![code, drop, clone];
+        fields.extend(captures.iter().map(|(local, _)| *local));
+        let dst = self.temp(ty);
+        self.emit(Instruction::StructNew {
+            dst,
+            name: layout,
+            fields,
+        });
+        dst
+    }
+
+    /// The struct a block of these captures is laid out as, reusing one that
+    /// already holds the same types.
+    ///
+    /// Sharing matters for more than size: the layout is where the drop and
+    /// clone helpers come from, so two closures that capture the same shape
+    /// generate one pair between them.
+    fn layout(&mut self, captures: &[(LocalId, Type)]) -> String {
+        let header = crate::lowering::CLOSURE_HEADER;
+        if let Some(found) = self.layouts.iter().find(|item| {
+            item.fields.len() == header + captures.len()
+                && item.fields[header..]
+                    .iter()
+                    .zip(captures)
+                    .all(|((_, held), (_, ty))| held == ty)
+        }) {
+            return found.name.clone();
+        }
+        let name = format!("{}$closure${}", self.name, self.layouts.len());
+        let mut fields = vec![
+            ("code".to_owned(), Type::I64),
+            ("drop".to_owned(), Type::I64),
+            ("clone".to_owned(), Type::I64),
+        ];
+        fields.extend(
+            captures
+                .iter()
+                .enumerate()
+                .map(|(index, (_, ty))| (format!("capture{index}"), ty.clone())),
+        );
+        self.layouts.push(MirStruct {
+            name: name.clone(),
+            fields,
+            emit: true,
+        });
+        name
     }
 
     fn finish(self) -> MirFunction {
@@ -771,18 +928,64 @@ impl Builder {
             TExprKind::FnRef { name, .. } => {
                 // `type_args` is empty here: `specialize_expr` has already
                 // folded a generic instance into the name.
-                let dst = self.temp(expr.ty.clone());
+                let code = self.temp(Type::I64);
                 self.emit(Instruction::FnAddr {
-                    dst,
+                    dst: code,
                     // Not `call_symbol`, which exists to pick a C name for an
                     // `extern`: sema refuses an `extern` as a value, so the
                     // only symbol reachable here is a Slopium one.
                     symbol: crate::lowering::function_symbol(name, false),
                 });
+                // A named function captures nothing, and is boxed anyway
+                // (`D-101`): the alternative is a static block holding a code
+                // address, and this project's object writer has relocations in
+                // `.text` and nowhere else.
+                let dst = self.closure(expr.ty.clone(), code, &[]);
                 Some(Value {
                     local: dst,
                     ty: expr.ty.clone(),
-                    owned_temporary: false,
+                    owned_temporary: true,
+                })
+            }
+            TExprKind::Lambda {
+                captures,
+                params,
+                result,
+                body,
+            } => {
+                // The captures are read here, in the function the `lambda` was
+                // written in, and each one is a move: the block owns them from
+                // now on, which is why `D-102` has them written down.
+                let mut taken = Vec::new();
+                for capture in captures {
+                    let local = self.bindings[&capture.from];
+                    if !capture.ty.is_copy() {
+                        self.live.insert(capture.from, false);
+                    }
+                    taken.push((local, capture.ty.clone()));
+                }
+                let name = format!("{}$lambda${}", self.name, self.lifted.len());
+                let lowered = lower_lambda(
+                    name.clone(),
+                    captures,
+                    params,
+                    result,
+                    body,
+                    self.current_span,
+                );
+                self.lifted.push(lowered.function);
+                self.lifted.extend(lowered.lifted);
+                self.layouts.extend(lowered.layouts);
+                let code = self.temp(Type::I64);
+                self.emit(Instruction::FnAddr {
+                    dst: code,
+                    symbol: crate::lowering::function_symbol(&name, false),
+                });
+                let dst = self.closure(expr.ty.clone(), code, &taken);
+                Some(Value {
+                    local: dst,
+                    ty: expr.ty.clone(),
+                    owned_temporary: true,
                 })
             }
             TExprKind::CallValue { callee, args } => {
@@ -794,10 +997,25 @@ impl Builder {
                         lowered.push(value.local);
                     }
                 }
+                // The callee is the block, not the code: word 0 is what to
+                // call, and the block itself goes along as a trailing argument
+                // so the body can reach its captures. A named function has no
+                // such parameter and ignores the extra word — which both
+                // calling conventions allow, since the caller is the one that
+                // lays out and cleans up an argument the callee never reads.
+                let block = self.bindings[callee];
+                let code = self.temp(Type::I64);
+                self.emit(Instruction::FieldLoad {
+                    dst: code,
+                    base: block,
+                    index: 0,
+                });
+                arg_types.push(self.locals[block].ty.clone());
+                lowered.push(block);
                 let dst = self.temp(expr.ty.clone());
                 self.emit(Instruction::CallValue {
                     dst,
-                    callee: self.bindings[callee],
+                    callee: code,
                     args: lowered,
                     arg_types,
                     result: expr.ty.clone(),

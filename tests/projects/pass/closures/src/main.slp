@@ -1,0 +1,113 @@
+; Closures. A `lambda` names what it closes over and moves it in (`D-102`), and
+; the value it makes is owned: one machine word pointing at a block that holds
+; the code, the two helpers that free and copy it, and the captures (`D-101`).
+;
+; So a closure is dropped like a `String` and outlives the frame it was written
+; in, and a function value used twice is borrowed like anything else.
+
+(take std:io println println-i64)
+(take std:string concat equals)
+(take std:list sort-by filter)
+(take std:option or-else unwrap-or)
+(take std:option Option)
+
+(fn apply ((f (Fn (i64) i64)) (value i64)) -> i64
+  (f value))
+
+; Called twice through one value, which is what says calling does not consume.
+(fn twice ((f (Fn (i64) i64)) (value i64)) -> i64
+  (f (f value)))
+
+; A closure that owns a `String` and outlives the function that built it. The
+; block owns `who` from the moment the lambda is written, and its drop helper
+; is what releases it — which is the whole reason a `Fn` is not `Copy`.
+(fn greeter ((who String)) -> (Fn ((& String)) String)
+  (lambda (who) ((mark (& String))) -> String
+    (concat (& who) mark)))
+
+; A `lambda` written inside a generic body is monomorphized with it: the
+; capture is a `T` here and an `i64` and a `String` in the program below.
+(fn keeping-all (T) ((items (List T))) -> (List T)
+  (let sentinel 0)
+  (filter items (lambda (sentinel) ((element (& T))) -> bool (= sentinel 0))))
+
+; An empty `Option` of a type nothing else names, since a `let` carries no type
+; and `or-else` has to know what it is falling back to.
+(fn nothing () -> (Option String)
+  (Option:None))
+
+(fn rank-of ((names (& (List String))) (ranks (& (List i64))) (name (& String)))
+  -> i64
+  (let size (len names))
+  (let mut index 0)
+  (let mut found 0)
+  (while (< index size)
+    (if (equals (get-ref names index) name)
+      (do
+        (set found (get ranks index))
+        (break))
+      ())
+    (set index (+ index 1)))
+  found)
+
+(fn main () -> i32
+  ; A captured scalar, and a capture used by a closure called more than once.
+  (let offset 3)
+  (println-i64 (apply (lambda (offset) ((x i64)) -> i64 (+ x offset)) 39))
+  (let step 5)
+  (println-i64 (twice (lambda (step) ((x i64)) -> i64 (+ x step)) 1))
+
+  ; A captured `String`, through a closure that escapes and is then called
+  ; twice. Two calls, two new strings, and one `hello` freed at the end.
+  (let hello (greeter "hello"))
+  (let bang "!")
+  (let query "?")
+  (let loud (hello (& bang)))
+  (let asked (hello (& query)))
+  (println (& loud))
+  (println (& asked))
+
+  ; What v0.7.1 measured and could not write: sorting by a key held in a table
+  ; the caller has. The comparator carries the table, so the workaround — the
+  ; caller decorating a list with keys and sorting pairs — is gone.
+  (let names (list "ann" "bo" "cy"))
+  (let ranks (list 3 1 2))
+  (let words (list "ann" "bo" "cy"))
+  (let sorted
+    (sort-by words
+      (lambda (names ranks) ((a (& String)) (b (& String))) -> bool
+        (< (rank-of (& names) (& ranks) a) (rank-of (& names) (& ranks) b)))))
+  (let mut index 0)
+  (while (< index (len (& sorted)))
+    (println (get-ref (& sorted) index))
+    (set index (+ index 1)))
+
+  ; A fallback that computes from something nearby, which is the one place in
+  ; the library where the absence of closures was felt as an absence.
+  (let missing (nothing))
+  (let fallback "late")
+  (let answer
+    (unwrap-or
+      (or-else missing
+        (lambda (fallback) () -> (Option String)
+          (Option:Some (concat (& fallback) (& fallback)))))
+      "never"))
+  (println (& answer))
+
+  ; The generic body, at two instantiations.
+  (let numbers (keeping-all (list 4 5)))
+  (let letters (keeping-all (list "x" "y" "z")))
+  (println-i64 (len (& numbers)))
+  (println-i64 (len (& letters)))
+  0)
+
+(test "a closure carries what it captured"
+  (let offset 3)
+  (= 42 (apply (lambda (offset) ((x i64)) -> i64 (+ x offset)) 39)))
+
+(test "a captured value survives the frame it was written in"
+  (let mark "!")
+  (let hello (greeter "hi"))
+  (let first (hello (& mark)))
+  (let second (hello (& mark)))
+  (equals (& first) (& second)))

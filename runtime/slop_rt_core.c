@@ -117,6 +117,28 @@ void sl_rt_string_drop(SlString *string) {
     }
 }
 
+/* A function value is a block the compiler lays out as a struct — the code
+ * address, this pair of helpers, then one word per capture (`D-101`). The
+ * helpers are the ones both backends already generate for every struct, so all
+ * that is needed here is the dispatch: the static type says `Fn` and cannot say
+ * which closure, because two closures of one type capture different things.
+ *
+ * A null block is a no-op on the way out, matching `sl_rt_string_drop` and
+ * `sl_rt_list_drop`, so a slot the compiler has already dropped and zeroed
+ * stays benign. */
+typedef void (*SlClosureDrop)(void *closure);
+typedef void *(*SlClosureClone)(const void *closure);
+
+void sl_rt_closure_drop(void *closure) {
+    if (closure != NULL) {
+        ((SlClosureDrop *)closure)[1](closure);
+    }
+}
+
+void *sl_rt_closure_clone(const void *closure) {
+    return ((SlClosureClone *)closure)[2](closure);
+}
+
 /* The four the library cannot write for itself (`D-083`). Everything else in
  * `core:string` — formatting, parsing, splitting, trimming — is Slopium over
  * these, because a `(& String)` reaches C as a pointer and a length and there

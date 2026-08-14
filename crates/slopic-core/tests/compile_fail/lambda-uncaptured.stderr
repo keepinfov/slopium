@@ -1,0 +1,5 @@
+lambda-uncaptured.slp:3:45: error[SL0200]: `offset` is not captured by this lambda
+  |
+ 3 |   (let add (lambda () ((x i64)) -> i64 (+ x offset)))
+  |                                             ^^^^^^
+  = help: name it in the capture list — `(lambda (offset ...) ...)` — which moves it in

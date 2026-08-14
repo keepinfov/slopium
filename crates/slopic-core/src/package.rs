@@ -773,6 +773,21 @@ impl Resolver<'_> {
                     self.rewrite_expr(argument, diagnostics);
                 }
             }
+            // A capture is a local by construction, so there is nothing to
+            // resolve about the names; the types are another matter, since a
+            // parameter or a result may name something from another module.
+            ExprKind::Lambda {
+                params,
+                result,
+                body,
+                ..
+            } => {
+                for param in params.iter_mut() {
+                    self.rewrite_type(&mut param.ty, param.span, diagnostics);
+                }
+                self.rewrite_type(result, expression.span, diagnostics);
+                self.rewrite_expr(body, diagnostics);
+            }
             // A bare name is usually a local, and this pass has no scopes to
             // tell one from a `fn` used as a value (`D-092`). So it records
             // what the name *would* mean as a top-level item and lets sema,
@@ -1010,6 +1025,16 @@ fn collect_qualified_names<'a>(program: &'a Program, output: &mut Vec<&'a str>) 
                 }
                 args.iter().for_each(|argument| expr(argument, output));
             }
+            ExprKind::Lambda {
+                params,
+                result,
+                body,
+                ..
+            } => {
+                params.iter().for_each(|param| ty(&param.ty, output));
+                ty(result, output);
+                expr(body, output);
+            }
             _ => {}
         }
     }
@@ -1181,6 +1206,22 @@ fn shift_program(program: &mut Program, base: usize) {
             ExprKind::Call { args, .. } => {
                 args.iter_mut()
                     .for_each(|argument| shift_expr(argument, base));
+            }
+            ExprKind::Lambda {
+                captures,
+                params,
+                result,
+                body,
+            } => {
+                for capture in captures.iter_mut() {
+                    shift_span(&mut capture.span, base);
+                }
+                for param in params.iter_mut() {
+                    shift_span(&mut param.span, base);
+                    shift_type(&mut param.ty, base);
+                }
+                shift_type(result, base);
+                shift_expr(body, base);
             }
             _ => {}
         }

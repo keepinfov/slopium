@@ -1,0 +1,9 @@
+(fn escaping () -> (Fn () i64)
+  (let number 5)
+  (let borrowed (& number))
+  (lambda (borrowed) () -> i64 (clone borrowed)))
+
+(fn main () -> i32
+  (let dangling (escaping))
+  (let value (dangling))
+  0)

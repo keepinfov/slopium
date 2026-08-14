@@ -30,8 +30,14 @@ pub enum Type {
     ///
     /// Parameters are grouped in their own list so that every arity has one
     /// form: `(Fn () i64)` is nullary and nothing is counted from the right to
-    /// find where the result starts. A value of this type is the address of a
-    /// top-level function — one machine word, like every other local.
+    /// find where the result starts.
+    ///
+    /// A value of this type is one machine word, like every other local, and
+    /// since `D-101` that word is a pointer to an owned block rather than a
+    /// code address: `[code, drop, clone, capture ...]`. So a `Fn` is not
+    /// `Copy` — it owns whatever a `lambda` moved into it — and using one
+    /// twice as an argument means borrowing it, exactly as it would for a
+    /// `String`.
     Fn {
         params: Vec<Type>,
         result: Box<Type>,
@@ -42,13 +48,7 @@ impl Type {
     pub fn is_copy(&self) -> bool {
         matches!(
             self,
-            Type::Unit
-                | Type::Bool
-                | Type::I32
-                | Type::I64
-                | Type::F64
-                | Type::Ref { .. }
-                | Type::Fn { .. }
+            Type::Unit | Type::Bool | Type::I32 | Type::I64 | Type::F64 | Type::Ref { .. }
         )
     }
 
@@ -286,6 +286,28 @@ pub enum ExprKind {
         callee: String,
         args: Vec<Expr>,
     },
+    /// `(lambda (captures ...) ((parameter type) ...) -> result body)`
+    /// (`D-102`).
+    ///
+    /// A `fn` with the name dropped and one list changed: in a declaration the
+    /// second list is what the function is parameterised over, and here it is
+    /// what the function closes over. Each capture is the name of a binding in
+    /// the enclosing scope, and naming it there moves it in — which is why it
+    /// is written rather than inferred, since every other move in the language
+    /// is written too.
+    Lambda {
+        captures: Vec<Capture>,
+        params: Vec<Param>,
+        result: Type,
+        body: Box<Expr>,
+    },
+}
+
+/// One name a `lambda` closes over.
+#[derive(Clone, Debug, Serialize)]
+pub struct Capture {
+    pub name: String,
+    pub span: Span,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -636,6 +658,24 @@ impl AstBuilder<'_> {
         })
     }
 
+    /// The names a `lambda` closes over, which are names and nothing else: a
+    /// capture is a binding that already exists, so there is no type to give it
+    /// and no expression to evaluate.
+    fn captures(&mut self, form: &SExpr) -> Option<Vec<Capture>> {
+        let items = self.list(form, "capture list")?;
+        let mut captures = Vec::new();
+        for item in items {
+            let Some(name) = self.required_atom(item, "captured name") else {
+                continue;
+            };
+            captures.push(Capture {
+                name: name.to_owned(),
+                span: item.span,
+            });
+        }
+        Some(captures)
+    }
+
     fn params(&mut self, form: &SExpr) -> Option<Vec<Param>> {
         let items = self.list(form, "parameter or field list")?;
         self.param_pairs(items)
@@ -903,6 +943,23 @@ impl AstBuilder<'_> {
                             return None;
                         }
                         ExprKind::Continue
+                    }
+                    "lambda" => {
+                        if items.len() < 6 || atom(&items[3]) != Some("->") {
+                            self.error(
+                                form.span,
+                                "lambda syntax is \
+                                 `(lambda (capture ...) ((arg type) ...) -> type body...)`",
+                            );
+                            return None;
+                        }
+                        let captures = self.captures(&items[1])?;
+                        ExprKind::Lambda {
+                            captures,
+                            params: self.params(&items[2])?,
+                            result: self.ty(&items[4])?,
+                            body: Box::new(self.body(&items[5..], form.span)?),
+                        }
                     }
                     "match" => return self.match_expr(form.span, items),
                     "try" => {

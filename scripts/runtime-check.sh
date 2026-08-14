@@ -48,9 +48,13 @@ cat >"$check_dir/runtime.slp" <<'SLOPIUM'
   (let mark "!")
   (concat text (& mark)))
 
+; Owned here and dropped here, so the struct releases both its `String` and the
+; function value in its other field. The field is read through a borrow because
+; a `Fn` is owned since `D-101` and reading it out would move it out of a
+; struct that is about to drop it.
 (fn run-label ((item Labelled) (text (& String))) -> String
-  (let render (. item render))
-  (render text))
+  (match (& item)
+    ((Labelled :render render) (render text))))
 
 (fn decorate ((text String)) -> String
   (let mark "?")
@@ -73,6 +77,15 @@ cat >"$check_dir/runtime.slp" <<'SLOPIUM'
 (fn width-of ((item (& Labelled))) -> i64
   (match item
     ((Labelled :name name :render _) (len name))))
+
+; A closure that owns a `String` and outlives the call that built it (`D-101`).
+; Its environment is a heap block with generated glue, so every way of getting
+; that wrong is invisible to the type checker and visible here: releasing the
+; block without its captures leaks the `String`, releasing it twice is a double
+; free, and forgetting the block itself leaks 32 bytes per function value.
+(fn greeter ((who String)) -> (Fn ((& String)) String)
+  (lambda (who) ((mark (& String))) -> String
+    (concat (& who) mark)))
 
 ; A subnormal, spelled out, because there is no exponent literal to spell it
 ; with (`D-098`). It is the value whose conversion allocates the most.
@@ -162,6 +175,23 @@ cat >"$check_dir/runtime.slp" <<'SLOPIUM'
   (println-f64 subnormal)
   (let written (from-f64 subnormal))
   (println-i64 (len (& written)))
+  ; Called twice, so a capture consumed by the first call is a use-after-free
+  ; at the second; cloned, so the copy's captures are a second allocation the
+  ; copy owns; and one of them is handed to the library, which drops it there.
+  (let hello (greeter "hello"))
+  (let mark "!")
+  (let loud (hello (& mark)))
+  (println (& loud))
+  (let louder (hello (& mark)))
+  (println (& louder))
+  (let echo (clone hello))
+  (let echoed (echo (& mark)))
+  (println (& echoed))
+  (let by-length
+    (lambda (mark) ((left (& String)) (right (& String))) -> bool
+      (< (+ (len left) (len (& mark))) (+ (len right) (len (& mark))))))
+  (let ordered (list-sort-by (list "ccc" "a" "bb") by-length))
+  (println (get-ref (& ordered) 0))
   (let message (Message:Text "payload"))
   (let looked (text-of (& message)))
   (println (& looked))

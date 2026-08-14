@@ -110,9 +110,12 @@ one rule between them: the function namespace is consulted first, so a call
 `Fn` type beside a `fn f` is an error rather than a silent winner. A local of any
 other type may share a name with a `fn` as it always could.
 
-A function value is one machine word — the address of a top-level function. It
-is `Copy`, so passing it twice is not a move and `clone` refuses it the way it
-refuses a scalar; it can be returned, and it can be a struct or enum field.
+A function value is one machine word and it is **owned**, like a `String`: it is
+dropped when it goes out of scope, `clone` copies it, and handing it to
+something else is a move. A function that only wants to *call* one takes it by
+value or by borrow — calling never consumes — but a function that wants to pass
+it on twice must take a `(& (Fn ...))`, which is callable like the thing it
+borrows. It can be returned and it can be a struct or enum field.
 
 An `extern` is not a value. Its arguments may cross the C boundary as more than
 one machine word — a borrowed `Slice` goes as a pointer and a length — so a `Fn`
@@ -123,7 +126,54 @@ taken, because a value is the address of one monomorphized body. Where the
 expected type says which instance that is, it is taken; where it does not, it is
 refused with `SL0452` rather than guessed at.
 
-There are no closures and no `lambda` yet: a function value captures nothing.
+## Closures
+
+```lisp
+(let offset 3)
+(let add (lambda (offset) ((x i64)) -> i64 (+ x offset)))
+(println-i64 (add 39))
+```
+
+A `lambda` is a `fn` with the name dropped and one list changed: where a
+declaration writes the type parameters it is parameterised over, a `lambda`
+writes the names it closes over. Everything else — the parameter list, the `->`,
+the result type, the body — is the same.
+
+**A capture is a move, and it is written down.** `(lambda (offset) ...)` moves
+`offset` into the closure, which owns it from then on; afterwards the outer
+`offset` is gone, exactly as if it had been passed to a function. Nothing is
+inferred: a name the body uses and the capture list does not name is an error
+that says so. To keep a copy, `clone` it first.
+
+Inside the body a capture keeps its own name and its own type, so the body reads
+as it would have read in place. What it may not do is give a capture away: the
+closure owns it and may be called again, so moving one out is refused. Borrow it
+or clone it instead.
+
+A closure and a plain `fn` value have the same type and are used
+interchangeably, which is what lets `(filter items keep)` take either:
+
+```lisp
+(let limit 4)
+(let kept (filter numbers (lambda (limit) ((n (& i64))) -> bool (> (clone n) limit))))
+```
+
+Because a closure owns its captures, it may outlive the function that built one:
+
+```lisp
+(fn greeter ((who String)) -> (Fn ((& String)) String)
+  (lambda (who) ((mark (& String))) -> String
+    (concat (& who) mark)))
+```
+
+**A capture may not be a borrow.** Because a closure can outlive the frame it
+was written in, an environment holding a `(& T)` or a `Slice` is the same
+mistake as returning one, and it is refused by the same rule. Capture what the
+borrow points at, or `clone` it.
+
+A `lambda` has no name, so it cannot call itself, and it takes no type
+parameters of its own — one written inside a generic function is monomorphized
+along with it.
 
 ## Ownership and borrows
 

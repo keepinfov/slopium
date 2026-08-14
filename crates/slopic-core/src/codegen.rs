@@ -953,23 +953,12 @@ impl<'a> Generator<'a> {
                     reg("rdi"),
                     operand(&self.alloc, self.registers, *local),
                 ));
-                match ty {
-                    Type::String => self.inst(Inst::Call("sl_rt_string_drop".into())),
-                    Type::List(_) | Type::Array { .. } => {
-                        self.inst(Inst::Call("sl_rt_list_drop".into()))
-                    }
-                    Type::Slice(_) => self.inst(Inst::Call("sl_rt_slice_drop".into())),
-                    Type::Named(name)
-                        if self.module.structs.iter().any(|item| &item.name == name) =>
-                    {
-                        self.inst(Inst::Call(struct_drop_symbol(name)))
-                    }
-                    Type::Named(name)
-                        if self.module.enums.iter().any(|item| &item.name == name) =>
-                    {
-                        self.inst(Inst::Call(enum_drop_symbol(name)))
-                    }
-                    _ => {}
+                // Through `lowering`, like the AArch64 backend already does:
+                // this arm answered the question a second time and had to be
+                // taught `Fn` separately at v0.7.4, which is the kind of
+                // divergence `D-025` puts the answer in one place to avoid.
+                if let Some(symbol) = self.drop_function(ty) {
+                    self.inst(Inst::Call(symbol));
                 }
                 self.inst(Inst::Mov(
                     operand(&self.alloc, self.registers, *local),

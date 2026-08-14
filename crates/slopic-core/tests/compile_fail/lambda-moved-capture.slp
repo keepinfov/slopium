@@ -1,0 +1,8 @@
+(fn keep ((text String)) -> String
+  text)
+
+(fn main () -> i32
+  (let name "ann")
+  (let give (lambda (name) ((x i64)) -> String (keep name)))
+  (give 0)
+  0)

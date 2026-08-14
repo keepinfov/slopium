@@ -1,0 +1,5 @@
+lambda-capture-borrow.slp:4:12: error[SL0300]: cannot capture `borrowed`, which is a `&i64`
+  |
+ 4 |   (lambda (borrowed) () -> i64 (clone borrowed)))
+  |            ^^^^^^^^
+  = help: a closure can outlive the frame it was written in, so it holds values and not borrows: capture what the borrow points at, or `clone` it first

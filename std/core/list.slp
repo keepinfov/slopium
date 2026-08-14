@@ -1,4 +1,4 @@
-; Lists, over function pointers.
+; Lists, over function values.
 ;
 ; The list itself is built into the language; this is what you do with one. It
 ; is `core` (`D-083`): a `(List T)` is the runtime's `SlList`, which needs an
@@ -119,6 +119,11 @@
 ; The indices of the list in sorted order. Nothing is moved out of `items`
 ; here, so `before` sees the same list for every comparison it is asked to
 ; make. What shrinks instead is the list of indices still to be placed.
+;
+; `before` is handed on by borrow, because since `D-101` a function value owns
+; whatever a `lambda` moved into it and passing one is a move. This is the same
+; rule the header states about elements, applied to the function itself: a
+; caller that only wants a comparison made takes a borrow of the comparator.
 (fn selection-order (T) ((items (& (List T)))
     (before (Fn ((& T) (& T)) bool)) (size i64)) -> (List i64)
   (let mut remaining (list 0))
@@ -126,17 +131,17 @@
   (while (< fill size)
     (push (&mut remaining) fill)
     (set fill (+ fill 1)))
-  (let head (least-slot items before (& remaining)))
+  (let head (least-slot items (& before) (& remaining)))
   (let mut order (list (remove (&mut remaining) head)))
   (while (> (len (& remaining)) 0)
-    (let slot (least-slot items before (& remaining)))
+    (let slot (least-slot items (& before) (& remaining)))
     (push (&mut order) (remove (&mut remaining) slot)))
   order)
 
 ; Where in `remaining` the smallest element is. `before` is strict and ties
 ; keep the slot they already had, so the sort is stable.
 (fn least-slot (T) ((items (& (List T)))
-    (before (Fn ((& T) (& T)) bool))
+    (before (& (Fn ((& T) (& T)) bool)))
     (remaining (& (List i64)))) -> i64
   (let size (len remaining))
   (let mut best 0)

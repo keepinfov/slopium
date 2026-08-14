@@ -22,6 +22,7 @@ local static_items = {
   { label = "set", kind = kinds.Snippet, detail = "assign a mutable binding", insertText = "set ${1:name} ${0:value}", insertTextFormat = 2 },
   { label = "if", kind = kinds.Snippet, detail = "conditional expression", insertText = "if ${1:condition}\n    ${2:then}\n    ${0:else}", insertTextFormat = 2 },
   { label = "match", kind = kinds.Snippet, detail = "pattern match", insertText = "match ${1:value}\n    (${2:pattern} ${0:body})", insertTextFormat = 2 },
+  { label = "lambda", kind = kinds.Snippet, detail = "closure over named captures", insertText = "lambda (${1:capture}) ((${2:arg} ${3:type})) -> ${4:type}\n    ${0:body}", insertTextFormat = 2 },
   { label = "do", kind = kinds.Keyword, detail = "expression sequence" },
   { label = "loop", kind = kinds.Snippet, detail = "unconditional loop", insertText = "loop\n    ${0:body}", insertTextFormat = 2 },
   { label = "while", kind = kinds.Snippet, detail = "conditional loop", insertText = "while ${1:condition}\n    ${0:body}", insertTextFormat = 2 },

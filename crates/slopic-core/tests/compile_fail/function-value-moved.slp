@@ -1,0 +1,10 @@
+(fn double ((x i64)) -> i64
+  (* x 2))
+
+(fn both ((f (Fn (i64) i64)) (g (Fn (i64) i64))) -> i64
+  (+ (f 1) (g 2)))
+
+(fn main () -> i32
+  (let twice double)
+  (let total (both twice twice))
+  0)

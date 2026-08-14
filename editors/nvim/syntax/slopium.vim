@@ -21,6 +21,7 @@ syntax match slopiumCall "\%((\s*\)\@<=[A-Za-z_.+*/<>=-][A-Za-z0-9_:!.+*/<>=-]*"
 " Declarations use nextgroup instead of a regexp beginning at `(`. This keeps
 " the opening delimiter from masking `fn`, `enum`, and their declared names.
 syntax keyword slopiumFunctionKeyword fn nextgroup=slopiumFunction skipwhite
+syntax keyword slopiumLambdaKeyword lambda
 syntax match slopiumFunction "[A-Za-z_][A-Za-z0-9_-]*" contained
 syntax keyword slopiumTypeKeyword struct enum nextgroup=slopiumTypeName skipwhite
 syntax match slopiumTypeName "[A-Z][A-Za-z0-9_-]*" contained
@@ -60,6 +61,7 @@ highlight default link slopiumIdentifier Identifier
 highlight default link slopiumNamedType Type
 highlight default link slopiumCall Function
 highlight default link slopiumFunctionKeyword @keyword.function
+highlight default link slopiumLambdaKeyword @keyword.function
 highlight default link slopiumTypeKeyword @keyword.type
 highlight default link slopiumTestKeyword @keyword
 highlight default link slopiumFunction @function

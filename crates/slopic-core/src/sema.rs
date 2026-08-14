@@ -1,4 +1,4 @@
-use crate::ast::{Expr, ExprKind, Function, Pattern, PatternKind, Program, Type};
+use crate::ast::{Capture, Expr, ExprKind, Function, Param, Pattern, PatternKind, Program, Type};
 use crate::diagnostic::{codes, CompileResult, Diagnostic, Span};
 use serde::Serialize;
 use std::collections::VecDeque;
@@ -53,6 +53,18 @@ pub struct TypedFunction {
     pub return_type: Type,
     pub body: TExpr,
     pub span: Span,
+}
+
+/// One name a `lambda` moved into its environment.
+#[derive(Clone, Debug, Serialize)]
+pub struct TCapture {
+    /// The binding the value was taken from, in the enclosing function.
+    pub from: BindingId,
+    /// The binding it is inside the body, which is a different one holding the
+    /// same value under the same name.
+    pub id: BindingId,
+    pub name: String,
+    pub ty: Type,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -138,6 +150,7 @@ pub enum TExprKind {
         name: String,
         type_args: Vec<Type>,
     },
+
     /// A call through a local of `Fn` type.
     ///
     /// The callee is a binding rather than a name, which is the whole
@@ -145,6 +158,17 @@ pub enum TExprKind {
     CallValue {
         callee: BindingId,
         args: Vec<TExpr>,
+    },
+    /// A `lambda` and what it closes over (`D-102`).
+    ///
+    /// The body is lowered to a function of its own and the captures become
+    /// the block that function is handed, so this is the last place the two are
+    /// one expression.
+    Lambda {
+        captures: Vec<TCapture>,
+        params: Vec<TypedParam>,
+        result: Type,
+        body: Box<TExpr>,
     },
     GenericCall {
         callee: String,
@@ -272,6 +296,9 @@ struct Binding {
     definition: Span,
     borrowed_from: Option<BindingId>,
     owns_loan: bool,
+    /// Whether this name is a `lambda`'s capture, which the environment owns
+    /// and therefore nothing may move back out (`D-102`).
+    captured: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -462,6 +489,13 @@ struct Analyzer<'a> {
     /// through struct and enum fields and the answer never changes on the way
     /// down.
     pattern_borrow: Option<Option<BindingId>>,
+    /// The environments a `lambda` body is written inside of, while it is being
+    /// typed.
+    ///
+    /// The body cannot see them — that is what `D-102` is — but a name it
+    /// forgot to capture is looked up here anyway, so that the diagnostic can
+    /// tell "you did not capture this" from "there is no such name".
+    enclosing: Vec<Environment>,
     env: Environment,
 }
 
@@ -590,6 +624,7 @@ impl<'a> Analyzer<'a> {
             next_binding: 0,
             move_sites: HashMap::new(),
             pattern_borrow: None,
+            enclosing: Vec::new(),
             env: Environment::default(),
         }
     }
@@ -1111,6 +1146,7 @@ impl<'a> Analyzer<'a> {
                 definition: param.span,
                 borrowed_from: None,
                 owns_loan: false,
+                captured: false,
             };
             self.refuse_function_shadow(&param.name, &parameter_type, param.span);
             if self.env.insert(param.name.clone(), binding).is_err() {
@@ -1189,6 +1225,7 @@ impl<'a> Analyzer<'a> {
                     definition: expr.span,
                     borrowed_from,
                     owns_loan,
+                    captured: false,
                 };
                 self.refuse_function_shadow(name, &value.ty, expr.span);
                 if self.env.insert(name.clone(), binding).is_err() {
@@ -1234,6 +1271,12 @@ impl<'a> Analyzer<'a> {
             ExprKind::Try(value) => self.try_expr(expr, value),
             ExprKind::Convert { target, value } => self.convert(expr, target, value),
             ExprKind::Call { callee, args } => self.call(expr, callee, args, expected),
+            ExprKind::Lambda {
+                captures,
+                params,
+                result,
+                body,
+            } => self.lambda(expr, captures, params, result, body),
         };
 
         if let Some(expected) = expected {
@@ -1323,6 +1366,30 @@ impl<'a> Analyzer<'a> {
             if let Some(candidate) = candidate {
                 return self.function_value(expr, &candidate, name, expected);
             }
+            // A name the enclosing function has and this `lambda` did not
+            // capture. It is one diagnostic and it names the fix, and the type
+            // it hands back is the one that was asked for, so the mismatch that
+            // would otherwise follow at the same span does not.
+            if self
+                .enclosing
+                .iter()
+                .any(|scope| scope.lookup_id(name).is_some())
+            {
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        codes::NAME_OR_TYPE,
+                        self.file,
+                        expr.span,
+                        format!("`{name}` is not captured by this lambda"),
+                    )
+                    .with_help(format!(
+                        "name it in the capture list — `(lambda ({name} ...) ...)` — \
+                         which moves it in"
+                    )),
+                );
+                let ty = expected.cloned().unwrap_or(Type::Unit);
+                return self.typed(expr, ty, TExprKind::Unit);
+            }
             self.error(expr.span, format!("undefined variable `{name}`"));
             return self.typed(expr, Type::Unit, TExprKind::Unit);
         };
@@ -1356,6 +1423,21 @@ impl<'a> Analyzer<'a> {
                 );
             }
             _ => {}
+        }
+        // A capture belongs to the environment, which drops it (`D-102`). The
+        // damage a move would do is not to this call but to the second one, so
+        // it is refused by what the name is rather than by what state it is in.
+        if consume && !binding.ty.is_copy() && binding.captured {
+            self.diagnostics.push(
+                Diagnostic::error(
+                    codes::OWNERSHIP,
+                    self.file,
+                    expr.span,
+                    format!("cannot move `{name}` out of the lambda that captured it"),
+                )
+                .with_label(binding.definition, "captured here")
+                .with_help("borrow it or call `clone`; the capture stays where it is"),
+            );
         }
         if consume && !binding.ty.is_copy() && binding.state == OwnershipState::Available {
             if let Some(binding) = self.env.bindings.get_mut(&id) {
@@ -2021,6 +2103,7 @@ impl<'a> Analyzer<'a> {
                     definition: pattern.span,
                     borrowed_from: self.pattern_borrow.flatten(),
                     owns_loan: false,
+                    captured: false,
                 };
                 self.refuse_function_shadow(name, &ty, pattern.span);
                 if self.env.insert(name.clone(), binding).is_err() {
@@ -2289,10 +2372,183 @@ impl<'a> Analyzer<'a> {
         )
     }
 
-    /// A call through a local of `Fn` type.
+    /// A `lambda`, and the moves that fill its environment (`D-102`).
     ///
-    /// The callee is read without consuming it: a function value is `Copy`, so
-    /// calling through the same local twice is not a move.
+    /// The captures are read in the enclosing scope, so every ownership rule
+    /// that applies to handing a value to a function applies to handing one to
+    /// a `lambda`: a moved binding cannot be captured and a borrowed one
+    /// cannot be moved. The body is then typed against an environment holding
+    /// the captures and the parameters and *nothing else*, which is what makes
+    /// a name it forgot to capture a diagnostic rather than a silent move.
+    fn lambda(
+        &mut self,
+        expr: &Expr,
+        captures: &[Capture],
+        params: &[Param],
+        result: &Type,
+        body: &Expr,
+    ) -> TExpr {
+        let mut taken = Vec::new();
+        for capture in captures {
+            if self.env.lookup_id(&capture.name).is_none() {
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        codes::NAME_OR_TYPE,
+                        self.file,
+                        capture.span,
+                        format!("`{}` is not a value in scope", capture.name),
+                    )
+                    .with_help("a capture names a binding the lambda is written inside of"),
+                );
+                continue;
+            }
+            let site = Expr {
+                kind: ExprKind::Var {
+                    name: capture.name.clone(),
+                    resolved: None,
+                },
+                span: capture.span,
+            };
+            let value = self.variable(&site, &capture.name, None, true, None);
+            let TExprKind::Var(from) = value.kind else {
+                continue;
+            };
+            // The environment is an aggregate that outlives the frame it was
+            // built in, so a borrow in it is the thing `SL0300` refuses
+            // everywhere else — and a `Ref` is `Copy`, so nothing else would
+            // have stopped it. Found by probing, not by a test.
+            if contains_borrowed_type(&value.ty) {
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        codes::OWNERSHIP,
+                        self.file,
+                        capture.span,
+                        format!(
+                            "cannot capture `{}`, which is a `{}`",
+                            capture.name, value.ty
+                        ),
+                    )
+                    .with_help(
+                        "a closure can outlive the frame it was written in, so it holds \
+                         values and not borrows: capture what the borrow points at, or \
+                         `clone` it first",
+                    ),
+                );
+            }
+            taken.push((capture, from, value.ty));
+        }
+
+        // The body sees an environment of its own. Swapping the whole thing is
+        // what enforces `D-102`: there is no enclosing scope to fall through
+        // to, so an uncaptured name is undefined rather than free.
+        self.enclosing.push(std::mem::take(&mut self.env));
+        let outer_pattern_borrow = self.pattern_borrow.take();
+        let outer_return_type = self.current_return_type.take();
+        self.env.push();
+
+        let mut typed_captures = Vec::new();
+        for (capture, from, ty) in taken {
+            let id = self.fresh_id();
+            let binding = Binding {
+                id,
+                ty: ty.clone(),
+                mutable: false,
+                state: OwnershipState::Available,
+                definition: capture.span,
+                borrowed_from: None,
+                owns_loan: false,
+                captured: true,
+            };
+            if self.env.insert(capture.name.clone(), binding).is_err() {
+                self.error(
+                    capture.span,
+                    format!("`{}` is captured more than once", capture.name),
+                );
+            }
+            typed_captures.push(TCapture {
+                from,
+                id,
+                name: capture.name.clone(),
+                ty,
+            });
+        }
+
+        let mut typed_params = Vec::new();
+        for param in params {
+            // The written type, not the normalized one: normalizing rewrites a
+            // generic instance to the name monomorphization gave it, which is
+            // not a type anything wrote and not one this recognizes. The same
+            // order a declaration is checked in.
+            self.validate_type(&param.ty, param.span);
+            let parameter_type = self.normalize_type(&param.ty, param.span);
+            let id = self.fresh_id();
+            let binding = Binding {
+                id,
+                ty: parameter_type.clone(),
+                mutable: false,
+                state: OwnershipState::Available,
+                definition: param.span,
+                borrowed_from: None,
+                owns_loan: false,
+                captured: false,
+            };
+            self.refuse_function_shadow(&param.name, &parameter_type, param.span);
+            if self.env.insert(param.name.clone(), binding).is_err() {
+                self.error(
+                    param.span,
+                    format!("parameter `{}` is declared more than once", param.name),
+                );
+            }
+            typed_params.push(TypedParam {
+                id,
+                name: param.name.clone(),
+                ty: parameter_type,
+                span: param.span,
+            });
+        }
+
+        self.validate_type(result, expr.span);
+        let result_type = self.normalize_type(result, expr.span);
+        // The same refusal a declaration gets, for the same reason: a borrow
+        // returned from a call outlives what it points at. A `lambda` is
+        // checked here because it is not a declaration and never passes the
+        // loop that checks those.
+        if contains_borrowed_type(&result_type) {
+            self.error_with_code(
+                codes::OWNERSHIP,
+                expr.span,
+                "borrowed values cannot be returned from functions",
+            );
+        }
+        self.current_return_type = Some(result_type.clone());
+        let typed_body = self.expr(body, Some(&result_type));
+        self.env.pop();
+        self.env = self.enclosing.pop().unwrap_or_default();
+        self.pattern_borrow = outer_pattern_borrow;
+        self.current_return_type = outer_return_type;
+
+        let ty = Type::Fn {
+            params: typed_params.iter().map(|param| param.ty.clone()).collect(),
+            result: Box::new(result_type.clone()),
+        };
+        self.typed(
+            expr,
+            ty,
+            TExprKind::Lambda {
+                captures: typed_captures,
+                params: typed_params,
+                result: result_type,
+                body: Box::new(typed_body),
+            },
+        )
+    }
+
+    /// A call through a local of `Fn` type, or of a borrow of one.
+    ///
+    /// The callee is read without consuming it, which is what lets a parameter
+    /// be called as often as its body likes. Since `D-101` a function value is
+    /// owned, so *passing* one twice is two moves and the answer is the one the
+    /// language already has — take it by borrow, and call through that.
     fn call_value(&mut self, expr: &Expr, callee: &str, args: &[Expr]) -> TExpr {
         let id = self
             .env
@@ -2302,7 +2558,7 @@ impl<'a> Analyzer<'a> {
             self.error(expr.span, format!("undefined variable `{callee}`"));
             return self.typed(expr, Type::Unit, TExprKind::Unit);
         };
-        let Type::Fn { params, result } = binding.ty.clone() else {
+        let Type::Fn { params, result } = binding.ty.strip_ref().clone() else {
             self.diagnostics.push(
                 Diagnostic::error(
                     codes::NAME_OR_TYPE,
@@ -2314,10 +2570,10 @@ impl<'a> Analyzer<'a> {
             );
             return self.typed(expr, Type::Unit, TExprKind::Unit);
         };
-        // Unreachable while a function value is the only `Fn` there is: it is
-        // `Copy`, so nothing ever moves out of the binding. It is here because
-        // a closure is the same `CallValue` over a type that is not `Copy`, and
-        // this is the path that would have to notice (v0.7.2).
+        // Written at v0.7.2 against the day a function value stopped being
+        // `Copy`, and unreachable until `D-101` made that day this one: a `Fn`
+        // handed to something else is gone, and calling it afterwards is the
+        // use this notices.
         if binding.state == OwnershipState::Moved {
             self.diagnostics.push(
                 Diagnostic::error(
@@ -3302,6 +3558,24 @@ impl<'a> Analyzer<'a> {
                     self.materialize_typed_expr(argument);
                 }
             }
+            // A `lambda` written in a generic body carries its parameters and
+            // its captures as types of their own, and every one of them can
+            // mention the enclosing function's parameters.
+            TExprKind::Lambda {
+                captures,
+                params,
+                result,
+                body,
+            } => {
+                for capture in captures {
+                    capture.ty = self.normalize_type(&capture.ty, expression.span);
+                }
+                for param in params {
+                    param.ty = self.normalize_type(&param.ty, param.span);
+                }
+                *result = self.normalize_type(result, expression.span);
+                self.materialize_typed_expr(body);
+            }
             TExprKind::FnRef { type_args, .. } => {
                 for argument in type_args {
                     *argument = self.normalize_type(argument, expression.span);
@@ -3495,9 +3769,14 @@ impl<'a> Analyzer<'a> {
 /// same scalar is a load and the only reading of one the language has
 /// (`D-100`).
 fn is_nothing_to_clone(ty: &Type) -> bool {
+    // `Fn` was here while a function value was a code address and copying one
+    // was the no-op `D-091` refuses. Since `D-101` it owns its captures, so
+    // `(clone f)` is a real copy — a second block holding a clone of each — and
+    // it is what the diagnostic for using one twice tells the author to reach
+    // for.
     matches!(
         ty,
-        Type::Unit | Type::Bool | Type::I32 | Type::I64 | Type::F64 | Type::Fn { .. }
+        Type::Unit | Type::Bool | Type::I32 | Type::I64 | Type::F64
     )
 }
 
@@ -3522,6 +3801,16 @@ fn collect_variable_names(expr: &Expr, output: &mut HashSet<String>) {
         ExprKind::Set { name, value } => {
             output.insert(name.clone());
             collect_variable_names(value, output);
+        }
+        // Both halves, and deliberately over-generous: this decides which
+        // borrows may end early, and a name counted that is not really used
+        // keeps a loan alive longer than it must, while a name missed releases
+        // one that is still held.
+        ExprKind::Lambda { captures, body, .. } => {
+            for capture in captures {
+                output.insert(capture.name.clone());
+            }
+            collect_variable_names(body, output);
         }
         ExprKind::Do(expressions) => {
             for expression in expressions {
@@ -3942,6 +4231,21 @@ fn specialize_expr(
         // and never generated, and the link fails rather than the compile.
         // `type_args` is emptied so a second pass over the same body is a
         // no-op, the way rewriting `GenericCall` into `Call` is for a call.
+        TExprKind::Lambda {
+            captures,
+            params,
+            result,
+            body,
+        } => {
+            for capture in captures {
+                capture.ty = substitute_type(&capture.ty, substitutions);
+            }
+            for param in params {
+                param.ty = substitute_type(&param.ty, substitutions);
+            }
+            *result = substitute_type(result, substitutions);
+            specialize_expr(body, substitutions, queue);
+        }
         TExprKind::FnRef { name, type_args } => {
             if !type_args.is_empty() {
                 let concrete = type_args

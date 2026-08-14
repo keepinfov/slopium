@@ -42,9 +42,11 @@
     ((Option:None) (Option:None))))
 
 ; The fallback is evaluated by the caller either way. `or-else` is the lazy
-; form, and the pair is deliberate rather than an oversight: a `(Fn () T)` is
-; the only way to defer work in a language with no closures, and it cannot
-; carry anything computed nearby.
+; form, and the pair is deliberate rather than an oversight. Until `D-102` it
+; was also the weaker of the two: a `(Fn () T)` could defer work but could not
+; carry anything computed nearby, which is the one place in this library where
+; the absence of closures was felt as an absence. A `lambda` closes it without
+; changing either signature.
 (fn unwrap-or (T) ((value (Option T)) (fallback T)) -> T
   (match value
     ((Option:Some inner) inner)

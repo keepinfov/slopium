@@ -1,0 +1,5 @@
+(fn main () -> i32
+  (let offset 3)
+  (let add (lambda () ((x i64)) -> i64 (+ x offset)))
+  (let sum (add 39))
+  0)

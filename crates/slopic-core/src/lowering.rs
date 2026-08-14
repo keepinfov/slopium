@@ -155,6 +155,14 @@ fn extern_arguments(declaration: &MirExtern, args: &[LocalId]) -> Vec<(ExternWor
     words
 }
 
+/// Words a function value carries before its first capture (`D-101`).
+///
+/// The code address, the helper that frees the block, and the helper that
+/// copies it. The block is laid out as an ordinary struct, so those two are the
+/// ones both backends already generate for every struct — which is why a
+/// closure costs no new code generation at all.
+pub const CLOSURE_HEADER: usize = 3;
+
 pub fn struct_drop_symbol(name: &str) -> String {
     format!("sl_drop_struct_{}", encoded(name))
 }
@@ -188,6 +196,11 @@ pub fn drop_function(module: &MirModule, ty: &Type) -> Option<String> {
         Type::Named(inner) if module.enums.iter().any(|item| &item.name == inner) => {
             Some(enum_drop_symbol(inner))
         }
+        // Every `Fn` reaches the same shim, which reads the helper out of the
+        // block and jumps to it (`D-101`). The static type cannot name the
+        // helper the way a struct's can: two closures of one type capture
+        // different things, so the block is the only thing that knows.
+        Type::Fn { .. } => Some("sl_rt_closure_drop".to_owned()),
         _ => None,
     }
 }
@@ -205,6 +218,7 @@ pub fn clone_function(module: &MirModule, ty: &Type) -> Option<String> {
         Type::Named(inner) if module.enums.iter().any(|item| &item.name == inner) => {
             Some(enum_clone_symbol(inner))
         }
+        Type::Fn { .. } => Some("sl_rt_closure_clone".to_owned()),
         _ => None,
     }
 }
@@ -258,7 +272,12 @@ pub fn reference_is_slice(ty: &Type) -> bool {
 pub fn is_pointer_like(ty: &Type) -> bool {
     matches!(
         ty,
-        Type::String | Type::List(_) | Type::Array { .. } | Type::Slice(_) | Type::Named(_)
+        Type::String
+            | Type::List(_)
+            | Type::Array { .. }
+            | Type::Slice(_)
+            | Type::Named(_)
+            | Type::Fn { .. }
     )
 }
 

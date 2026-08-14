@@ -1,0 +1,6 @@
+function-value-moved.slp:9:26: error[SL0300]: use of moved value `twice`
+  |
+ 9 |   (let total (both twice twice))
+  |                          ^^^^^
+  = label 8:3: value was declared here
+  = help: borrow the value or call `clone` before moving it

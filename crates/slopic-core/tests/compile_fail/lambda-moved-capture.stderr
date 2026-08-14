@@ -1,0 +1,6 @@
+lambda-moved-capture.slp:6:54: error[SL0300]: cannot move `name` out of the lambda that captured it
+  |
+ 6 |   (let give (lambda (name) ((x i64)) -> String (keep name)))
+  |                                                      ^^^^
+  = label 6:22: captured here
+  = help: borrow it or call `clone`; the capture stays where it is

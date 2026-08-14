@@ -2,6 +2,11 @@
 ; that function, a local of `Fn` type is called through, and both are one
 ; machine word. The type is written `(Fn (parameter ...) result)`, so every
 ; arity has one spelling and none is read from the right.
+;
+; Since `D-101` that word is owned rather than `Copy` — it points at a block
+; that a closure fills with captures — so everything here is also a check that a
+; function value with nothing in it is moved, dropped and stored like any other
+; owned value.
 
 (take std:io println println-i64)
 (take std:string concat from-i64)
@@ -28,7 +33,7 @@
 (fn twice ((f (Fn (i64) i64)) (value i64)) -> i64
   (f (f value)))
 
-; A function value is returned like any other one-word value.
+; A function value is returned like any other owned value.
 (fn pick ((doubling bool)) -> (Fn (i64) i64)
   (if doubling double add-ten))
 
@@ -38,9 +43,13 @@
 ; plain word next to something that owns memory.
 (struct Step ((name String) (run (Fn (i64) i64))))
 
-(fn run-step ((step Step) (value i64)) -> i64
-  (let action (. step run))
-  (action value))
+; Reading it back out is a match through a borrow, because since `D-101` a
+; function value is owned and `(. step run)` would move it out of a struct the
+; caller still has. `D-099` binds the field as a borrow and `D-101` makes a
+; borrowed function value callable, so the two meet here.
+(fn run-step ((step (& Step)) (value i64)) -> i64
+  (match step
+    ((Step :run action) (action value))))
 
 ; A function taking a borrow is a function value like any other.
 (fn decorate ((f (Fn ((& String)) String)) (text (& String))) -> String
@@ -53,7 +62,7 @@
   (println-i64 (apply (pick false) 5))
   (println-i64 (apply (pick true) 5))
   (let step (Step :name (from-i64 7) :run double))
-  (println-i64 (run-step step 21))
+  (println-i64 (run-step (& step) 21))
   (let greeting "hello")
   (let loud (decorate shout (& greeting)))
   (println (& loud))

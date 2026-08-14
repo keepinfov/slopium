@@ -32,6 +32,11 @@ programs=(
   # `lea` and `add` the backends already emitted, now off a heap pointer rather
   # than the frame, which is an operand combination neither had assembled.
   "tests/projects/pass/borrow-reads/src/main.slp"
+  # Closures add no instruction (`D-101`), and that is the claim: what this
+  # compares is the glue a lifted `lambda` and its environment generate, which
+  # is a clone and a drop helper per capture shape and one more function than
+  # the source has.
+  "tests/projects/pass/closures/src/main.slp"
   "examples/fibonacci.slp"
   "examples/lists.slp"
   "examples/match.slp"

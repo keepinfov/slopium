@@ -171,21 +171,29 @@ fn verify_indirect_calls(
                 continue;
             };
             let where_ = format!("block {index} instruction {position} calls through _{callee}");
-            let Some(local) = function.locals.get(*callee) else {
+            if function.locals.get(*callee).is_none() {
                 // Out of range is already reported by the operand check.
+                continue;
+            }
+            // Since `D-101` the callee local is the code address read out of
+            // the block, and the block goes along as the trailing argument.
+            // That argument is the only thing left that knows the shape, so it
+            // is what the call is checked against.
+            let Some(block) = arg_types.last() else {
+                report(format!("{where_} without passing the block it came from"));
                 continue;
             };
             let Type::Fn {
                 params,
                 result: declared,
-            } = &local.ty
+            } = block.strip_ref()
             else {
                 report(format!(
-                    "{where_}, which holds `{:?}` rather than a function",
-                    local.ty
+                    "{where_} passing `{block:?}` as the block, which is not a function"
                 ));
                 continue;
             };
+            let arg_types = &arg_types[..arg_types.len() - 1];
             if arg_types.len() != params.len() {
                 report(format!(
                     "{where_} with {} arguments but its type takes {}",

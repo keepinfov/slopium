@@ -382,6 +382,46 @@ impl<'a> SymbolIndexBuilder<'a> {
                     self.expr(argument, scope, bindings);
                 }
             }
+            // A capture is written twice: once as a use of the binding outside,
+            // which rename has to follow, and once as a definition inside,
+            // which is the name the body uses. They share a spelling and are
+            // two bindings, so both halves are recorded (`D-102`).
+            TExprKind::Lambda {
+                captures,
+                params,
+                body,
+                ..
+            } => {
+                let mut inner = bindings.clone();
+                for capture in captures {
+                    self.binding_reference(capture.from, expression.span, bindings);
+                    let definition = self
+                        .atom_span(expression.span, &capture.name)
+                        .unwrap_or(expression.span);
+                    let symbol = self.define(
+                        &capture.name,
+                        AnalysisSymbolKind::Variable,
+                        capture.ty.to_string(),
+                        definition,
+                        expression.span,
+                    );
+                    inner.insert(capture.id, symbol);
+                }
+                for param in params {
+                    let definition = self
+                        .atom_span(param.span, &param.name)
+                        .unwrap_or(param.span);
+                    let symbol = self.define(
+                        &param.name,
+                        AnalysisSymbolKind::Variable,
+                        param.ty.to_string(),
+                        definition,
+                        expression.span,
+                    );
+                    inner.insert(param.id, symbol);
+                }
+                self.expr(body, body.span, &mut inner);
+            }
             TExprKind::Call { callee, args } | TExprKind::GenericCall { callee, args, .. } => {
                 self.top_level_reference(callee, expression.span);
                 for argument in args {

@@ -25,9 +25,14 @@ command-line protocol is internal and versioned.
 6. Reachability-driven monomorphization materializes concrete generic
    functions and aggregate layouts.
 7. Lowering produces whole-package target-independent MIR with locals, basic
-   blocks, explicit moves, borrows, loops, calls, and structural drops. Every
-   statement carries the span of the expression it came from, and every block
-   is terminated by construction.
+   blocks, explicit moves, borrows, loops, calls, and structural drops. A
+   `lambda` body becomes a function of its own here and its environment becomes
+   a struct, which is why a closure costs neither backend an instruction: the
+   block is laid out as an aggregate, so the clone and drop helpers generated
+   for every aggregate are its glue, and the runtime does nothing but read one
+   out of the block and jump to it (`D-101`). Every statement carries the span
+   of the expression it came from, and every block is terminated by
+   construction.
 8. The release profile runs an optimization pipeline to a fixpoint: bounded
    inlining, cross-block constant propagation, control-flow simplification, and
    dead code elimination. Two behaviours are preserved by construction —
@@ -37,9 +42,10 @@ command-line protocol is internal and versioned.
    stale if it contained a copy of another module's code.
 9. A verifier checks the result of each pass: identifier ranges, parameter
    layout, call arity, operand types, and that every read has a reaching
-   definition. A call through a function value is checked against the callee
-   local's own `Fn` type, because a wrong indirect call is the one kind that
-   assembles and links (`D-092`). So is every read and address taken through a
+   definition. A call through a function value is checked against the `Fn` type
+   of the block it passes along, because a wrong indirect call is the one kind
+   that assembles and links (`D-092`, `D-101`). So is every read and address
+   taken through a
    borrow: a borrow of a pointer-shaped value is that pointer and a borrow of
    anything else is the address of a slot, so the two field instructions are
    each garbage in the other's place, and getting it wrong reads an integer as
