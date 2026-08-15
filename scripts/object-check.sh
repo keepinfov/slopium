@@ -37,6 +37,11 @@ programs=(
   # is a clone and a drop helper per capture shape and one more function than
   # the source has.
   "tests/projects/pass/closures/src/main.slp"
+  # A map is a generic struct holding two function values and a list of lists
+  # (`D-104`), so its clone and drop helpers nest one level deeper than
+  # anything else in this corpus, and `replace` is a runtime call neither
+  # backend had emitted.
+  "tests/projects/pass/maps/src/main.slp"
   "examples/fibonacci.slp"
   "examples/lists.slp"
   "examples/match.slp"

@@ -37,6 +37,9 @@ cat >"$check_dir/runtime.slp" <<'SLOPIUM'
 (take std:prelude Option Result)
 (take std:list (map :as list-map) (sort-by :as list-sort-by))
 (take std:option (map :as option-map) unwrap-or)
+(take std:string (hash :as string-hash) (equals :as string-equals))
+(take std:map Map map-new map-insert map-lookup map-delete map-size map-fold)
+(take std:set Set set-of set-add set-discard set-count)
 
 (struct Pair ((left String) (right String)))
 (enum Message Empty (Text ((value String))))
@@ -89,6 +92,31 @@ cat >"$check_dir/runtime.slp" <<'SLOPIUM'
 
 ; A subnormal, spelled out, because there is no exponent literal to spell it
 ; with (`D-098`). It is the value whose conversion allocates the most.
+; A map of owned keys to owned values, which is the whole of `D-104`'s drop
+; glue: every entry owns two allocations, a rehash moves them between lists,
+; and an entry replaced by a second insert of the same key is freed there.
+(fn empty-labels () -> (Map String String)
+  (map-new string-hash string-equals))
+
+(fn empty-words () -> (Set String)
+  (set-of string-hash string-equals))
+
+(fn label-table ((upto i64)) -> (Map String String)
+  (let mut labels (empty-labels))
+  (let mut index 0)
+  (while (< index upto)
+    (let digits (from-i64 index))
+    (let prefix "k")
+    (let key (concat (& prefix) (& digits)))
+    (set labels (map-insert labels key (shout (& digits))))
+    (set index (+ index 1)))
+  labels)
+
+(fn widest ((carried i64) (key (& String)) (value (& String))) -> i64
+  (if (> (len value) carried)
+    (len value)
+    carried))
+
 (fn tiny-text () -> String
   (let zero "0")
   (let mut text "0.")
@@ -192,6 +220,34 @@ cat >"$check_dir/runtime.slp" <<'SLOPIUM'
       (< (+ (len left) (len (& mark))) (+ (len right) (len (& mark))))))
   (let ordered (list-sort-by (list "ccc" "a" "bb") by-length))
   (println (get-ref (& ordered) 0))
+  ; Twenty entries into a table that starts at four buckets: three rehashes,
+  ; each moving every entry between lists. Then the map is cloned, which clones
+  ; every key, every value and both function values, and both copies are
+  ; dropped — releasing a bucket without its entries leaks, releasing an entry
+  ; twice is a double free, and neither is a type error.
+  (let labels (label-table 20))
+  (println-i64 (map-size (& labels)))
+  (println-i64 (map-fold (& labels) 0 widest))
+  (let copied (clone labels))
+  (let wanted (from-i64 7))
+  (let held (unwrap-or (map-lookup (& copied) (& wanted)) "none"))
+  (println (& held))
+  (let mut shrunk (label-table 6))
+  (let doomed (from-i64 3))
+  (set shrunk (map-delete shrunk (& doomed)))
+  (println-i64 (map-size (& shrunk)))
+  (let mut words (empty-words))
+  (set words (set-add words "one"))
+  (set words (set-add words "one"))
+  (let gone "one")
+  (set words (set-discard words (& gone)))
+  (println-i64 (set-count (& words)))
+  ; `replace` on its own: the value that comes out is owned by the caller and
+  ; the one that goes in is owned by the list (`D-103`).
+  (let mut slots (list "first" "second"))
+  (let displaced (replace (&mut slots) 0 (shout (& gone))))
+  (println (& displaced))
+  (println (get-ref (& slots) 0))
   (let message (Message:Text "payload"))
   (let looked (text-of (& message)))
   (println (& looked))

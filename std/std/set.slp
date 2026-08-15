@@ -1,0 +1,10 @@
+; What a hosted package does with a set. `core`'s (`D-083`), re-exported.
+
+(export
+  (core:set:Set :as Set)
+  (core:set:of :as set-of)
+  (core:set:add :as set-add)
+  (core:set:holds :as set-holds)
+  (core:set:discard :as set-discard)
+  (core:set:count :as set-count)
+  (core:set:each :as set-each))

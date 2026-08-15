@@ -570,6 +570,7 @@ pub const BUILTINS: &[(&str, &str)] = &[
     ("get-ref", "get-ref(&List<T>, i64) -> &T"),
     ("pop", "pop(&mut List<T>) -> Option<T>"),
     ("remove", "remove(&mut List<T>, i64) -> T"),
+    ("replace", "replace(&mut List<T>, i64, T) -> T"),
     ("+", "numeric addition"),
     ("-", "numeric subtraction"),
     ("*", "numeric multiplication"),

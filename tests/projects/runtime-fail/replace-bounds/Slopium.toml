@@ -1,0 +1,8 @@
+[package]
+name = "replace-bounds"
+version = "0.2.5"
+source = "src"
+entry = "src/main.slp"
+
+[dependencies]
+std = { toolchain = true }

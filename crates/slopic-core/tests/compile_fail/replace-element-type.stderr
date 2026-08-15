@@ -1,0 +1,4 @@
+replace-element-type.slp:3:38: error[SL0200]: expected `i64`, found `String`
+  |
+ 3 |   (let old (replace (&mut numbers) 0 "one"))
+  |                                      ^^^^^

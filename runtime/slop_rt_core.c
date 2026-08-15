@@ -276,6 +276,20 @@ uint64_t sl_rt_list_remove(SlList *list, uint64_t index) {
     return value;
 }
 
+/* The one write a list did not have. Nothing moves: the new element takes the
+ * slot and the old one is handed back, so the caller owns exactly one of them
+ * before the call and exactly one after. */
+uint64_t sl_rt_list_replace(SlList *list, uint64_t index, const void *element) {
+    if (index >= list->len) {
+        RT_FAIL("list index out of bounds");
+    }
+    uint64_t value = 0;
+    unsigned char *slot = list->ptr + index * list->elem_size;
+    sl_mem_copy(&value, slot, list->elem_size);
+    sl_mem_copy(slot, element, list->elem_size);
+    return value;
+}
+
 SlList *sl_rt_list_clone(const SlList *source) {
     SlList *copy =
         sl_rt_list_new(source->elem_size, source->drop_element, source->clone_element);

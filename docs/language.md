@@ -275,8 +275,20 @@ take apart — use `clone` and match the value.
 `get` copies only `Copy` elements. Use `get-ref` to borrow an element or
 `remove` to move one out. With the standard `Option` language item,
 `(pop (&mut values))` returns `Option<T>` and never panics for an empty list.
-Out-of-range `get`, `get-ref`, `remove`, and `slice` remain deterministic
-runtime errors with exit status 101.
+Out-of-range `get`, `get-ref`, `remove`, `replace`, and `slice` remain
+deterministic runtime errors with exit status 101.
+
+```lisp
+(let displaced (replace (&mut values) 0 "ONE"))
+```
+
+`replace` is the only write to an element there is, and it is a swap rather
+than an assignment: the new value goes into the slot and **the old one is
+returned**, owned, for the caller to keep or drop (`D-103`). It is what a
+container written in Slopium is built out of — without it a list can only be
+changed at its ends, and `core:map` would have to move every bucket to touch
+one. `set` still assigns to a name and to nothing else: there is no assignment
+to a field and none to an element.
 
 ```lisp
 (let fixed (array "zero" "one" "two"))
@@ -321,11 +333,11 @@ ordinary modules of the bundled library, written in Slopium over `extern`
 declarations, and a program that uses one says so.
 
 The library is two packages. `core` is what a program with no C library under
-it can have — `option`, `result`, `list`, `string` and `float`. `std` is `core`
-plus what needs an operating system — `io`, `process` and `fs` — and it
-re-exports `core` through `std:prelude`, `std:option`, `std:result`,
-`std:list`, `std:string` and `std:float`, so a package that depends on `std`
-alone reaches everything by
+it can have — `option`, `result`, `list`, `string`, `float`, `map` and `set`.
+`std` is `core` plus what needs an operating system — `io`, `process` and
+`fs` — and it re-exports `core` through `std:prelude`, `std:option`,
+`std:result`, `std:list`, `std:string`, `std:float`, `std:map` and `std:set`,
+so a package that depends on `std` alone reaches everything by
 that name. The combinators live in modules of their own rather than in
 `prelude` because `option` and `result` both call theirs `map`.
 
@@ -380,14 +392,60 @@ owns.
 ```
 
 `sort-by` is stable, and both it and every consuming function here are
-quadratic: sorting in place would need a way to overwrite one element, and the
-language has none.
+quadratic: each removal from the front moves the rest of the list. `replace`
+now makes an in-place sort writable, and nothing here has been rewritten to use
+it — the signatures do not change either way, so it is a later patch's work and
+not an interface promise.
 
 `std:string` is bytes: `byte-at`, `substring`, `concat`, `from-bytes`,
 `equals`, `starts-with`, `find`, `contains`, `trim`, `split` on a separator
-byte, and `from-i64` and `to-i64` between a number and its text. `to-i64`
-returns `(Option i64)` and refuses anything that is not an optional `-`
-followed by digits, including a number too large to hold.
+byte, `hash`, and `from-i64` and `to-i64` between a number and its text.
+`to-i64` returns `(Option i64)` and refuses anything that is not an optional
+`-` followed by digits, including a number too large to hold. `hash` is
+`(h * 31 + byte)` kept under 2^31 - 1, which is a prime rather than a power of
+two because arithmetic traps here: the usual mixing constants are written for a
+language where overflow wraps.
+
+`std:map` and `std:set` are a hash map and a hash set, and neither knows what a
+key is. Both take the two functions that make a key a key:
+
+```lisp
+(take std:string hash equals)
+(take std:map Map map-new map-insert map-lookup map-size)
+(take std:option unwrap-or)
+
+; An empty container takes its type from where it is written, and a `let`
+; carries no type — so an empty map is written as the result of a function.
+(fn empty-scores () -> (Map String i64)
+  (map-new hash equals))
+
+(let mut scores (empty-scores))
+(set scores (map-insert scores "ann" 3))
+(let key "ann")
+(let held (unwrap-or (map-lookup (& scores) (& key)) 0))
+```
+
+`map-new` takes a `(Fn ((& K)) i64)` and a `(Fn ((& K) (& K)) bool)`; a key
+type that does not have them yet gets them written for it, in Slopium, at the
+call. **Everything that writes consumes the map and gives it back** —
+`map-insert` and `map-delete` return the map — because the language assigns to
+a name and to nothing else. Reading does not: `map-lookup`, `map-contains`,
+`map-size` and `map-fold` take `(& (Map K V))`. `map-lookup` answers
+`(Option V)` with the value cloned out, since a reference cannot leave the
+function that made it.
+
+`map-fold` is the only way to walk a map, and its accumulator comes from the
+caller — `(map-fold m start step)` with `step` a `(Fn (A (& K) (& V)) A)`.
+There is no `keys` and no iterator: an iterator is a lazy sequence, which is a
+closure plus a protocol, and the protocol is a trait (`D-088`).
+
+`std:set` is the same machine with the value left out: `set-of`, `set-add`,
+`set-holds`, `set-discard`, `set-count` and `set-each`. A `Set` **is** a
+`(Map T bool)`, written in Slopium over the map like anything else.
+
+None of this needed traits, which is the whole point of it (`D-104`): `D-062`
+made `Map` a non-goal on the grounds that a generic container over a comparable
+key needs a bound, and it needs two function values instead.
 
 `std:float` is the float, kept apart from `std:string` and `std:io` rather
 than split between them: `from-f64`, `to-f64`, `print-f64`, `println-f64` and

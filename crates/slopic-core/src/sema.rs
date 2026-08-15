@@ -2319,7 +2319,7 @@ impl<'a> Analyzer<'a> {
         }
         if matches!(
             callee,
-            "len" | "push" | "get" | "get-ref" | "pop" | "remove"
+            "len" | "push" | "get" | "get-ref" | "pop" | "remove" | "replace"
         ) {
             return self.list_operation(expr, callee, args);
         }
@@ -2613,6 +2613,28 @@ impl<'a> Analyzer<'a> {
         )
     }
 
+    /// The type parameters nothing has decided yet.
+    ///
+    /// This is the set a template is checked against before it is handed to an
+    /// argument as an expectation, and it is not the same as the whole
+    /// parameter set: a parameter that has been substituted is gone, and what
+    /// stands in its place may be spelled with the *enclosing* function's
+    /// parameters, which are names this call has no say over. Checking against
+    /// every parameter instead made the two happen to collide — a `K`
+    /// substituted by a caller's `K` looked unbound — and a call inside a
+    /// generic body then lost an expectation it had (`D-104`).
+    fn unbound(
+        &self,
+        parameters: &HashSet<String>,
+        substitutions: &HashMap<String, Type>,
+    ) -> HashSet<String> {
+        parameters
+            .iter()
+            .filter(|parameter| !substitutions.contains_key(*parameter))
+            .cloned()
+            .collect()
+    }
+
     fn generic_call(
         &mut self,
         expr: &Expr,
@@ -2637,11 +2659,39 @@ impl<'a> Analyzer<'a> {
             .cloned()
             .collect::<HashSet<_>>();
         let mut substitutions = HashMap::<String, Type>::new();
+        // What the call site expects of the result is read *before* the
+        // arguments, because it is what tells them what they are. `(fold map
+        // (list) step)` is the case: the accumulator's type is the result's,
+        // nothing about an empty list says what it holds, and the answer is
+        // already written where the call is (`D-104`).
+        if let Some(expected) = expected {
+            if let Err(message) = unify_type(
+                &signature.result,
+                expected,
+                &parameters,
+                &mut substitutions,
+                self.instances(),
+            ) {
+                self.error(expr.span, message);
+            }
+        }
         let mut typed_args = Vec::new();
         for (index, argument) in args.iter().enumerate() {
             let template = signature.params.get(index);
-            let concrete_expected = template.filter(|ty| !contains_parameter(ty, &parameters));
-            let typed = self.expr(argument, concrete_expected);
+            // A parameter is only unknown while it is still unbound. Once the
+            // result — or an earlier argument — has said what `T` is, the
+            // template with `T` substituted is a type the argument can be
+            // written against, even inside a generic body where what `T`
+            // became is the caller's own parameter.
+            let unbound = self.unbound(&parameters, &substitutions);
+            let filled = template
+                .map(|ty| substitute_type(ty, &substitutions))
+                .filter(|ty| !contains_parameter(ty, &unbound))
+                // Normalized only once it is bound: an unbound parameter is
+                // not a type, and normalizing one would instantiate a generic
+                // under the parameter's own name.
+                .map(|ty| self.normalize_type(&ty, argument.span));
+            let typed = self.expr(argument, filled.as_ref());
             if let Some(template) = template {
                 if let Err(message) = unify_type(
                     template,
@@ -2654,17 +2704,6 @@ impl<'a> Analyzer<'a> {
                 }
             }
             typed_args.push(typed);
-        }
-        if let Some(expected) = expected {
-            if let Err(message) = unify_type(
-                &signature.result,
-                expected,
-                &parameters,
-                &mut substitutions,
-                self.instances(),
-            ) {
-                self.error(expr.span, message);
-            }
         }
         let mut type_args = Vec::new();
         for parameter in &signature.type_params {
@@ -2679,7 +2718,16 @@ impl<'a> Analyzer<'a> {
                 type_args.push(Type::Unit);
             }
         }
+        // Substitution answers what the result is; normalization answers what
+        // it is *called*. A generic function returning `(Box T)` substitutes to
+        // `(Box i64)`, and every type written down at a concrete call site has
+        // already been rewritten to the name monomorphization gave it, so
+        // without this the two spellings of one type do not compare equal.
+        // Inside a generic body the arguments are still parameters and
+        // `normalize_type` leaves the `Apply` alone, which is what
+        // `specialize_expr` needs it to do.
         let result = substitute_type(&signature.result, &substitutions);
+        let result = self.normalize_type(&result, expr.span);
         self.typed(
             expr,
             result,
@@ -2883,9 +2931,11 @@ impl<'a> Analyzer<'a> {
                 typed_fields.push(self.typed(expr, Type::Unit, TExprKind::Unit));
                 continue;
             };
-            let partially_substituted = substitute_type(template, &substitutions);
-            let expected_field = (!contains_parameter(&partially_substituted, &parameters))
-                .then_some(&partially_substituted);
+            let substituted = substitute_type(template, &substitutions);
+            let unbound = self.unbound(&parameters, &substitutions);
+            let partially_substituted = (!contains_parameter(&substituted, &unbound))
+                .then(|| self.normalize_type(&substituted, value.span));
+            let expected_field = partially_substituted.as_ref();
             let typed = self.expr(value, expected_field);
             if let Err(message) = unify_type(
                 template,
@@ -3085,9 +3135,11 @@ impl<'a> Analyzer<'a> {
                 fields.push(self.expr(argument, None));
                 continue;
             };
-            let partially_substituted = substitute_type(template, &substitutions);
-            let expected_field = (!contains_parameter(&partially_substituted, &parameters))
-                .then_some(&partially_substituted);
+            let substituted = substitute_type(template, &substitutions);
+            let unbound = self.unbound(&parameters, &substitutions);
+            let partially_substituted = (!contains_parameter(&substituted, &unbound))
+                .then(|| self.normalize_type(&substituted, argument.span));
+            let expected_field = partially_substituted.as_ref();
             let typed = self.expr(argument, expected_field);
             if let Err(message) = unify_type(
                 template,
@@ -3284,10 +3336,10 @@ impl<'a> Analyzer<'a> {
     }
 
     fn list_operation(&mut self, expr: &Expr, callee: &str, args: &[Expr]) -> TExpr {
-        let expected_len = if matches!(callee, "push" | "get" | "get-ref" | "remove") {
-            2
-        } else {
-            1
+        let expected_len = match callee {
+            "replace" => 3,
+            "push" | "get" | "get-ref" | "remove" => 2,
+            _ => 1,
         };
         if args.len() != expected_len {
             self.error(
@@ -3340,7 +3392,7 @@ impl<'a> Analyzer<'a> {
                         format!("`{callee}` expects a borrowed List, found `{other}`"),
                     )
                     .with_help(
-                        if matches!(callee, "push" | "pop" | "remove") {
+                        if matches!(callee, "push" | "pop" | "remove" | "replace") {
                             "pass `(&mut list)`"
                         } else {
                             "pass `(& list)`"
@@ -3350,13 +3402,13 @@ impl<'a> Analyzer<'a> {
                 (false, Type::Unit, CollectionKind::List)
             }
         };
-        if matches!(callee, "push" | "pop" | "remove") && kind != CollectionKind::List {
+        if matches!(callee, "push" | "pop" | "remove" | "replace") && kind != CollectionKind::List {
             self.error(
                 args[0].span,
                 format!("`{callee}` is only available for List"),
             );
         }
-        if matches!(callee, "push" | "pop" | "remove") && !mutable {
+        if matches!(callee, "push" | "pop" | "remove" | "replace") && !mutable {
             self.error(args[0].span, format!("`{callee}` requires `&mut List`"));
         }
         let mut typed = vec![list];
@@ -3437,6 +3489,23 @@ impl<'a> Analyzer<'a> {
             }
             "remove" => {
                 typed.push(self.expr(&args[1], Some(&Type::I64)));
+                self.typed(
+                    expr,
+                    element,
+                    TExprKind::Call {
+                        callee: callee.into(),
+                        args: typed,
+                    },
+                )
+            }
+            // The only write to an element a list has. It is a swap and not an
+            // assignment because the element already there is owned: an
+            // assignment would have to drop it, and returning it says instead
+            // that the caller decides, which is the same shape as `remove`
+            // (`D-103`).
+            "replace" => {
+                typed.push(self.expr(&args[1], Some(&Type::I64)));
+                typed.push(self.expr(&args[2], Some(&element)));
                 self.typed(
                     expr,
                     element,

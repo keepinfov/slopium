@@ -1,0 +1,11 @@
+[package]
+name = "maps"
+version = "0.2.5"
+source = "src"
+entry = "src/main.slp"
+
+[dependencies]
+std = { toolchain = true }
+
+[build]
+target = "x86_64-unknown-linux-gnu"

@@ -56,6 +56,7 @@ local static_items = {
   { label = "get", kind = kinds.Function, detail = "get(&List<T>, i64) -> T" },
   { label = "get-ref", kind = kinds.Function, detail = "borrow an element" },
   { label = "remove", kind = kinds.Function, detail = "move an element out of List<T>" },
+  { label = "replace", kind = kinds.Function, detail = "replace(&mut List<T>, i64, T) -> T" },
   { label = "pop", kind = kinds.Function, detail = "pop(&mut List<T>) -> Option<T>" },
   { label = "+", kind = kinds.Function, detail = "numeric addition" },
   { label = "-", kind = kinds.Function, detail = "numeric subtraction" },

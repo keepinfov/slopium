@@ -1,0 +1,4 @@
+(fn main () -> i32
+  (let words (list "one" "two"))
+  (let old (replace (& words) 0 "ONE"))
+  0)

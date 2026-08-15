@@ -1,0 +1,4 @@
+replace-shared-borrow.slp:3:21: error[SL0200]: `replace` requires `&mut List`
+  |
+ 3 |   (let old (replace (& words) 0 "ONE"))
+  |                     ^^^^^^^^^

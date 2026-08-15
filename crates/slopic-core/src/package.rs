@@ -1139,6 +1139,7 @@ fn is_builtin(name: &str) -> bool {
             | "get-ref"
             | "pop"
             | "remove"
+            | "replace"
             | "+"
             | "-"
             | "*"

@@ -12,7 +12,7 @@
 (take core:option Option)
 
 (export byte-at substring concat from-bytes equals starts-with find contains
-  trim split from-i64 to-i64)
+  trim split from-i64 to-i64 hash)
 
 ; The length travels beside the pointer, because a Slopium string may contain a
 ; NUL byte and C would stop at it (`D-079`).
@@ -88,6 +88,23 @@
   (match (find text needle)
     ((Option:Some _) true)
     ((Option:None) false)))
+
+; A hash of the bytes, for a `(Map String V)` and anything else that wants one.
+;
+; It is `(h * 31 + byte)` kept under a prime, and the prime is there because
+; arithmetic traps: the usual constants — FNV's multiply, a 64-bit mix — are
+; written for a language where overflow wraps, and this is not one. Under
+; 2^31 the multiply cannot reach 2^63, so nothing here is ever close.
+(fn hash ((text (& String))) -> i64
+  (let modulus 2147483647)
+  (let size (len text))
+  (let mut total 0)
+  (let mut index 0)
+  (while (< index size)
+    (let mixed (+ (* total 31) (byte-at text index)))
+    (set total (- mixed (* (/ mixed modulus) modulus)))
+    (set index (+ index 1)))
+  total)
 
 (fn is-space ((byte i64)) -> bool
   (if (= byte 32)

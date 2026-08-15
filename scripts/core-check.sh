@@ -44,10 +44,16 @@ allowed_undefined="sl_rt_abort sl_rt_alloc sl_rt_free sl_rt_panic"
 # itself (`D-097`, `D-098`).
 cat > "$work/program.slp" <<'SLP'
 (take core:option Option)
-(take core:string from-i64 to-i64)
+(take core:string from-i64 to-i64 hash equals)
 (take core:float from-f64 to-f64)
+(take core:map Map new insert lookup)
 
 (export answer)
+
+; An empty map takes its type from a function that says what it returns, which
+; is the only place one can be written (`D-104`).
+(fn empty-table () -> (Map String i64)
+  (new hash equals))
 
 (fn answer () -> i64
   (let mut values (list 3 4))
@@ -60,7 +66,20 @@ cat > "$work/program.slp" <<'SLP'
         (let third (/ (- 0.0 1.0) 3.0))
         (let written (from-f64 third))
         (match (to-f64 (& written))
-          ((Option:Some restored) (if (= restored third) parsed 0))
+          ((Option:Some restored)
+            (if (= restored third)
+              (do
+                ; And through `core:map`, which is `core` because a bucket is a
+                ; list and a list needs an allocator and not an operating
+                ; system (`D-104`).
+                (let mut table (empty-table))
+                (set table (insert table "one" 1))
+                (set table (insert table "two" 2))
+                (let key "two")
+                (match (lookup (& table) (& key))
+                  ((Option:Some held) (if (= held 2) parsed 0))
+                  ((Option:None) 0)))
+              0))
           ((Option:None) 0))))
     ((Option:None) 0)))
 SLP

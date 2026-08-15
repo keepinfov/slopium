@@ -1,0 +1,228 @@
+; A map from a key to a value, over a hash function and an equality function.
+;
+; `D-062` made `Map` a non-goal through 1.0 on the grounds that a generic
+; container over a comparable key needs traits. It does not. It needs a hash
+; and an equality, and since v0.7.0 those are values, so they are written here
+; as two parameters and passed in by whoever knows what the key is (`D-104`).
+; Nothing in this file knows what a `K` is, and that is the point.
+;
+; It is `core` (`D-083`): a bucket is a `(List T)`, which needs an allocator and
+; not an operating system.
+;
+; **Everything that writes consumes the map and gives it back.** The language
+; assigns to a name and to nothing else — there is no assignment to a field and
+; none to an element — so a container that mutates in place cannot be written in
+; it. `(set scores (insert scores key value))` is the whole convention, and it
+; is the ownership the language already has rather than a convention on top of
+; it.
+;
+; A bucket is updated with `replace` (`D-103`), which is the one write to a
+; list element there is: the new element takes the slot and the old one is
+; handed back, so a slot is never briefly holding two owners or none.
+
+(take core:option Option)
+
+(export Map Entry new insert lookup contains delete size fold)
+
+; A key and its value, together, because a bucket holds both and a list holds
+; one thing.
+(struct Entry (K V) ((key K) (value V)))
+
+; `slots` is the bucket array — a list of buckets, each a short list scanned
+; with `same`. `count` is how many entries are in all of them, and the two are
+; what decide when to grow.
+(struct Map (K V)
+  ((slots (List (List (Entry K V))))
+    (count i64)
+    (hash (Fn ((& K)) i64))
+    (same (Fn ((& K) (& K)) bool))))
+
+; A new map has no buckets at all, and the first insert gives it four. That is
+; not a saving, it is what lets this be written: an empty `(List (List (Entry K
+; V)))` needs the type from somewhere, and the field of the struct being built
+; is somewhere. A `let` is not, which is why nothing below writes one.
+(fn new (K V) ((hash (Fn ((& K)) i64)) (same (Fn ((& K) (& K)) bool)))
+  -> (Map K V)
+  (Map :slots (list) :count 0 :hash hash :same same))
+
+(fn size (K V) ((map (& (Map K V)))) -> i64
+  (match map
+    ((Map :slots _ :count count :hash _ :same _) (clone count))))
+
+; The map is taken apart and put back together, which is what a write is here.
+; The key it already holds is dropped with the entry that held it, so inserting
+; twice keeps the second key and not the first — the same as every language
+; where a key is what it hashes to.
+(fn insert (K V) ((map (Map K V)) (key K) (value V)) -> (Map K V)
+  (let roomy (reserve map))
+  (match roomy
+    ((Map :slots slots :count count :hash hash :same same)
+      (do
+        (let mut room slots)
+        (let index (bucket-of (hash (& key)) (len (& room))))
+        (let mut bucket (replace (&mut room) index (list)))
+        (let at (index-of (& bucket) (& same) (& key)))
+        (let added
+          (if (< at 0)
+            1
+            (do
+              (let old (remove (&mut bucket) at))
+              0)))
+        (push (&mut bucket) (Entry :key key :value value))
+        (let empty (replace (&mut room) index bucket))
+        (Map :slots room :count (+ count added) :hash hash :same same)))))
+
+; A value is cloned out, because a reference cannot leave the function that
+; made it and the map keeps what it holds.
+(fn lookup (K V) ((map (& (Map K V))) (key (& K))) -> (Option V)
+  (match map
+    ((Map :slots slots :count _ :hash hash :same same)
+      (do
+        (let capacity (len slots))
+        (if (= capacity 0)
+          (Option:None)
+          (do
+            (let bucket (get-ref slots (bucket-of (hash key) capacity)))
+            (let at (index-of bucket same key))
+            (if (< at 0)
+              (Option:None)
+              (match (get-ref bucket at)
+                ((Entry :key _ :value value) (Option:Some (clone value)))))))))))
+
+(fn contains (K V) ((map (& (Map K V))) (key (& K))) -> bool
+  (match map
+    ((Map :slots slots :count _ :hash hash :same same)
+      (do
+        (let capacity (len slots))
+        (if (= capacity 0)
+          false
+          (do
+            (let bucket (get-ref slots (bucket-of (hash key) capacity)))
+            (> (index-of bucket same key) (- 0 1))))))))
+
+; Removing a key that is not there is not an error: the map comes back as it
+; was, and `contains` is how a caller asks first.
+(fn delete (K V) ((map (Map K V)) (key (& K))) -> (Map K V)
+  (match map
+    ((Map :slots slots :count count :hash hash :same same)
+      (do
+        (let mut room slots)
+        (let capacity (len (& room)))
+        (if (= capacity 0)
+          (Map :slots room :count count :hash hash :same same)
+          (do
+            (let index (bucket-of (hash key) capacity))
+            (let mut bucket (replace (&mut room) index (list)))
+            (let at (index-of (& bucket) (& same) key))
+            (let gone
+              (if (< at 0)
+                0
+                (do
+                  (let old (remove (&mut bucket) at))
+                  1)))
+            (let empty (replace (&mut room) index bucket))
+            (Map :slots room :count (- count gone) :hash hash :same same)))))))
+
+; The way to walk a map, and the only one: `start` is what an empty map folds
+; to, so nothing here has to invent an empty collection of a type it does not
+; know.
+(fn fold (K V A) ((map (& (Map K V))) (start A) (step (Fn (A (& K) (& V)) A)))
+  -> A
+  (match map
+    ((Map :slots slots :count _ :hash _ :same _)
+      (do
+        (let capacity (len slots))
+        (let mut carried start)
+        (let mut index 0)
+        (while (< index capacity)
+          (let bucket (get-ref slots index))
+          (let size (len bucket))
+          (let mut at 0)
+          (while (< at size)
+            (set carried
+              (match (get-ref bucket at)
+                ((Entry :key key :value value) (step carried key value))))
+            (set at (+ at 1)))
+          (set index (+ index 1)))
+        carried))))
+
+; Where in the table a hash belongs. There is no remainder operator, so the
+; remainder is written out, and a hash is free to be negative because nothing
+; says a hash function must not be.
+(fn bucket-of ((raw i64) (capacity i64)) -> i64
+  (let rest (- raw (* (/ raw capacity) capacity)))
+  (if (< rest 0)
+    (+ rest capacity)
+    rest))
+
+; Where in a bucket a key is, or `-1`. A bucket is short, so this is a scan,
+; which is the half of a hash table that is allowed to be linear.
+(fn index-of (K V)
+  ((bucket (& (List (Entry K V))))
+    (same (& (Fn ((& K) (& K)) bool)))
+    (key (& K)))
+  -> i64
+  (let size (len bucket))
+  (let mut at 0)
+  (let mut found (- 0 1))
+  (while (< at size)
+    (if (match (get-ref bucket at)
+        ((Entry :key held :value _) (same key held)))
+      (do
+        (set found at)
+        (break))
+      ())
+    (set at (+ at 1)))
+  found)
+
+; Grow to four buckets when there are none, and double when the entries are as
+; many as the buckets. Everything is rehashed, because the bucket a key belongs
+; in is a function of how many buckets there are.
+;
+; The pile everything lands in during a rehash is the first bucket, taken out
+; of the table. That is not cleverness for its own sake: it is a list of the
+; right type that already exists, and this file cannot write down an empty one
+; outside a field or an argument.
+(fn reserve (K V) ((map (Map K V))) -> (Map K V)
+  (match map
+    ((Map :slots slots :count count :hash hash :same same)
+      (do
+        (let mut room slots)
+        (let capacity (len (& room)))
+        (if (= capacity 0)
+          (add-buckets (&mut room) 4)
+          (if (< count capacity)
+            ()
+            (do
+              (let mut carried (remove (&mut room) 0))
+              (while (> (len (& room)) 0)
+                (let mut bucket (remove (&mut room) 0))
+                (while (> (len (& bucket)) 0)
+                  (push (&mut carried) (remove (&mut bucket) 0))))
+              (add-buckets (&mut room) (* capacity 2))
+              (while (> (len (& carried)) 0)
+                (place (&mut room) (& hash) (remove (&mut carried) 0))))))
+        (Map :slots room :count count :hash hash :same same)))))
+
+(fn add-buckets (K V)
+  ((slots (&mut (List (List (Entry K V))))) (count i64)) -> unit
+  (let mut index 0)
+  (while (< index count)
+    (push slots (list))
+    (set index (+ index 1))))
+
+; Puts an entry in the bucket it hashes to, without asking whether the key is
+; there already. Only a rehash calls this, and a rehash moves keys that were
+; distinct in a table that was smaller.
+(fn place (K V)
+  ((slots (&mut (List (List (Entry K V)))))
+    (hash (& (Fn ((& K)) i64)))
+    (entry (Entry K V)))
+  -> unit
+  (let index
+    (match (& entry)
+      ((Entry :key key :value _) (bucket-of (hash key) (len slots)))))
+  (let mut bucket (replace slots index (list)))
+  (push (&mut bucket) entry)
+  (let empty (replace slots index bucket))
+  ())

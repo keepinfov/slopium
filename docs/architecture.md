@@ -241,7 +241,8 @@ itself lives one level lower again, in `slopium-std`: the sources are ordinary
 `.slp` files under `std/`, and the compiler hands them to name resolution while
 the manager hashes them into the lock, so those two cannot disagree about what
 the library contains (`D-076`). There are two bundled packages — `core`, which
-carries `Option`, `Result`, `string`, `float` and the language items, and `std`, which
+carries `Option`, `Result`, `string`, `float`, `map`, `set` and the language
+items, and `std`, which
 carries `io`, `process` and `fs`, depends on `core`, and re-exports its
 language items through a `prelude` module so that exactly one direct dependency
 ever declares them (`D-082`). `std:string` re-exports `core:string` for the

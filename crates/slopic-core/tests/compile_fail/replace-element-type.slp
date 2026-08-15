@@ -1,0 +1,4 @@
+(fn main () -> i32
+  (let mut numbers (list 1 2 3))
+  (let old (replace (&mut numbers) 0 "one"))
+  0)

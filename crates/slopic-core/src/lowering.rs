@@ -577,6 +577,17 @@ pub fn builtin(
             "sl_rt_list_remove",
             vec![Argument::Value(args[0]), Argument::Value(args[1])],
         )],
+        // The element goes in by address like `push`'s and the old one comes
+        // back in the result register like `remove`'s, because that is what it
+        // is: the two halves of an update, done at one index and in one call.
+        "replace" => vec![call(
+            "sl_rt_list_replace",
+            vec![
+                Argument::Value(args[0]),
+                Argument::Value(args[1]),
+                Argument::Address(args[2]),
+            ],
+        )],
         _ => return None,
     };
     Some(steps)
