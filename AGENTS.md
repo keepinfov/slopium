@@ -57,7 +57,9 @@ Outside the workspace:
   `tests/README.md`);
 - `docs/` — `architecture.md`, `language.md`, `diagnostics.md`, `packaging.md`,
   `security.md`. English;
-- `README.md` — the user-facing guide. Russian, deliberately.
+- `README.md` — the user-facing guide. Russian, deliberately;
+- `CLAUDE.md` — a symlink to this file, so a tool that looks only for that name
+  still reads the contract.
 
 Everything else — code, comments, diagnostics, documentation under `docs/`,
 commit messages — is written in English.
@@ -227,6 +229,24 @@ If the explanation does not fit in two paragraphs, it is not a longer commit
 message. It is a `docs/` change when a user of the language needs it, and a
 `.notes/DECISIONS.md` or handoff entry when it is project reasoning.
 
+### Checked, not merely stated
+
+`scripts/commit-check.sh` decides the half of this contract a machine can
+decide — the subject's shape, mood and width, the blank second line, a prose
+body wrapped at 80 in at most two paragraphs, no trailer of any kind, and the
+version rule of §7. What it cannot decide is whether the paragraphs are worth
+reading; that stays yours.
+
+```sh
+scripts/install-hooks.sh                 # once per clone: the commit-msg hook
+scripts/commit-check.sh                  # origin/main..HEAD
+scripts/commit-check.sh --message .git/COMMIT_EDITMSG
+```
+
+CI runs it over the commits a push or a pull request adds. History before v0.4
+predates the contract and does not satisfy it, which is why the check is given a
+range rather than let loose on the whole log.
+
 ## 7. Version and tag
 
 Every `feat` commit that lands is a release:
@@ -321,12 +341,12 @@ Rules:
 
 - [ ] `scripts/verify.sh` is green, or the exact subset you ran and why is in
       your report.
-- [ ] `git status` and `git diff --cached --name-only` reviewed — no `.notes`,
-      no build output, no stray fixture.
+- [ ] `git status` and `git diff --cached --name-only` reviewed — every path is
+      one you touched, and none is `.notes`, build output, or a stray fixture.
 - [ ] The companions in §8 are updated.
 - [ ] The version is bumped if this is a `feat`, and untouched otherwise.
 - [ ] Subject: conventional, imperative, lowercase, ≤ 95 characters, about
       behavior rather than files.
 - [ ] Body: one or two paragraphs, wrapped at 80, no lists, no trailers, no AI
-      attribution.
+      attribution — `scripts/commit-check.sh` agrees.
 - [ ] Nothing pushed and nothing tagged unless the user asked for it.

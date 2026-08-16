@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Refuse a message that does not meet the contract, before it becomes a commit.
+#
+# This hook is tracked rather than copied into `.git/hooks` because a tracked
+# hook is one somebody can read and change in review. `scripts/install-hooks.sh`
+# points `core.hooksPath` here; nothing installs itself.
+set -euo pipefail
+
+root="$(git rev-parse --show-toplevel)"
+exec "$root/scripts/commit-check.sh" --message "$1"

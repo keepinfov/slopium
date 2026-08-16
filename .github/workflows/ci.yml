@@ -33,3 +33,24 @@ jobs:
       - uses: actions/checkout@v4
       - uses: cachix/install-nix-action@v31
       - run: nix flake check
+
+  # The commit contract of AGENTS.md, over the commits this event adds and no
+  # others: the history before v0.4 predates the contract and would fail it.
+  commits:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: check the commit contract
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if [ -n "$BASE" ] && git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            range="$BASE..$HEAD_SHA"
+          else
+            range="$HEAD_SHA~1..$HEAD_SHA"
+          fi
+          echo "checking $range"
+          scripts/commit-check.sh "$range"
