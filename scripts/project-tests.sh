@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# `SLOPIUM_STRICT=1` turns a skip into a failure. A machine that quietly lacks a
+# tool otherwise reports a green check that verified nothing.
+skip() {
+  echo "project-tests: $1" >&2
+  if [ -n "${SLOPIUM_STRICT:-}" ]; then
+    echo "project-tests: SLOPIUM_STRICT is set; a skipped check is a failed one" >&2
+    exit 1
+  fi
+}
+
 workspace_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 projects_dir="$workspace_dir/tests/projects"
 result_dir="$(mktemp -d)"
@@ -22,7 +32,7 @@ targets=("$host_target")
 if command -v "$cross_cc" >/dev/null 2>&1 && command -v "$qemu" >/dev/null 2>&1; then
   targets+=("$cross_target")
 else
-  echo "project-tests: no aarch64 toolchain; cross-target checks skipped" >&2
+  skip "no aarch64 toolchain; cross-target checks skipped"
 fi
 
 run_manager() {
@@ -399,7 +409,7 @@ if command -v readelf >/dev/null 2>&1; then
   fi
   echo "project-tests: release binaries are stripped and unused helpers dropped ... ok"
 else
-  echo "project-tests: readelf not found; debug-section check skipped" >&2
+  skip "readelf not found; debug-section check skipped"
 fi
 
 # The manager has to place, name, and drive a build for every target it lists,
@@ -444,7 +454,7 @@ if command -v readelf >/dev/null 2>&1; then
     echo "project-tests: manager builds and runs for $target ... ok"
   done
 else
-  echo "project-tests: readelf not found; per-target build checks skipped" >&2
+  skip "readelf not found; per-target build checks skipped"
 fi
 
 set +e

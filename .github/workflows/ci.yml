@@ -27,12 +27,21 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: scripts/project-tests.sh
 
-  nix:
+  # The whole of scripts/verify.sh, inside the dev shell that carries every tool
+  # it looks for — including an aarch64 toolchain whose binaries are named the
+  # way the suite expects. SLOPIUM_STRICT=1 turns any skip into a failure, so
+  # this job cannot pass by finding nothing. It ends with `nix flake check`,
+  # which is why there is no separate nix job.
+  verify:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: cachix/install-nix-action@v31
-      - run: nix flake check
+      - env:
+          SLOPIUM_STRICT: "1"
+          SLOPIUM_ASAN_DETECT_LEAKS: "1"
+        run: nix develop --command scripts/verify.sh
 
   # The commit contract of AGENTS.md, over the commits this event adds and no
   # others: the history before v0.4 predates the contract and would fail it.

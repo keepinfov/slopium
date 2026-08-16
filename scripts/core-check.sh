@@ -20,6 +20,16 @@
 #      because a program with no libc has nothing to print with.
 set -euo pipefail
 
+# `SLOPIUM_STRICT=1` turns a skip into a failure. A machine that quietly lacks a
+# tool otherwise reports a green check that verified nothing.
+skip() {
+    echo "core-check: $1" >&2
+    if [ -n "${SLOPIUM_STRICT:-}" ]; then
+        echo "core-check: SLOPIUM_STRICT is set; a skipped check is a failed one" >&2
+        exit 1
+    fi
+}
+
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -152,7 +162,7 @@ check_target() {
     mkdir -p "$out"
 
     if ! command -v "${cc%% *}" > /dev/null 2>&1; then
-        echo "core-check: skipping $triple; no $cc"
+        skip "skipping $triple; no $cc"
         return 0
     fi
 
@@ -197,7 +207,7 @@ check_target() {
 
     if [ -n "$run" ]; then
         if ! command -v "${run%% *}" > /dev/null 2>&1; then
-            echo "core-check: $triple linked; not run (no ${run%% *})"
+            skip "$triple linked; not run (no ${run%% *})"
             echo "core-check: $triple ok"
             return 0
         fi

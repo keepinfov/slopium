@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# `SLOPIUM_STRICT=1` turns a skip into a failure. A machine that quietly lacks a
+# tool otherwise reports a green check that verified nothing, which is worse
+# than a red one.
+skip() {
+  echo "runtime-check: $1" >&2
+  if [ -n "${SLOPIUM_STRICT:-}" ]; then
+    echo "runtime-check: SLOPIUM_STRICT is set; a skipped check is a failed one" >&2
+    exit 1
+  fi
+}
+
 workspace_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 check_dir="$(mktemp -d)"
 trap 'rm -rf "$check_dir"' EXIT
@@ -301,5 +312,5 @@ if command -v valgrind >/dev/null 2>&1; then
     --quiet --leak-check=full --show-leak-kinds=all --error-exitcode=99 \
     "$check_dir/runtime-valgrind" argument >/dev/null
 else
-  echo "runtime-check: valgrind not found; skipped" >&2
+  skip "valgrind not found; skipped"
 fi

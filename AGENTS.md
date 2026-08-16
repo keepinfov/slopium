@@ -326,15 +326,21 @@ Rules:
 
 - A failing required check blocks the commit. If the failure is demonstrably
   pre-existing, show before-and-after evidence and ask.
-- If you could not run part of the suite — no Nix, no AArch64 toolchain, no
-  valgrind — say exactly which part and why in your report. A skipped check is
-  never reported as a passing one. `project-tests.sh` skips the cross target on
-  its own when the toolchain is absent; that is expected and it says so.
+- Without valgrind, gdb, qemu, or the AArch64 toolchain, thirteen places in the
+  suite print a line and pass. `SLOPIUM_STRICT=1 scripts/verify.sh` turns every
+  one of them into a failure. Use it when you want to know that the suite ran
+  rather than that it finished.
+- If you could not run part of the suite, say exactly which part and why in your
+  report. A skipped check is never reported as a passing one.
 - For a docs-only change, a content and Markdown review plus `git diff --check`
   is enough.
-- CI mirrors a subset: fmt, test, clippy, `runtime-check.sh` with
-  `SLOPIUM_ASAN_DETECT_LEAKS=1`, `project-tests.sh`, and `nix flake check`.
-  Passing locally is the standard; CI is the backstop.
+- CI runs the whole of `scripts/verify.sh` inside `nix develop` with
+  `SLOPIUM_STRICT=1`, so nothing is skipped there, plus faster fmt/test/clippy
+  and `project-tests.sh` jobs for early signal. Passing locally is still the
+  standard; CI is the backstop.
+- The dev shell is where the suite is whole: `nix develop` carries valgrind,
+  gdb, qemu, and a cross toolchain named `aarch64-unknown-linux-gnu-*`, which
+  is the prefix `core-check.sh` and `object-check.sh` look for.
 
 ## 10. Code rules
 

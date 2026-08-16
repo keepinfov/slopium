@@ -16,6 +16,16 @@
 # how it behaves outside `nix develop`.
 set -euo pipefail
 
+# `SLOPIUM_STRICT=1` turns a skip into a failure. A machine that quietly lacks a
+# tool otherwise reports a green check that verified nothing.
+skip() {
+  echo "cross-check: $1" >&2
+  if [ -n "${SLOPIUM_STRICT:-}" ]; then
+    echo "cross-check: SLOPIUM_STRICT is set; a skipped check is a failed one" >&2
+    exit 1
+  fi
+}
+
 workspace_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 projects_dir="$workspace_dir/tests/projects"
 result_dir="$(mktemp -d)"
@@ -26,12 +36,12 @@ cross_cc="${SLOPIUM_CC_AARCH64_UNKNOWN_LINUX_GNU:-aarch64-unknown-linux-gnu-cc}"
 qemu="${SLOPIUM_QEMU_AARCH64:-qemu-aarch64}"
 
 if ! command -v "$cross_cc" >/dev/null 2>&1; then
-  echo "cross-check: $cross_cc not found; cross-backend checks skipped" >&2
   echo "cross-check: run inside 'nix develop' for the aarch64 toolchain" >&2
+  skip "$cross_cc not found; cross-backend checks skipped"
   exit 0
 fi
 if ! command -v "$qemu" >/dev/null 2>&1; then
-  echo "cross-check: $qemu not found; cross-backend checks skipped" >&2
+  skip "$qemu not found; cross-backend checks skipped"
   exit 0
 fi
 
@@ -540,7 +550,7 @@ host_objcopy="objcopy"
 cross_objcopy="${cross_cc%cc}objcopy"
 for tool in "$host_objcopy" "$cross_objcopy"; do
   if ! command -v "$tool" >/dev/null 2>&1; then
-    echo "cross-check: $tool not found; ABI conformance skipped" >&2
+    skip "$tool not found; ABI conformance skipped"
     echo "cross-check: all cross-backend checks passed"
     exit 0
   fi

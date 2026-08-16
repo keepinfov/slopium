@@ -9,6 +9,16 @@
 # `x86_64_inst.rs`. Both are then linked and run.
 set -euo pipefail
 
+# `SLOPIUM_STRICT=1` turns a skip into a failure. A machine that quietly lacks a
+# tool otherwise reports a green check that verified nothing.
+skip() {
+  echo "object-check: $1" >&2
+  if [ -n "${SLOPIUM_STRICT:-}" ]; then
+    echo "object-check: SLOPIUM_STRICT is set; a skipped check is a failed one" >&2
+    exit 1
+  fi
+}
+
 workspace_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$workspace_dir"
 
@@ -165,7 +175,7 @@ check_target() {
 # ----- x86-64, natively ------------------------------------------------------
 
 if ! command -v as >/dev/null || ! command -v objdump >/dev/null; then
-  echo "object-check: no host binutils; skipped"
+  skip "no host binutils; skipped"
   exit 0
 fi
 
@@ -200,7 +210,7 @@ cross_readelf="${cross_cc%cc}readelf"
 qemu="${SLOPIUM_QEMU_AARCH64:-qemu-aarch64}"
 
 if [ -z "$cross_cc" ] || ! command -v "$cross_as" >/dev/null; then
-  echo "object-check: no aarch64 toolchain; cross checks skipped"
+  skip "no aarch64 toolchain; cross checks skipped"
   exit 0
 fi
 
@@ -208,7 +218,7 @@ cross_checked="$(check_target "$cross_target" "$cross_objdump" "$cross_readelf" 
 echo "object-check: $cross_checked aarch64 objects are byte-identical to the assembler ... ok"
 
 if ! command -v "$qemu" >/dev/null; then
-  echo "object-check: no emulator; aarch64 programs not run"
+  skip "no emulator; aarch64 programs not run"
   exit 0
 fi
 

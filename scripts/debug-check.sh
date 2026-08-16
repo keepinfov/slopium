@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# `SLOPIUM_STRICT=1` turns a skip into a failure. A machine that quietly lacks a
+# tool otherwise reports a green check that verified nothing.
+skip() {
+  echo "debug-check: $1" >&2
+  if [ -n "${SLOPIUM_STRICT:-}" ]; then
+    echo "debug-check: SLOPIUM_STRICT is set; a skipped check is a failed one" >&2
+    exit 1
+  fi
+}
+
 # Checks that `--debug` produces a usable DWARF line table: that the table names
 # the right file and line for each construct, that a debugger can set a
 # breakpoint by source location and step, and that a profile without debug
@@ -61,7 +71,7 @@ if readelf -S program-plain 2>/dev/null | grep -q '\.debug_line'; then
 fi
 
 if ! command -v gdb >/dev/null 2>&1; then
-  echo "debug-check: gdb not found; source-level session skipped" >&2
+  skip "gdb not found; source-level session skipped"
   echo "debug-check: line tables verified"
   exit 0
 fi
