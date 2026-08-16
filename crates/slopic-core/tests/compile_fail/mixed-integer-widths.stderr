@@ -1,0 +1,14 @@
+mixed-integer-widths.slp:2:6: error[SL0200]: expected `i64`, found `u8`
+  |
+ 2 |   (+ small large))
+  |      ^^^^^
+
+mixed-integer-widths.slp:2:12: error[SL0200]: expected `u8`, found `i64`
+  |
+ 2 |   (+ small large))
+  |            ^^^^^
+
+mixed-integer-widths.slp:2:3: error[SL0200]: expected `i64`, found `u8`
+  |
+ 2 |   (+ small large))
+  |   ^^^^^^^^^^^^^^^

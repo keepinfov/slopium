@@ -78,21 +78,36 @@ added later to a parameter that is unconstrained today without invalidating a
 program that already satisfies it, which is why refusing them now costs a
 future version nothing.
 
-Scalar types are `unit`, `bool`, `i32`, `i64`, and `f64`. Other built-in types
-are `String`, `(List T)`, `(Array T N)`, `(Slice T)`, `(& T)`, `(&mut T)`, and
-`(Fn (T ...) R)`.
-Numeric conversions are never implicit. `(as i64 value)` is the one that exists
-(`D-090`): it widens an `i32`, and every other pair — narrowing, truncating,
-anything touching `f64` — is refused by name. The form takes a target type
-rather than a value, so what it converts to is read the way a type is read and
-not the way a variable is. Turning an `f64` into an integer is not in the
-vocabulary at all; turning one into text is `from-f64`, in the library.
+Scalar types are `unit`, `bool`, `f64`, and the eight integers `i8`, `i16`,
+`i32`, `i64`, `u8`, `u16`, `u32` and `u64` (`D-107`). Other built-in types are
+`String`, `(List T)`, `(Array T N)`, `(Slice T)`, `(& T)`, `(&mut T)`, and
+`(Fn (T ...) R)`. Every integer is one machine word wide whatever its type
+says, so a `(List u8)` is a word per element; the type decides what the word
+means, not how much room it takes.
+
+Numeric conversions are never implicit (`D-090`). `(as T value)` converts
+between the integer types and nothing else: **the source's signedness extends
+and the target's width truncates.** So `(as u64 (as i8 -1))` is every bit set,
+`(as u8 (as i8 -1))` is `255`, and `(as i8 0xFF)` is `-1`. Every pair of
+integer types is legal in both directions and none of it traps — a conversion
+describes a pattern of bits, and `D-031`'s overflow checks are about
+arithmetic. Anything touching `f64` or `bool` is refused by name. The form
+takes a target type rather than a value, so what it converts to is read the way
+a type is read and not the way a variable is. Turning an `f64` into an integer
+is not in the vocabulary at all; turning one into text is `from-f64`, in the
+library.
+
+An integer literal takes its type from what is expected of it and is `i64`
+otherwise, and it must fit there: `255` is a `u8` and not an `i8`. A
+hexadecimal or binary literal is a bit pattern rather than a number (`D-112`),
+which it stays at every width — `0xFF` is `255` as a `u8` and `-1` as an `i8`,
+while decimal `-1` is an `i8` and not a `u8` at all.
 
 `+`, `-`, `*`, `/`, `<`, `>`, `<=`, and `>=` take two operands of one numeric
 type. `%` is the remainder and takes two integers; it truncates so that
 `(= a (+ (* (/ a b) b) (% a b)))` holds for every pair, matching `/`, and it
 traps on a zero divisor exactly as `/` does. `=` and `!=` take two `bool`,
-`i32`, `i64`, or `f64` operands and nothing else (`D-089`): comparing two
+integer, or `f64` operands and nothing else (`D-089`): comparing two
 `String`s, two structs, two enums, two borrows, or two values of an
 unconstrained type parameter is an error. Text is compared with
 `core:string:equals`, which `std:string` re-exports. Without traits there is no
@@ -101,18 +116,26 @@ such values by the machine word that holds them would answer about identity
 while looking like it answered about contents.
 
 `(- x)` with one operand is negation, and it traps on the smallest integer for
-the reason `(- 0 x)` does.
+the reason `(- 0 x)` does. It is refused outright on an unsigned type, where
+the only value it could answer for is zero.
+
+Arithmetic on the two operands' shared type, and every type keeps its own
+range: a `u8` addition overflows above `255` and an `i8` one above `127`, and
+both trap rather than wrapping (`D-031`). Mixing types is an error — a `u8`
+and an `i64` do not add — because `D-090` says a conversion is written down.
 
 `bit-and`, `bit-or`, `bit-xor` and `bit-not` are the bitwise operations and
 `shl` and `shr` the shifts, all on integers. They are spelled out because `&`
 is a borrow and a language where `(& a b)` is a bitwise and while `(& a)` is a
-borrow has a trap in it. `shr` is arithmetic on a signed type. **A shift by a
-negative amount, or by the width of the type or more, traps** — the two
+borrow has a trap in it. `shr` is arithmetic on a signed type and logical on an
+unsigned one, which is what the two words mean and needs no second operator.
+**A shift by a negative amount, or by the width of the type or more, traps** — the two
 architectures disagree about what such a shift would otherwise mean, and
 neither answer is one a program asked for. **A shift does not trap when bits
 leave the top**: `(shl 1 63)` is the smallest `i64` and that is the answer, not
 an overflow, because a shift describes a pattern of bits rather than a
-magnitude.
+magnitude. Both rules read the *type's* width, so a `u8` shifted by 8 traps and
+one shifted by 7 is `128`.
 
 `and` and `or` are forms rather than calls, because they stop at the operand
 that answers: `(and (holds table key) (trust (lookup table key)))` does not
@@ -565,7 +588,7 @@ Slopium calls, and it is an ordinary module-level item — private by default,
   0)
 ```
 
-The type vocabulary is closed. A parameter is `i32`, `i64`, `f64`, `bool`,
+The type vocabulary is closed. A parameter is any integer type, `f64`, `bool`,
 `(& String)`, or `(& (Slice T))`. A return is `unit`, one of those scalars, or
 an owned `String`. Anything else is refused at the declaration, and an `extern`
 cannot be generic: there is nothing a type parameter could stand for.
@@ -577,10 +600,10 @@ returns, so C must copy anything it intends to keep. To return a `String`, C
 allocates one with the runtime's `sl_rt_string_new(const char *, uint64_t)`;
 the caller owns it and drops it as it would any other.
 
-Two things the vocabulary does not say for you. C's `size_t`, `unsigned` and
-`long` have no Slopium spelling: they are declared as `i64` (or `i32`), and a
-value that does not fit is your mistake to avoid, not one the compiler can
-catch. And a variadic C function may not be declared at all — the System V ABI
+Two things the vocabulary does not say for you. C's `size_t` has no Slopium
+spelling and is declared as `u64` on the targets that exist; the fixed widths
+line up with `stdint.h` one for one, so an `unsigned char` is a `u8` and an
+`int` is an `i32`, and a `long` is whatever the platform made it. And a variadic C function may not be declared at all — the System V ABI
 wants the vector-register count in `al` for one, and nothing here sets it.
 
 The C itself is the package's, listed in `Slopium.toml`:

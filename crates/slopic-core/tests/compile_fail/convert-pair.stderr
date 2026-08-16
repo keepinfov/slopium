@@ -1,5 +1,5 @@
-convert-pair.slp:2:3: error[SL0200]: `as` cannot convert `i64` to `i32`
+convert-pair.slp:2:3: error[SL0200]: `as` cannot convert `f64` to `i32`
   |
  2 |   (as i32 value))
   |   ^^^^^^^^^^^^^^
-  = help: the only conversion is `(as i64 value)` from an `i32`
+  = help: `as` converts between the integer types; the source's signedness extends and the target's width truncates

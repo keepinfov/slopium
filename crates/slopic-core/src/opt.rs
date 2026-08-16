@@ -376,26 +376,52 @@ pub(crate) fn fold_binary(
     let lhs = integer(lhs)?;
     let rhs = integer(rhs)?;
 
-    // Shifts leave before the generic tail below, because that tail narrows an
-    // `i32` result by refusing anything outside the range — and `(shl 1 31)` on
-    // an `i32` is `i32::MIN`, a value the backend produces and the tail would
-    // have declined. Declining is safe but wrong: it would leave the one fold a
-    // mask-writing program most wants undone.
+    // Every regime the backends have, in the same three shapes (`D-107`): a
+    // signed word, a `u64`, and a narrow type computed at 64 bits and then put
+    // back into its own width.
+    let kind = crate::codegen::regime(ty);
+
+    // Shifts leave before the generic tail below, because a shift truncates
+    // rather than overflowing (`D-112`) — `(shl 1 31)` on an `i32` is
+    // `i32::MIN`, a value the backend produces and a range check would decline.
+    // Declining is safe but wrong: it would leave the one fold a mask-writing
+    // program most wants undone.
     if op.shifts() {
-        let width = if *ty == Type::I32 { 32 } else { 64 };
-        let amount = u32::try_from(rhs).ok().filter(|amount| *amount < width)?;
-        return Some(Constant::Int(if *ty == Type::I32 {
-            let narrow = lhs as i32;
-            i64::from(match op {
-                BinaryOp::Shl => narrow.wrapping_shl(amount),
-                _ => narrow >> amount,
-            })
-        } else {
-            match op {
-                BinaryOp::Shl => lhs.wrapping_shl(amount),
-                _ => lhs >> amount,
-            }
-        }));
+        let amount = u32::try_from(rhs)
+            .ok()
+            .filter(|amount| *amount < u32::from(kind.bits))?;
+        let shifted = match (op, kind.signed) {
+            (BinaryOp::Shl, _) => lhs.wrapping_shl(amount),
+            (_, true) => lhs >> amount,
+            (_, false) => ((lhs as u64) >> amount) as i64,
+        };
+        return Some(Constant::Int(kind.canonicalize(shifted)));
+    }
+
+    // A `u64` reads the same bits as a different number, so its arithmetic and
+    // its comparisons are the unsigned ones. Everything narrower is held
+    // zero-extended, which makes it a small non-negative word that the signed
+    // operations below already answer correctly.
+    if !kind.signed && kind.is_full_width() {
+        let (left, right) = (lhs as u64, rhs as u64);
+        let word = |value: u64| Constant::Int(value as i64);
+        return match op {
+            BinaryOp::Add => left.checked_add(right).map(word),
+            BinaryOp::Sub => left.checked_sub(right).map(word),
+            BinaryOp::Mul => left.checked_mul(right).map(word),
+            BinaryOp::Div => left.checked_div(right).map(word),
+            BinaryOp::Rem => left.checked_rem(right).map(word),
+            BinaryOp::Less => Some(Constant::Bool(left < right)),
+            BinaryOp::Greater => Some(Constant::Bool(left > right)),
+            BinaryOp::LessEqual => Some(Constant::Bool(left <= right)),
+            BinaryOp::GreaterEqual => Some(Constant::Bool(left >= right)),
+            BinaryOp::Equal => Some(Constant::Bool(left == right)),
+            BinaryOp::NotEqual => Some(Constant::Bool(left != right)),
+            BinaryOp::BitAnd => Some(word(left & right)),
+            BinaryOp::BitOr => Some(word(left | right)),
+            BinaryOp::BitXor => Some(word(left ^ right)),
+            BinaryOp::Shl | BinaryOp::Shr => unreachable!("shifts returned above"),
+        };
     }
 
     let value = match op {
@@ -420,11 +446,13 @@ pub(crate) fn fold_binary(
         BinaryOp::BitXor => Some(Constant::Int(lhs ^ rhs)),
         BinaryOp::Shl | BinaryOp::Shr => unreachable!("shifts returned above"),
     }?;
-    if *ty == Type::I32 {
-        if let Constant::Int(value) = value {
-            return i32::try_from(value)
-                .ok()
-                .map(|value| Constant::Int(i64::from(value)));
+    // A narrow operation overflows exactly when canonicalising its result
+    // changes it, which is the rule the backends emit as a compare-and-trap. A
+    // fold that survives it is the value that would have been computed; one
+    // that does not must not be folded, because the program is meant to trap.
+    if let Constant::Int(value) = value {
+        if kind.canonicalize(value) != value {
+            return None;
         }
     }
     Some(value)

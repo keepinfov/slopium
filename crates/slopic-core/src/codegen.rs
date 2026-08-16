@@ -1,5 +1,5 @@
 use crate::asm::{Assembly, Item, Section, Target};
-use crate::ast::Type;
+use crate::ast::{IntKind, Type};
 use crate::cfg::Cfg;
 use crate::diagnostic::{codes, CompileResult, Diagnostic, SourceMap, Span};
 use crate::lowering::{
@@ -22,8 +22,6 @@ use std::collections::HashMap;
 /// between two MIR statements.
 struct RegisterFile {
     wide: &'static [&'static str],
-    /// The 32-bit views of `wide`, index for index, for `i32` arithmetic.
-    narrow: &'static [&'static str],
     /// How many leading entries of `wide` are caller-saved, and so need no
     /// prologue save. The allocator hands these out first.
     volatile: usize,
@@ -46,7 +44,6 @@ enum Callee {
 
 const CALLEE_SAVED: RegisterFile = RegisterFile {
     wide: &["rbx", "r12", "r13", "r14", "r15"],
-    narrow: &["ebx", "r12d", "r13d", "r14d", "r15d"],
     volatile: 0,
 };
 
@@ -61,7 +58,6 @@ const CALLEE_SAVED: RegisterFile = RegisterFile {
 /// returns, so what it clobbers cannot be observed.
 const LEAF: RegisterFile = RegisterFile {
     wide: &["r10", "r11", "rbx", "r12", "r13", "r14", "r15"],
-    narrow: &["r10d", "r11d", "ebx", "r12d", "r13d", "r14d", "r15d"],
     volatile: 2,
 };
 
@@ -689,22 +685,37 @@ impl<'a> Generator<'a> {
                     floats += 1;
                 }
             } else {
+                // A narrow parameter is canonicalised on the way in. Every
+                // Slopium caller already places a canonical word, but a C
+                // caller leaves the upper half of a narrow argument register
+                // undefined — and the invariant every narrow operation below
+                // rests on has to be true of the values a function was handed,
+                // not only of the ones it computed (`D-074`, `D-107`).
+                let kind = ty.int_kind().filter(|kind| !kind.is_full_width());
                 if integers >= integer_regs.len() {
                     self.inst(Inst::Mov(
                         reg("rax"),
                         Operand::slot(Size::Qword, Reg("rbp"), (16 + stack * 8) as i64),
                     ));
+                    if let Some(kind) = kind {
+                        self.canonicalize_rax(kind);
+                    }
                     self.inst(Inst::Mov(
                         operand(&self.alloc, self.registers, *local),
                         reg("rax"),
                     ));
                     stack += 1;
                 } else {
+                    let source = Operand::Reg(Reg(integer_regs[integers]));
                     let destination = operand(&self.alloc, self.registers, *local);
-                    self.inst(Inst::Mov(
-                        destination,
-                        Operand::Reg(Reg(integer_regs[integers])),
-                    ));
+                    match kind {
+                        Some(kind) => {
+                            self.inst(Inst::Mov(reg("rax"), source));
+                            self.canonicalize_rax(kind);
+                            self.inst(Inst::Mov(destination, reg("rax")));
+                        }
+                        None => self.inst(Inst::Mov(destination, source)),
+                    }
                     integers += 1;
                 }
             }
@@ -1121,9 +1132,47 @@ impl<'a> Generator<'a> {
             BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul
                 if self.accumulate_in_place(dst, op, lhs, rhs, ty) => {}
             _ if op.bitwise() && self.accumulate_in_place(dst, op, lhs, rhs, ty) => {}
-            _ if op.compares() && self.compare_in_place(dst, op, lhs, rhs) => {}
+            _ if op.compares() && self.compare_in_place(dst, op, lhs, rhs, ty) => {}
             _ => self.integer_binary_through_rax(dst, op, lhs, rhs, ty),
         }
+    }
+
+    /// Puts `rax` back into the canonical machine word of a narrow type:
+    /// sign-extended when signed, zero-extended when unsigned.
+    ///
+    /// This is `D-074`'s invariant generalised to all eight types by `D-107`,
+    /// and it is what lets every narrow operation happen at 64 bits. The signed
+    /// sub-word pair is `shl`/`sar` rather than `movsx r64, r8` because it is
+    /// register-agnostic: the byte-register table here has four names in it and
+    /// nothing addresses `sil` or `r8b`.
+    fn canonicalize_rax(&mut self, kind: IntKind) {
+        match (kind.bits, kind.signed) {
+            (64, _) => {}
+            (32, true) => self.inst(Inst::Movsxd(Reg("rax"), Reg("eax"))),
+            // Writing a 32-bit register clears the upper half, which is the
+            // whole of a `u32`'s canonicalisation.
+            (32, false) => self.inst(Inst::Mov(reg("eax"), reg("eax"))),
+            (bits, true) => {
+                let count = 64 - bits;
+                self.inst(Inst::ShiftImm(ShiftOp::Shl, Reg("rax"), count));
+                self.inst(Inst::ShiftImm(ShiftOp::Sar, Reg("rax"), count));
+            }
+            (_, false) => self.inst(Inst::Alu(AluOp::And, reg("rax"), Operand::Imm(kind.mask()))),
+        }
+    }
+
+    /// Canonicalises `rax` and traps if that changed it.
+    ///
+    /// `D-031`'s overflow check for the six narrow types, and the reason none of
+    /// them needs a bound constant written down: an operation overflows exactly
+    /// when the value it produced does not survive the round trip through its
+    /// own width. `rcx` is free here — it holds the right-hand operand, which
+    /// every arithmetic instruction has finished with.
+    fn canonicalize_rax_checked(&mut self, kind: IntKind) {
+        self.inst(Inst::Mov(reg("rcx"), reg("rax")));
+        self.canonicalize_rax(kind);
+        self.inst(Inst::Alu(AluOp::Cmp, reg("rax"), reg("rcx")));
+        self.inst(Inst::Jcc(Cond::Ne, overflow_trampoline()));
     }
 
     /// Computes an addition, subtraction, multiplication or bit operation
@@ -1147,21 +1196,21 @@ impl<'a> Generator<'a> {
         if self.alloc.location(dst) == self.alloc.location(rhs) {
             return false;
         }
+        // A bit operation carries a canonical operand to a canonical result at
+        // any width, so it stays here. Arithmetic does not: a narrow result has
+        // to be canonicalised and compared, and an unsigned product needs the
+        // high half only `mul` computes. Both want `rax`.
+        let kind = regime(ty);
+        if !op.bitwise() && (!kind.is_full_width() || (!kind.signed && op == BinaryOp::Mul)) {
+            return false;
+        }
         if self.alloc.location(dst) != self.alloc.location(lhs) {
             self.copy(dst, lhs);
         }
-        let narrow = *ty == Type::I32;
-        let (target, source) = if narrow {
-            (
-                Reg(self.registers.narrow[register]),
-                narrow_operand(&self.alloc, self.registers, rhs),
-            )
-        } else {
-            (
-                Reg(self.registers.wide[register]),
-                operand(&self.alloc, self.registers, rhs),
-            )
-        };
+        let (target, source) = (
+            Reg(self.registers.wide[register]),
+            operand(&self.alloc, self.registers, rhs),
+        );
         match op {
             BinaryOp::Add => self.inst(Inst::Alu(AluOp::Add, Operand::Reg(target), source)),
             BinaryOp::Sub => self.inst(Inst::Alu(AluOp::Sub, Operand::Reg(target), source)),
@@ -1174,13 +1223,12 @@ impl<'a> Generator<'a> {
         // A bit operation cannot overflow — it produces a pattern, not a
         // magnitude — and the flag `and`/`or`/`xor` leave is always clear, so
         // the branch would be dead weight rather than merely harmless.
+        //
+        // What overflow *is* differs by signedness: a signed word carried past
+        // its sign bit, and an unsigned one carried out of the top.
         if !op.bitwise() {
-            self.inst(Inst::Jcc(Cond::O, overflow_trampoline()));
-        }
-        if narrow {
-            // The 32-bit form zero-extends into the full register; the local's
-            // value is a sign-extended i32.
-            self.inst(Inst::Movsxd(Reg(self.registers.wide[register]), target));
+            let flag = if kind.signed { Cond::O } else { Cond::B };
+            self.inst(Inst::Jcc(flag, overflow_trampoline()));
         }
         true
     }
@@ -1190,7 +1238,14 @@ impl<'a> Generator<'a> {
     ///
     /// Returns false when both operands sit in memory, which `cmp` cannot
     /// encode.
-    fn compare_in_place(&mut self, dst: LocalId, op: BinaryOp, lhs: LocalId, rhs: LocalId) -> bool {
+    fn compare_in_place(
+        &mut self,
+        dst: LocalId,
+        op: BinaryOp,
+        lhs: LocalId,
+        rhs: LocalId,
+        ty: &Type,
+    ) -> bool {
         if in_memory(&self.alloc, lhs) && in_memory(&self.alloc, rhs) {
             return false;
         }
@@ -1199,7 +1254,7 @@ impl<'a> Generator<'a> {
             operand(&self.alloc, self.registers, lhs),
             operand(&self.alloc, self.registers, rhs),
         ));
-        self.inst(Inst::Setcc(set_condition(op), Reg("al")));
+        self.inst(Inst::Setcc(set_condition(op, regime(ty)), Reg("al")));
         match self.alloc.location(dst) {
             Location::Register(register) => {
                 self.inst(Inst::Movzx(Reg(self.registers.wide[register]), Reg("al")))
@@ -1231,55 +1286,73 @@ impl<'a> Generator<'a> {
             reg("rcx"),
             operand(&self.alloc, self.registers, rhs),
         ));
-        let width = if *ty == Type::I32 { "e" } else { "r" };
-        let accumulator = reg(if width == "e" { "eax" } else { "rax" });
-        let argument = reg(if width == "e" { "ecx" } else { "rcx" });
+        // Every operand arrives canonical in its full machine word (`D-074`,
+        // generalised by `D-107`), so every regime computes at 64 bits. What
+        // differs is how overflow is asked about: a signed word reads the
+        // overflow flag, a `u64` reads the carry, and a narrow type is asked
+        // afterwards whether its result survived its own width.
+        let kind = regime(ty);
+        let accumulator = reg("rax");
+        let argument = reg("rcx");
+        let carried = if kind.signed { Cond::O } else { Cond::B };
         match op {
             BinaryOp::Add => {
                 self.inst(Inst::Alu(AluOp::Add, accumulator.clone(), argument.clone()));
-                self.inst(Inst::Jcc(Cond::O, overflow_trampoline()));
+                if kind.is_full_width() {
+                    self.inst(Inst::Jcc(carried, overflow_trampoline()));
+                }
             }
             BinaryOp::Sub => {
                 self.inst(Inst::Alu(AluOp::Sub, accumulator.clone(), argument.clone()));
-                self.inst(Inst::Jcc(Cond::O, overflow_trampoline()));
+                if kind.is_full_width() {
+                    self.inst(Inst::Jcc(carried, overflow_trampoline()));
+                }
             }
+            // A `u64` product needs the unsigned high half, which only `mul`
+            // computes; everywhere else `imul`'s low half and overflow flag are
+            // the answer. A narrow product keeps the flag as well as the range
+            // check below it, because a `u32` square reaches 2^64 and a result
+            // that has already wrapped cannot be asked about.
             BinaryOp::Mul => {
-                self.inst(Inst::Imul(
-                    Reg(if width == "e" { "eax" } else { "rax" }),
-                    argument.clone(),
-                ));
+                if kind.is_full_width() && !kind.signed {
+                    self.inst(Inst::Mul(Reg("rcx")));
+                } else {
+                    self.inst(Inst::Imul(Reg("rax"), argument.clone()));
+                }
                 self.inst(Inst::Jcc(Cond::O, overflow_trampoline()));
             }
             // One sequence for both, because the machine computes both at once:
-            // `idiv` leaves the quotient in the accumulator and the remainder
-            // in `rdx`, so `%` differs from `/` only in which register is read
-            // afterwards. The two checks in front are `D-031`'s and are not
+            // the divide leaves the quotient in the accumulator and the
+            // remainder in `rdx`, so `%` differs from `/` only in which register
+            // is read afterwards. The checks in front are `D-031`'s and are not
             // optional — `#DE` for a zero divisor is a fault with no message,
             // and the most negative value over `-1` has no quotient at all.
             BinaryOp::Div | BinaryOp::Rem => {
                 self.inst(Inst::Test(argument.clone(), argument.clone()));
                 self.inst(Inst::Jcc(Cond::E, div_zero_trampoline()));
-                if *ty == Type::I32 {
-                    self.inst(Inst::Alu(AluOp::Cmp, reg("eax"), Operand::Imm(-2147483648)));
-                    self.inst(Inst::Jcc(Cond::Ne, Target::Forward(1)));
-                    self.inst(Inst::Alu(AluOp::Cmp, reg("ecx"), Operand::Imm(-1)));
-                    self.inst(Inst::Jcc(Cond::E, overflow_trampoline()));
-                    self.asm.push(Item::Numeric(1));
-                    self.inst(Inst::Cdq);
-                    self.inst(Inst::Idiv(Reg("ecx")));
+                if !kind.signed && kind.is_full_width() {
+                    // Unsigned: no sign to extend, and no quotient that does
+                    // not fit, so `rdx` is cleared rather than filled.
+                    self.inst(Inst::Alu(AluOp::Xor, reg("rdx"), reg("rdx")));
+                    self.inst(Inst::Div(Reg("rcx")));
                 } else {
-                    self.inst(Inst::Mov(reg("rdx"), Operand::Imm(i64::MIN)));
-                    self.inst(Inst::Alu(AluOp::Cmp, reg("rax"), reg("rdx")));
-                    self.inst(Inst::Jcc(Cond::Ne, Target::Forward(1)));
-                    self.inst(Inst::Alu(AluOp::Cmp, reg("rcx"), Operand::Imm(-1)));
-                    self.inst(Inst::Jcc(Cond::E, overflow_trampoline()));
-                    self.asm.push(Item::Numeric(1));
+                    if kind.is_full_width() {
+                        self.inst(Inst::Mov(reg("rdx"), Operand::Imm(i64::MIN)));
+                        self.inst(Inst::Alu(AluOp::Cmp, reg("rax"), reg("rdx")));
+                        self.inst(Inst::Jcc(Cond::Ne, Target::Forward(1)));
+                        self.inst(Inst::Alu(AluOp::Cmp, reg("rcx"), Operand::Imm(-1)));
+                        self.inst(Inst::Jcc(Cond::E, overflow_trampoline()));
+                        self.asm.push(Item::Numeric(1));
+                    }
+                    // A narrow operand cannot be the most negative *word*, so
+                    // the fault that guard exists for is unreachable and the
+                    // one narrow quotient that overflows — the least `i8` over
+                    // `-1` — is caught by the range check below.
                     self.inst(Inst::Cqo);
                     self.inst(Inst::Idiv(Reg("rcx")));
                 }
                 if op == BinaryOp::Rem {
-                    let remainder = reg(if width == "e" { "edx" } else { "rdx" });
-                    self.inst(Inst::Mov(accumulator.clone(), remainder));
+                    self.inst(Inst::Mov(accumulator.clone(), reg("rdx")));
                 }
             }
             BinaryOp::BitAnd => self.inst(Inst::Alu(AluOp::And, accumulator.clone(), argument)),
@@ -1293,18 +1366,18 @@ impl<'a> Generator<'a> {
             // AArch64 reduces it modulo the width, so a shift by the width
             // would quietly answer two different things.
             BinaryOp::Shl | BinaryOp::Shr => {
-                let bits = if *ty == Type::I32 { 32 } else { 64 };
-                self.inst(Inst::Alu(AluOp::Cmp, argument, Operand::Imm(bits)));
-                self.inst(Inst::Jcc(Cond::Ae, shift_trampoline()));
-                let shift = if op == BinaryOp::Shl {
-                    ShiftOp::Shl
-                } else {
-                    ShiftOp::Sar
-                };
-                self.inst(Inst::Shift(
-                    shift,
-                    Reg(if width == "e" { "eax" } else { "rax" }),
+                self.inst(Inst::Alu(
+                    AluOp::Cmp,
+                    argument,
+                    Operand::Imm(i64::from(kind.bits)),
                 ));
+                self.inst(Inst::Jcc(Cond::Ae, shift_trampoline()));
+                let shift = match (op, kind.signed) {
+                    (BinaryOp::Shl, _) => ShiftOp::Shl,
+                    (_, true) => ShiftOp::Sar,
+                    (_, false) => ShiftOp::Shr,
+                };
+                self.inst(Inst::Shift(shift, Reg("rax")));
             }
             BinaryOp::Less
             | BinaryOp::Greater
@@ -1313,12 +1386,25 @@ impl<'a> Generator<'a> {
             | BinaryOp::Equal
             | BinaryOp::NotEqual => {
                 self.inst(Inst::Alu(AluOp::Cmp, reg("rax"), reg("rcx")));
-                self.inst(Inst::Setcc(set_condition(op), Reg("al")));
+                self.inst(Inst::Setcc(set_condition(op, kind), Reg("al")));
                 self.inst(Inst::Movzx(Reg("rax"), Reg("al")));
             }
         }
-        if *ty == Type::I32 && !op.compares() {
-            self.inst(Inst::Movsxd(Reg("rax"), Reg("eax")));
+        if !kind.is_full_width() {
+            match op {
+                // Arithmetic overflows exactly when the result does not survive
+                // the round trip through its own width.
+                BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div => {
+                    self.canonicalize_rax_checked(kind)
+                }
+                // A left shift truncates rather than trapping (`D-112`), at the
+                // type's width rather than the word's.
+                BinaryOp::Shl => self.canonicalize_rax(kind),
+                // A remainder is bounded by its divisor, a right shift only
+                // removes bits, and a bit operation carries canonical operands
+                // to a canonical result. None of them can leave the width.
+                _ => {}
+            }
         }
         self.inst(Inst::Mov(
             operand(&self.alloc, self.registers, dst),
@@ -1429,15 +1515,18 @@ impl<'a> Generator<'a> {
             }
             _ => {
                 // C only defines the low half of the result register for a
-                // narrow return, and a Slopium `i32` is sign-extended
-                // everywhere else, so the extension happens here (`D-074`).
-                // Slopium callees already return an extended value, so this
-                // costs one instruction on an FFI call and nothing elsewhere.
+                // narrow return, and a Slopium integer is canonical in its full
+                // machine word everywhere else, so the extension happens here
+                // (`D-074`, generalised to eight types by `D-107`). Slopium
+                // callees already return a canonical value, so this costs one
+                // instruction on an FFI call and nothing elsewhere.
                 if extern_declaration(self.module, callee).is_some() {
-                    match result {
-                        Type::I32 => self.inst(Inst::Movsxd(Reg("rax"), Reg("eax"))),
-                        Type::Bool => self.inst(Inst::Movzx(Reg("rax"), Reg("al"))),
-                        _ => {}
+                    match result.int_kind() {
+                        Some(kind) => self.canonicalize_rax(kind),
+                        None if *result == Type::Bool => {
+                            self.inst(Inst::Movzx(Reg("rax"), Reg("al")))
+                        }
+                        None => {}
                     }
                 }
                 let destination = operand(&self.alloc, self.registers, dst);
@@ -2099,16 +2188,27 @@ fn in_memory(allocation: &Allocation, local: LocalId) -> bool {
     matches!(allocation.location(local), Location::Memory(_))
 }
 
-/// The 32-bit view of a local, for `i32` arithmetic.
-fn narrow_operand(allocation: &Allocation, file: &RegisterFile, local: LocalId) -> Operand {
-    match allocation.location(local) {
-        Location::Register(register) => Operand::Reg(Reg(file.narrow[register])),
-        Location::Memory(slot) => Operand::Mem(frame_slot(Some(Size::Dword), slot)),
-    }
+/// Which arithmetic regime an operand type puts an instruction in.
+///
+/// A `bool` is the only non-integer that reaches the integer path, through `=`
+/// and `!=`, and it compares like the signed word it has always been.
+pub(crate) fn regime(ty: &Type) -> IntKind {
+    ty.int_kind().unwrap_or(IntKind {
+        bits: 64,
+        signed: true,
+    })
 }
 
-fn set_condition(op: BinaryOp) -> Cond {
+/// Only `u64` needs the unsigned conditions: a narrower unsigned type is held
+/// zero-extended, so its value is a small non-negative word and the signed
+/// comparison answers identically (`D-107`).
+fn set_condition(op: BinaryOp, kind: IntKind) -> Cond {
+    let unsigned = !kind.signed && kind.is_full_width();
     match op {
+        BinaryOp::Less if unsigned => Cond::B,
+        BinaryOp::Greater if unsigned => Cond::A,
+        BinaryOp::LessEqual if unsigned => Cond::Be,
+        BinaryOp::GreaterEqual if unsigned => Cond::Ae,
         BinaryOp::Less => Cond::L,
         BinaryOp::Greater => Cond::G,
         BinaryOp::LessEqual => Cond::Le,
@@ -2160,12 +2260,16 @@ mod tests {
     fn emits_native_function_and_checked_add() {
         let assembly = assemble("(fn main () -> i32 (+ 20 22))");
         assert!(assembly.contains(".globl main"));
-        assert!(assembly.contains("jo .Lsl_panic_overflow_trampoline"));
+        // An `i32` computes at 64 bits and is then put back into its canonical
+        // machine word; the trap is that round trip changing the value, not the
+        // machine's own flag (`D-107`).
         assert!(
-            LEAF.narrow
-                .iter()
-                .any(|register| assembly.contains(&format!("add {register}, "))),
-            "an i32 addition accumulates in a 32-bit register:\n{assembly}"
+            assembly.contains("movsxd rax, eax"),
+            "an i32 result is canonicalised:\n{assembly}"
+        );
+        assert!(
+            assembly.contains("jne .Lsl_panic_overflow_trampoline"),
+            "and traps when that changed it:\n{assembly}"
         );
     }
 

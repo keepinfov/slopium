@@ -7,8 +7,14 @@ use std::fmt;
 pub enum Type {
     Unit,
     Bool,
+    I8,
+    I16,
     I32,
     I64,
+    U8,
+    U16,
+    U32,
+    U64,
     F64,
     String,
     List(Box<Type>),
@@ -44,16 +50,155 @@ pub enum Type {
     },
 }
 
+/// The width and signedness of an integer type (`D-107`).
+///
+/// The eight integer types are eight `Type` variants, but almost nothing wants
+/// to name them one at a time: the backends and the optimizer want the two
+/// numbers. Asking for those through one table is what keeps a `== Type::I32`
+/// test from silently treating every new type as an `i64`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct IntKind {
+    pub bits: u8,
+    pub signed: bool,
+}
+
+impl IntKind {
+    /// Whether a value of this type already fills a machine word, so that the
+    /// canonical form of §2 costs nothing.
+    pub fn is_full_width(&self) -> bool {
+        self.bits == 64
+    }
+
+    /// The mask that keeps the bits this type has.
+    pub fn mask(&self) -> i64 {
+        if self.bits == 64 {
+            -1
+        } else {
+            ((1i128 << self.bits) - 1) as i64
+        }
+    }
+
+    /// Whether every canonical `source` word is already a canonical word of
+    /// this type, so that a conversion between them costs nothing.
+    ///
+    /// A 64-bit target accepts anything, because the whole word *is* the value.
+    /// Below that, a strictly narrower source is accepted when it cannot carry
+    /// a bit pattern this type would read differently: an unsigned source is a
+    /// small non-negative word whatever this type is, and a signed one is
+    /// already extended as long as this type is signed too.
+    pub fn accepts(self, source: IntKind) -> bool {
+        if self.bits == 64 {
+            return true;
+        }
+        match source.bits.cmp(&self.bits) {
+            std::cmp::Ordering::Greater => false,
+            std::cmp::Ordering::Equal => source.signed == self.signed,
+            std::cmp::Ordering::Less => !source.signed || self.signed,
+        }
+    }
+
+    /// Reduces a 64-bit computation to this type's canonical machine word:
+    /// sign-extended when signed, zero-extended when unsigned (`D-074`).
+    pub fn canonicalize(&self, value: i64) -> i64 {
+        if self.bits == 64 {
+            return value;
+        }
+        let shift = 64 - u32::from(self.bits);
+        if self.signed {
+            (value << shift) >> shift
+        } else {
+            value & self.mask()
+        }
+    }
+}
+
+/// An integer literal as it was written: a magnitude, a sign, and whether it
+/// was written as a bit pattern.
+///
+/// The three travel together because what a literal *means* depends on a type
+/// the parser does not know (`D-107`). `255` is a `u8` and not an `i8`; `0xFF`
+/// is both, and is `-1` at the second.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct IntLiteral {
+    pub magnitude: u64,
+    pub negative: bool,
+    /// Written `0x` or `0b`, which `D-112` says is a bit pattern rather than a
+    /// number.
+    pub bits: bool,
+}
+
+impl IntLiteral {
+    /// The canonical machine word this literal denotes at `kind`, or `None`
+    /// when it does not fit there.
+    pub fn at(self, kind: IntKind) -> Option<i64> {
+        let width = u32::from(kind.bits);
+        if self.negative {
+            // A written minus sign means a number whatever the radix, and no
+            // unsigned type has one. `-128` is an `i8` and `-129` is not, so
+            // the magnitude reaches the bound and stops — which is also how
+            // `-9223372036854775808` gets written at all.
+            if !kind.signed || self.magnitude > (1u64 << (width - 1)) {
+                return None;
+            }
+            return Some((self.magnitude as i64).wrapping_neg());
+        }
+        if self.bits {
+            // A pattern is accepted whenever it fits in the width, and is then
+            // read at that width.
+            if width < 64 && self.magnitude >= (1u64 << width) {
+                return None;
+            }
+            return Some(kind.canonicalize(self.magnitude as i64));
+        }
+        let limit = match (kind.signed, width) {
+            (false, 64) => u64::MAX,
+            (false, _) => (1u64 << width) - 1,
+            (true, _) => (1u64 << (width - 1)) - 1,
+        };
+        if self.magnitude > limit {
+            return None;
+        }
+        Some(self.magnitude as i64)
+    }
+}
+
+impl fmt::Display for IntLiteral {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.negative {
+            f.write_str("-")?;
+        }
+        if self.bits {
+            write!(f, "{:#x}", self.magnitude)
+        } else {
+            write!(f, "{}", self.magnitude)
+        }
+    }
+}
+
 impl Type {
     pub fn is_copy(&self) -> bool {
-        matches!(
-            self,
-            Type::Unit | Type::Bool | Type::I32 | Type::I64 | Type::F64 | Type::Ref { .. }
-        )
+        matches!(self, Type::Unit | Type::Bool | Type::F64 | Type::Ref { .. }) || self.is_integer()
     }
 
     pub fn is_integer(&self) -> bool {
-        matches!(self, Type::I32 | Type::I64)
+        self.int_kind().is_some()
+    }
+
+    /// The width and signedness of an integer type, or `None` for everything
+    /// else. The single place the eight types are spelled out.
+    pub fn int_kind(&self) -> Option<IntKind> {
+        let (bits, signed) = match self {
+            Type::I8 => (8, true),
+            Type::I16 => (16, true),
+            Type::I32 => (32, true),
+            Type::I64 => (64, true),
+            Type::U8 => (8, false),
+            Type::U16 => (16, false),
+            Type::U32 => (32, false),
+            Type::U64 => (64, false),
+            _ => return None,
+        };
+        Some(IntKind { bits, signed })
     }
 
     /// What a borrow borrows, or the type itself when it is not one.
@@ -74,8 +219,14 @@ impl fmt::Display for Type {
         match self {
             Type::Unit => f.write_str("unit"),
             Type::Bool => f.write_str("bool"),
+            Type::I8 => f.write_str("i8"),
+            Type::I16 => f.write_str("i16"),
             Type::I32 => f.write_str("i32"),
             Type::I64 => f.write_str("i64"),
+            Type::U8 => f.write_str("u8"),
+            Type::U16 => f.write_str("u16"),
+            Type::U32 => f.write_str("u32"),
+            Type::U64 => f.write_str("u64"),
             Type::F64 => f.write_str("f64"),
             Type::String => f.write_str("String"),
             Type::List(inner) => write!(f, "List<{inner}>"),
@@ -239,7 +390,7 @@ impl LogicalOp {
 pub enum ExprKind {
     Unit,
     Bool(bool),
-    Int(i64),
+    Int(IntLiteral),
     Float(f64),
     /// A text literal's bytes (see `lexer::TokenKind::String`).
     String(Vec<u8>),
@@ -361,7 +512,7 @@ pub enum PatternKind {
     Wildcard,
     Binding(String),
     Bool(bool),
-    Int(i64),
+    Int(IntLiteral),
     Enum {
         path: String,
         fields: Vec<Pattern>,
@@ -780,8 +931,14 @@ impl AstBuilder<'_> {
             SExprKind::Atom(name) => Some(match name.as_str() {
                 "unit" => Type::Unit,
                 "bool" => Type::Bool,
+                "i8" => Type::I8,
+                "i16" => Type::I16,
                 "i32" => Type::I32,
                 "i64" => Type::I64,
+                "u8" => Type::U8,
+                "u16" => Type::U16,
+                "u32" => Type::U32,
+                "u64" => Type::U64,
                 "f64" => Type::F64,
                 "String" => Type::String,
                 name => Type::Named(name.to_owned()),
@@ -798,7 +955,9 @@ impl AstBuilder<'_> {
                 // `0x100` is a length written the way a program that cares
                 // about a power of two writes one.
                 let length = match numeric_atom(self.required_atom(&parts[2], "array length")?) {
-                    NumericAtom::Integer(length) => usize::try_from(length).ok(),
+                    NumericAtom::Integer(length) if !length.negative => {
+                        usize::try_from(length.magnitude).ok()
+                    }
                     _ => None,
                 };
                 let Some(length) = length else {
@@ -1255,7 +1414,7 @@ fn atom(form: &SExpr) -> Option<&str> {
 
 /// What an atom that might be a number turned out to be.
 pub enum NumericAtom {
-    Integer(i64),
+    Integer(IntLiteral),
     Float(f64),
     /// It began like a number and is not one. Distinguishing this from a name
     /// is the whole point of the type: `0xZZ` used to become a *variable* in an
@@ -1275,6 +1434,11 @@ pub enum NumericAtom {
 /// out of range. A mask is not a magnitude, and requiring one to be written as
 /// a negative decimal is how `core:float` ended up taking the sign bit off a
 /// double by adding `2^62` to it twice.
+///
+/// What this does *not* decide is whether a literal fits, because since
+/// `D-107` that depends on a type only `sema` knows: `255` is a `u8` and not
+/// an `i8`, and `0xFF` is both. So the magnitude, the sign and the radix all
+/// travel forward and the only check here is that the digits fit in 64 bits.
 ///
 /// An `_` may appear only *between* digits. `_1` is a name, and `1_` and
 /// `0x_ff` are malformed: the separator groups digits and does not blur the
@@ -1309,22 +1473,11 @@ pub fn numeric_atom(text: &str) -> NumericAtom {
     let Ok(magnitude) = u64::from_str_radix(&body, radix) else {
         return NumericAtom::Malformed;
     };
-    if negative {
-        // `-9223372036854775808` is the smallest `i64` and is written exactly
-        // that way, so the magnitude is allowed to reach `2^63` and no further.
-        match i64::try_from(magnitude).ok().and_then(i64::checked_neg) {
-            Some(value) => NumericAtom::Integer(value),
-            None if magnitude == 1 << 63 => NumericAtom::Integer(i64::MIN),
-            None => NumericAtom::Malformed,
-        }
-    } else if radix == 10 {
-        match i64::try_from(magnitude) {
-            Ok(value) => NumericAtom::Integer(value),
-            Err(_) => NumericAtom::Malformed,
-        }
-    } else {
-        NumericAtom::Integer(magnitude as i64)
-    }
+    NumericAtom::Integer(IntLiteral {
+        magnitude,
+        negative,
+        bits: radix != 10,
+    })
 }
 
 /// Removes the `_`s from a literal, or refuses one that is not between digits.

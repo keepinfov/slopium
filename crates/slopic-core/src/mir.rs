@@ -733,6 +733,55 @@ impl Builder {
     /// `+0.0` and `-(0.0)` is `-0.0`, and `core:float` reads the sign bit
     /// directly (`D-097`), so the positive zero would have been a wrong answer
     /// that only printing could see.
+    /// Reduces a full machine word to `kind`'s canonical form, and answers with
+    /// the local holding it.
+    ///
+    /// Everything here is at `i64`, deliberately: the shift amount is up to 56,
+    /// which is inside the word's bound but outside a narrow type's, so a
+    /// truncation written at the *target's* type would trip the shift-range
+    /// trap it is meant to implement.
+    fn canonicalize(&mut self, source: LocalId, kind: crate::ast::IntKind) -> LocalId {
+        if kind.signed {
+            let amount = self.temp(Type::I64);
+            self.emit(Instruction::ConstInt {
+                dst: amount,
+                value: i64::from(64 - kind.bits),
+            });
+            let raised = self.temp(Type::I64);
+            self.emit(Instruction::Binary {
+                dst: raised,
+                op: BinaryOp::Shl,
+                lhs: source,
+                rhs: amount,
+                ty: Type::I64,
+            });
+            let lowered = self.temp(Type::I64);
+            self.emit(Instruction::Binary {
+                dst: lowered,
+                op: BinaryOp::Shr,
+                lhs: raised,
+                rhs: amount,
+                ty: Type::I64,
+            });
+            lowered
+        } else {
+            let mask = self.temp(Type::I64);
+            self.emit(Instruction::ConstInt {
+                dst: mask,
+                value: kind.mask(),
+            });
+            let kept = self.temp(Type::I64);
+            self.emit(Instruction::Binary {
+                dst: kept,
+                op: BinaryOp::BitAnd,
+                lhs: source,
+                rhs: mask,
+                ty: Type::I64,
+            });
+            kept
+        }
+    }
+
     fn unary_operands(&mut self, callee: &str, ty: &Type, operand: LocalId) -> (LocalId, LocalId) {
         match callee {
             "-" if *ty == Type::F64 => {
@@ -759,11 +808,18 @@ impl Builder {
                 });
                 (operand, no)
             }
+            // `bit-not` is `x ^ (every bit this type has)`, written as the
+            // canonical word with all of them set: `-1` at any signed width,
+            // because the operand is sign-extended and the bits above the type
+            // have to flip with it, and the type's mask when it is unsigned,
+            // because there they have to stay clear. That is what keeps the
+            // result canonical, and is why the backends need no masking tail
+            // on a bit operation (`D-107`).
             _ => {
                 let ones = self.temp(ty.clone());
                 self.emit(Instruction::ConstInt {
                     dst: ones,
-                    value: -1,
+                    value: ty.int_kind().map_or(-1, |kind| kind.canonicalize(-1)),
                 });
                 (operand, ones)
             }
@@ -954,16 +1010,31 @@ impl Builder {
             // widening is already done and the move is the whole conversion.
             // A pair that is not already extended needs an instruction here,
             // and the differential suite is what would catch its absence.
+            // A conversion costs no instruction of its own. Every integer is
+            // held canonical in a full machine word (`D-074`, `D-107`), so a
+            // conversion is exactly the canonicalisation of the target's width
+            // — a mask when the target is unsigned, a shift pair when it is
+            // signed — and both are `Binary` shapes the backends already emit.
+            // That is `D-112`'s call about unary operators made a second time:
+            // no new MIR node means no chance of the two backends disagreeing
+            // about what a conversion is.
             TExprKind::Convert { value } => {
                 let source = self.expr(value)?;
-                let dst = self.temp(expr.ty.clone());
+                let target = expr.ty.clone();
+                let word = match (target.int_kind(), source.ty.int_kind()) {
+                    (Some(to), Some(from)) if !to.accepts(from) => {
+                        Some(self.canonicalize(source.local, to))
+                    }
+                    _ => None,
+                };
+                let dst = self.temp(target.clone());
                 self.emit(Instruction::Assign {
                     dst,
-                    src: source.local,
+                    src: word.unwrap_or(source.local),
                 });
                 Some(Value {
                     local: dst,
-                    ty: expr.ty.clone(),
+                    ty: target,
                     owned_temporary: false,
                 })
             }

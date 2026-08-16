@@ -1,0 +1,6 @@
+(fn narrow () -> i8
+  255)
+
+(fn main () -> i32
+  (narrow)
+  0)

@@ -6,13 +6,15 @@
 ; reaches them through `core:string:from-i64`, and `read-i64` is `read-line`
 ; and `to-i64` (`D-086`, `D-087`). There is no `print-i32` and there will not
 ; be one: since v0.6.1 an `i32` widens at the call, as `(print-i64 (as i64
-; value))` (`D-090`).
+; value))` (`D-090`). `D-107` made that eight types rather than two and did not
+; change the rule — the only pair here is signed and unsigned, because they are
+; the two that disagree about what a full machine word means.
 
 (take core:option Option)
-(take core:string from-i64 to-i64 trim)
+(take core:string from-i64 from-u64 to-i64 trim)
 
-(export print println print-i64 println-i64 print-bool println-bool read-line
-  read-i64)
+(export print println print-i64 println-i64 print-u64 println-u64 print-bool
+  println-bool read-line read-i64)
 
 ; A `(& String)` crosses the boundary as a pointer with no length, and a
 ; Slopium string may contain a NUL byte, so the length travels beside it
@@ -40,6 +42,14 @@
 
 (fn println-i64 ((value i64)) -> unit
   (let text (from-i64 value))
+  (println (& text)))
+
+(fn print-u64 ((value u64)) -> unit
+  (let text (from-u64 value))
+  (print (& text)))
+
+(fn println-u64 ((value u64)) -> unit
+  (let text (from-u64 value))
   (println (& text)))
 
 (fn print-bool ((flag bool)) -> unit

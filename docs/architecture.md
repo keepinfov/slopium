@@ -112,6 +112,20 @@ deriving those separately would be free to derive them differently, and the
 result would be a linker error at best and a value released by the wrong helper
 at worst.
 
+Both backends hold every integer in a full machine word, canonical for its type
+— sign-extended when signed, zero-extended when unsigned (`D-074`, `D-107`). A
+narrow type therefore has no instruction selection of its own: it computes at 64
+bits and is put back into its own width afterwards, and it overflows exactly
+when that round trip changes the value, which is one compare-and-trap rather
+than a bound constant per type. Only `u64` reaches for genuinely unsigned
+instructions, because a zero-extended value below 2^32 compares and divides the
+same either way. This is also what makes a conversion free of any MIR
+instruction: `(as T v)` lowers onto a mask or a shift pair the backends already
+emit, so there is no node for the two of them to disagree about. What the
+invariant costs is one canonicalisation per narrow parameter in the prologue —
+a Slopium caller always places a canonical word, but C leaves the upper half of
+a narrow argument register undefined.
+
 The differences that remain are the machine ones. x86-64 lets most instructions
 name a frame slot, so its backend decides per instruction whether an operand is
 a register or memory. AArch64 is load/store, so its backend reads an operand

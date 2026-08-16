@@ -224,6 +224,74 @@ cat >"$trap_dir/negate-min.slp" <<'EOF'
   (println-i64 (negate -9223372036854775808))
   0)
 EOF
+# The eight-type axis (`D-107`). A narrow type overflows at its own width and
+# not the word's, and it is checked by canonicalising the 64-bit result and
+# comparing — a shape neither backend had before, and one that a backend
+# reaching for the wide bound would silently pass rather than fail.
+cat >"$trap_dir/u8-overflow.slp" <<'EOF'
+(take std:io println-i64)
+(fn near () -> u8 200)
+(fn add ((a u8) (b u8)) -> u8 (+ a b))
+(fn main () -> i32
+  (println-i64 (as i64 (add (near) 56)))
+  0)
+EOF
+cat >"$trap_dir/u8-underflow.slp" <<'EOF'
+(take std:io println-i64)
+(fn zero () -> u8 0)
+(fn take-one ((a u8) (b u8)) -> u8 (- a b))
+(fn main () -> i32
+  (println-i64 (as i64 (take-one (zero) 1)))
+  0)
+EOF
+cat >"$trap_dir/i8-overflow.slp" <<'EOF'
+(take std:io println-i64)
+(fn near () -> i8 127)
+(fn add ((a i8) (b i8)) -> i8 (+ a b))
+(fn main () -> i32
+  (println-i64 (as i64 (add (near) 1)))
+  0)
+EOF
+# A `u32` square reaches 2^64, so this is the one narrow product whose 64-bit
+# result has already wrapped when the range check would look at it.
+cat >"$trap_dir/u32-overflow.slp" <<'EOF'
+(take std:io println-i64)
+(fn root () -> u32 0x1_0000)
+(fn square ((a u32) (b u32)) -> u32 (* a b))
+(fn main () -> i32
+  (println-i64 (as i64 (square (root) (root))))
+  0)
+EOF
+# `u64` is the one width with no room above it, so its overflow is the carry
+# flag rather than a range check.
+cat >"$trap_dir/u64-overflow.slp" <<'EOF'
+(take std:io println-i64)
+(fn big () -> u64 0xFFFF_FFFF_FFFF_FFFF)
+(fn add ((a u64) (b u64)) -> u64 (+ a b))
+(fn main () -> i32
+  (println-i64 (as i64 (add (big) 1)))
+  0)
+EOF
+# Unsigned division reaches `div` on x86-64 and `udiv` on AArch64, neither of
+# which the compiler emitted before this patch.
+cat >"$trap_dir/u64-div-zero.slp" <<'EOF'
+(take std:io println-i64)
+(fn zero () -> u64 0)
+(fn divide ((a u64) (b u64)) -> u64 (/ a b))
+(fn main () -> i32
+  (println-i64 (as i64 (divide 7 (zero))))
+  0)
+EOF
+# The shift bound is the type's width, so eight is out of range for a `u8` the
+# way 64 is for an `i64`.
+cat >"$trap_dir/shift-byte.slp" <<'EOF'
+(take std:io println-i64)
+(fn amount () -> u8 8)
+(fn shift ((value u8) (count u8)) -> u8 (shl value count))
+(fn main () -> i32
+  (println-i64 (as i64 (shift 1 (amount))))
+  0)
+EOF
 
 for profile in dev release; do
   for source in "$trap_dir"/*.slp; do
@@ -296,6 +364,75 @@ for profile in dev release; do
 done
 
 echo "cross-check: $float_count float-comparison comparisons ... ok"
+
+# ---------------------------------------------------------------------------
+# The integer axis: unsigned arithmetic above 2^63, where a backend that
+# reached for the signed instruction gives a plausible wrong answer rather than
+# a crash (`D-107`).
+#
+# Agreement between two backends is not enough here for the same reason it was
+# not enough for a NaN: both could reach for `idiv` and both be wrong. So the
+# answers are written down. Every value goes through a function, so the
+# constant folder cannot decide them early — and the folder is checked against
+# the same expectations by the release profile, which does fold them.
+# ---------------------------------------------------------------------------
+
+unsigned_dir="$result_dir/unsigned"
+mkdir -p "$unsigned_dir"
+
+cat >"$unsigned_dir/wide.slp" <<'EOF'
+(take std:io println-i64 println-u64)
+(fn big () -> u64 0xFFFF_FFFF_FFFF_FFFF)
+(fn half () -> u64 0x8000_0000_0000_0000)
+(fn three () -> u64 3)
+(fn flag ((c bool)) -> i64 (if c 1 0))
+(fn main () -> i32
+  ; A signed divide would answer 0 here, and a signed compare would call the
+  ; big one negative.
+  (println-u64 (/ (big) (three)))
+  (println-u64 (% (big) 10))
+  (println-i64 (flag (> (big) (three))))
+  (println-i64 (flag (< (half) (big))))
+  (println-i64 (flag (>= (half) (three))))
+  ; A logical shift, where an arithmetic one would carry the sign down.
+  (println-u64 (shr (big) 60))
+  (println-u64 (shr (half) 63))
+  ; And the widths below it, which travel through `as` and nothing else.
+  (println-i64 (as i64 (as i8 0xFF)))
+  (println-i64 (as i64 (as u8 0xFF)))
+  (println-i64 (as i64 (bit-not (as u16 0))))
+  (println-u64 (as u64 (as i8 -1)))
+  0)
+EOF
+
+cat >"$unsigned_dir/expected.stdout" <<'EOF'
+6148914691236517205
+5
+1
+1
+1
+15
+1
+-1
+255
+65535
+18446744073709551615
+exit status: 0
+EOF
+
+unsigned_count=0
+for profile in dev release; do
+  compare_program "unsigned arithmetic" "$unsigned_dir/wide-$profile" "$profile" \
+    "$compiler" "$unsigned_dir/wide.slp" --emit exe
+  if ! cmp --silent "$unsigned_dir/expected.stdout" "$unsigned_dir/wide-$profile.native.out"; then
+    echo "cross-check: unsigned answers changed ($profile)" >&2
+    diff -u "$unsigned_dir/expected.stdout" "$unsigned_dir/wide-$profile.native.out" >&2 || true
+    exit 1
+  fi
+  unsigned_count=$((unsigned_count + 1))
+done
+
+echo "cross-check: $unsigned_count unsigned-arithmetic comparisons ... ok"
 
 # ---------------------------------------------------------------------------
 # ABI conformance, outward: Slopium calls C through `extern`.

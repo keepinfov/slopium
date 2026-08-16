@@ -12,7 +12,7 @@
 (take core:option Option)
 
 (export byte-at substring concat from-bytes equals starts-with find contains
-  trim split from-i64 to-i64 hash)
+  trim split from-i64 to-i64 from-u64 to-u64 hash)
 
 ; The length travels beside the pointer, because a Slopium string may contain a
 ; NUL byte and C would stop at it (`D-079`).
@@ -143,27 +143,38 @@
   (let table "0123456789")
   (substring (& table) digit (+ digit 1)))
 
-(fn from-i64 ((value i64)) -> String
+; The one digit loop. It is unsigned because that is the wider of the two
+; ranges: every `i64` magnitude fits in a `u64`, and no `u64` fits in an `i64`
+; (`D-107`).
+(fn digits-of ((value u64)) -> String
   (if (= value 0)
     "0"
     (do
-      (let negative (< value 0))
-      ; The digits come off the negative side, because negating the smallest
-      ; `i64` overflows and arithmetic traps.
-      (let mut remaining (if negative value (- value)))
+      (let mut remaining value)
       (let mut text "")
-      (while (< remaining 0)
+      (while (> remaining 0)
         (let quotient (/ remaining 10))
-        (let digit (- (% remaining 10)))
+        (let digit (as i64 (% remaining 10)))
         (let glyph (digit-string digit))
         (let next (concat (& glyph) (& text)))
         (set text next)
         (set remaining quotient))
-      (if negative
-        (do
-          (let sign "-")
-          (concat (& sign) (& text)))
-        text))))
+      text)))
+
+(fn from-u64 ((value u64)) -> String
+  (digits-of value))
+
+; A sign and a magnitude. The magnitude of the smallest `i64` has no `i64` to
+; hold it, so it is taken one below and put back as a `u64` — which is exact,
+; and is what replaced accumulating the digits on the negative side.
+(fn from-i64 ((value i64)) -> String
+  (if (< value 0)
+    (do
+      (let magnitude (+ (as u64 (- (+ value 1))) 1))
+      (let sign "-")
+      (let text (digits-of magnitude))
+      (concat (& sign) (& text)))
+    (digits-of (as u64 value))))
 
 ; `None` for anything that is not an optional `-` followed by at least one
 ; digit, and for a number too large to hold — arithmetic traps, so the refusal
@@ -202,3 +213,32 @@
             (Option:None)
             (Option:Some (- total))))
         (Option:None)))))
+
+; The unsigned counterpart of `to-i64`. No sign is accepted — a `u64` has none
+; — and the refusal comes before the multiply, because arithmetic traps
+; (`D-087`).
+(fn to-u64 ((text (& String))) -> (Option u64)
+  (let size (len text))
+  (if (= size 0)
+    (Option:None)
+    (do
+      (let limit 1844674407370955161)
+      (let mut index 0)
+      (let mut total (as u64 0))
+      (let mut ok true)
+      (while (< index size)
+        (let byte (byte-at text index))
+        (if (or (< byte 48) (> byte 57))
+          (do
+            (set ok false)
+            (break))
+          ())
+        (let digit (- byte 48))
+        (if (or (> total (as u64 limit)) (and (= total (as u64 limit)) (> digit 5)))
+          (do
+            (set ok false)
+            (break))
+          ())
+        (set total (+ (* total 10) (as u64 digit)))
+        (set index (+ index 1)))
+      (if ok (Option:Some total) (Option:None)))))

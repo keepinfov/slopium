@@ -185,6 +185,11 @@ pub enum Cond {
     /// so trips the same branch, and it reads `ucomisd`'s carry flag, which is
     /// set both when the left side is smaller and when either side is a NaN.
     Ae,
+    /// Below — the unsigned counterpart of `L`, and the same encoding the
+    /// assembler spells `jc`. A `u64` addition that carried and a `u64`
+    /// subtraction that borrowed are both read through it (`D-107`).
+    B,
+    Be,
     P,
     Np,
 }
@@ -193,9 +198,11 @@ impl Cond {
     pub fn code(self) -> u8 {
         match self {
             Cond::O => 0x0,
+            Cond::B => 0x2,
             Cond::Ae => 0x3,
             Cond::E | Cond::Z => 0x4,
             Cond::Ne => 0x5,
+            Cond::Be => 0x6,
             Cond::A => 0x7,
             Cond::P => 0xa,
             Cond::Np => 0xb,
@@ -220,6 +227,8 @@ impl fmt::Display for Cond {
             Cond::Le => "le",
             Cond::A => "a",
             Cond::Ae => "ae",
+            Cond::B => "b",
+            Cond::Be => "be",
             Cond::P => "p",
             Cond::Np => "np",
         })
@@ -277,27 +286,23 @@ impl fmt::Display for AluOp {
     }
 }
 
-/// The two shifts the backend selects, which share the `D3 /n` encoding and
-/// differ only in the digit.
-///
-/// Only the `cl` form is here. A shift count is a local by the time code
-/// generation sees it — `sema` refuses a literal that is out of range and the
-/// constant folder turns the rest into a value, not into an immediate operand —
-/// so the `C1 /n ib` form would be an encoding nothing emits, which
-/// `aarch64_inst.rs` calls out as the thing to avoid.
+/// The three shifts the backend selects, which share the `D3 /n` and `C1 /n ib`
+/// encodings and differ only in the digit.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ShiftOp {
     /// `shl`, which the assembler also spells `sal`.
     Shl,
-    /// `sar` — arithmetic, so the sign is carried down. Every integer is signed
-    /// until `D-107`, at which point `shr` joins it for the unsigned half.
+    /// `sar` — arithmetic, so the sign is carried down.
     Sar,
+    /// `shr` — logical, which is what an unsigned right shift means (`D-107`).
+    Shr,
 }
 
 impl ShiftOp {
     fn digit(self) -> u8 {
         match self {
             ShiftOp::Shl => 4,
+            ShiftOp::Shr => 5,
             ShiftOp::Sar => 7,
         }
     }
@@ -308,6 +313,7 @@ impl fmt::Display for ShiftOp {
         f.write_str(match self {
             ShiftOp::Shl => "shl",
             ShiftOp::Sar => "sar",
+            ShiftOp::Shr => "shr",
         })
     }
 }
@@ -371,10 +377,26 @@ pub enum Inst {
     Jmp(Target),
     Jcc(Cond, Target),
     Setcc(Cond, Reg),
-    /// `shl`/`sar r, cl`. The count register is always `cl` — the machine has
-    /// no other variable-count form — so it is not an operand here.
+    /// `shl`/`sar`/`shr r, cl`. The count register is always `cl` — the machine
+    /// has no other variable-count form — so it is not an operand here.
     Shift(ShiftOp, Reg),
+    /// The same shift by a constant count, `C1 /n ib`.
+    ///
+    /// A shift the *program* writes always arrives in a register, because sema
+    /// refuses an out-of-range literal and the folder turns the rest into a
+    /// value. This form is the backend's own: canonicalising an `i8` or an
+    /// `i16` into its machine word is `shl r, 56` and `sar r, 56`, which is
+    /// register-agnostic where `movsx r64, r8` would need a byte register
+    /// (`D-107`).
+    ShiftImm(ShiftOp, Reg, u8),
     Idiv(Reg),
+    /// `div r` — the unsigned divide, which reads `rdx:rax` and needs `rdx`
+    /// cleared rather than sign-extended into.
+    Div(Reg),
+    /// `mul r` — the unsigned multiply. Its low half agrees with `imul`; what
+    /// differs is that it sets the overflow flag from the *unsigned* high half,
+    /// which is the only way to ask whether a `u64` product fit.
+    Mul(Reg),
     /// Sign-extend `rax` into `rdx`, and its 32-bit counterpart.
     Cqo,
     Cdq,
@@ -405,7 +427,10 @@ impl fmt::Display for Inst {
             Inst::Jcc(cond, target) => write!(f, "j{cond} {target}"),
             Inst::Setcc(cond, register) => write!(f, "set{cond} {register}"),
             Inst::Shift(op, register) => write!(f, "{op} {register}, cl"),
+            Inst::ShiftImm(op, register, count) => write!(f, "{op} {register}, {count}"),
             Inst::Idiv(register) => write!(f, "idiv {register}"),
+            Inst::Div(register) => write!(f, "div {register}"),
+            Inst::Mul(register) => write!(f, "mul {register}"),
             Inst::Cqo => f.write_str("cqo"),
             Inst::Cdq => f.write_str("cdq"),
             Inst::Ret => f.write_str("ret"),
@@ -782,12 +807,34 @@ impl Instruction for Inst {
                 encoding.opcode.push(0xd3);
                 encoding.registers(op.digit(), register.number()?);
             }
+            Inst::ShiftImm(op, register, count) => {
+                if register.width()? == Width::Qword {
+                    encoding.wide();
+                }
+                encoding.opcode.push(0xc1);
+                encoding.registers(op.digit(), register.number()?);
+                encoding.immediate.push(*count);
+            }
             Inst::Idiv(register) => {
                 if register.width()? == Width::Qword {
                     encoding.wide();
                 }
                 encoding.opcode.push(0xf7);
                 encoding.registers(7, register.number()?);
+            }
+            Inst::Div(register) => {
+                if register.width()? == Width::Qword {
+                    encoding.wide();
+                }
+                encoding.opcode.push(0xf7);
+                encoding.registers(6, register.number()?);
+            }
+            Inst::Mul(register) => {
+                if register.width()? == Width::Qword {
+                    encoding.wide();
+                }
+                encoding.opcode.push(0xf7);
+                encoding.registers(4, register.number()?);
             }
             Inst::Cqo => {
                 encoding.wide();
@@ -970,11 +1017,30 @@ mod tests {
             ),
             (Inst::Idiv(r("rcx")), &[0x48, 0xf7, 0xf9]),
             (Inst::Idiv(r("ecx")), &[0xf7, 0xf9]),
+            // The unsigned pair, `F7 /6` and `F7 /4` (`D-107`).
+            (Inst::Div(r("rcx")), &[0x48, 0xf7, 0xf1]),
+            (Inst::Div(r("r9")), &[0x49, 0xf7, 0xf1]),
+            (Inst::Mul(r("rcx")), &[0x48, 0xf7, 0xe1]),
             // `D3 /n` — the count is `cl` and is not encoded.
             (Inst::Shift(ShiftOp::Shl, r("rax")), &[0x48, 0xd3, 0xe0]),
             (Inst::Shift(ShiftOp::Sar, r("rax")), &[0x48, 0xd3, 0xf8]),
+            (Inst::Shift(ShiftOp::Shr, r("rax")), &[0x48, 0xd3, 0xe8]),
             (Inst::Shift(ShiftOp::Shl, r("eax")), &[0xd3, 0xe0]),
             (Inst::Shift(ShiftOp::Sar, r("eax")), &[0xd3, 0xf8]),
+            (Inst::Shift(ShiftOp::Shr, r("eax")), &[0xd3, 0xe8]),
+            // `C1 /n ib` — the canonicalising pair for an `i8` and an `i16`.
+            (
+                Inst::ShiftImm(ShiftOp::Shl, r("rax"), 56),
+                &[0x48, 0xc1, 0xe0, 0x38],
+            ),
+            (
+                Inst::ShiftImm(ShiftOp::Sar, r("rax"), 56),
+                &[0x48, 0xc1, 0xf8, 0x38],
+            ),
+            (
+                Inst::ShiftImm(ShiftOp::Shl, r("rcx"), 48),
+                &[0x48, 0xc1, 0xe1, 0x30],
+            ),
             // `FF /2` is 64-bit by default in long mode, so `rax` takes no REX
             // at all and `r11` takes only REX.B.
             (Inst::CallReg(r("rax")), &[0xff, 0xd0]),
@@ -1143,6 +1209,13 @@ mod tests {
             (Inst::Alu(AluOp::Or, reg("rax"), reg("rcx")), "or rax, rcx"),
             (Inst::Shift(ShiftOp::Shl, r("rax")), "shl rax, cl"),
             (Inst::Shift(ShiftOp::Sar, r("eax")), "sar eax, cl"),
+            (Inst::Shift(ShiftOp::Shr, r("rax")), "shr rax, cl"),
+            (Inst::ShiftImm(ShiftOp::Shl, r("rax"), 56), "shl rax, 56"),
+            (Inst::ShiftImm(ShiftOp::Sar, r("rax"), 56), "sar rax, 56"),
+            (Inst::Div(r("rcx")), "div rcx"),
+            (Inst::Mul(r("rcx")), "mul rcx"),
+            (Inst::Jcc(Cond::B, Target::Forward(1)), "jb 1f"),
+            (Inst::Setcc(Cond::Be, r("al")), "setbe al"),
             (Inst::Imul(r("rax"), reg("rcx")), "imul rax, rcx"),
             (
                 Inst::Sse(SseOp::Ucomi, r("xmm0"), r("xmm1")),

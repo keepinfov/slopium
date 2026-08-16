@@ -54,7 +54,7 @@ allowed_undefined="sl_rt_abort sl_rt_alloc sl_rt_free sl_rt_panic"
 # itself (`D-097`, `D-098`).
 cat > "$work/program.slp" <<'SLP'
 (take core:option Option)
-(take core:string from-i64 to-i64 hash equals)
+(take core:string from-i64 to-i64 from-u64 to-u64 hash equals)
 (take core:float from-f64 to-f64)
 (take core:map Map new insert lookup)
 
@@ -64,6 +64,19 @@ cat > "$work/program.slp" <<'SLP'
 ; is the only place one can be written (`D-104`).
 (fn empty-table () -> (Map String i64)
   (new hash equals))
+
+; The eight integer types reach no further than `core` does (`D-107`). A narrow
+; type computes at 64 bits and is put back into its own width by a shift or a
+; mask, and an unsigned one divides with an instruction rather than a call, so
+; none of it can want libc — which is what `nm -u` below is asked to confirm.
+(fn narrow-answer () -> i64
+  (let masked (bit-and (as u8 0xFF) 0x2A))
+  (let widened (as u64 masked))
+  (let quotient (/ (* widened 3) 3))
+  (let shifted (shr (as u64 0xFFFF_FFFF_FFFF_FFFF) 58))
+  (if (and (= quotient (as u64 42)) (= shifted (as u64 63)))
+    (as i64 quotient)
+    0))
 
 (fn answer () -> i64
   (let mut values (list 3 4))
@@ -87,7 +100,17 @@ cat > "$work/program.slp" <<'SLP'
                 (set table (insert table "two" 2))
                 (let key "two")
                 (match (lookup (& table) (& key))
-                  ((Option:Some held) (if (= held 2) parsed 0))
+                  ((Option:Some held)
+                    (if (and (= held 2) (= (narrow-answer) 42))
+                      (do
+                        ; And unsigned text, which is the one thing `D-107`
+                        ; added to the library.
+                        (let wide (from-u64 0xFFFF_FFFF_FFFF_FFFF))
+                        (match (to-u64 (& wide))
+                          ((Option:Some back)
+                            (if (= back 0xFFFF_FFFF_FFFF_FFFF) parsed 0))
+                          ((Option:None) 0)))
+                      0))
                   ((Option:None) 0)))
               0))
           ((Option:None) 0))))

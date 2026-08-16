@@ -58,6 +58,12 @@ programs=(
   # half includes `msub` — the only four-register instruction the compiler
   # selects, and therefore the one most worth holding against `as`.
   "tests/projects/pass/vocabulary/src/main.slp"
+  # The integer axis (`D-107`), which is the second-largest addition: `shr`,
+  # `div`, `mul` and the constant-count shift on x86-64, and `udiv`, `lsr`,
+  # `umulh` and the four sub-word extensions on AArch64. None of the eight had
+  # ever been emitted, and the canonicalising tail that follows every narrow
+  # operation is a shape neither backend had assembled at all.
+  "tests/projects/pass/integer-axis/src/main.slp"
   "examples/fibonacci.slp"
   "examples/lists.slp"
   "examples/match.slp"

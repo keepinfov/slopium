@@ -1,0 +1,23 @@
+[
+  {
+    "code": "SL0200",
+    "start": 45,
+    "end": 50,
+    "line": 2,
+    "column": 6
+  },
+  {
+    "code": "SL0200",
+    "start": 51,
+    "end": 56,
+    "line": 2,
+    "column": 12
+  },
+  {
+    "code": "SL0200",
+    "start": 42,
+    "end": 57,
+    "line": 2,
+    "column": 3
+  }
+]

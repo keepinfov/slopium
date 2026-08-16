@@ -40,12 +40,12 @@ syntax keyword slopiumModuleKeyword export take
 
 " A lowercase name followed by a type and `)` is a parameter/field
 " declaration. Uses remain slopiumIdentifier, while the type has its own group.
-syntax match slopiumParameter "\v<[a-z_][A-Za-z0-9_-]*>\ze\s+(&mut|&)?(unit|bool|i32|i64|f64|String|[A-Z][A-Za-z0-9_-]*)\s*\)"
+syntax match slopiumParameter "\v<[a-z_][A-Za-z0-9_-]*>\ze\s+(&mut|&)?(unit|bool|i8|i16|i32|i64|u8|u16|u32|u64|f64|String|[A-Z][A-Za-z0-9_-]*)\s*\)"
 
 syntax match slopiumOwnership "&mut\|&"
 syntax keyword slopiumBuiltin clone list array slice len push get get-ref pop remove replace not bit-and bit-or bit-xor bit-not shl shr
 syntax match slopiumOperator "\%((\s*\)\@<=\%([<>!]\=[=]\|[-+*/<>%]\)"
-syntax keyword slopiumType unit bool i32 i64 f64 String List Array Slice Fn
+syntax keyword slopiumType unit bool i8 i16 i32 i64 u8 u16 u32 u64 f64 String List Array Slice Fn
 syntax match slopiumEnumPath "\v<[A-Za-z_][A-Za-z0-9_-]*(:[A-Za-z_][A-Za-z0-9_-]*)+>"
 syntax match slopiumField "\v:[A-Za-z_][A-Za-z0-9_-]*"
 syntax match slopiumArrow "->"

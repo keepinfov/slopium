@@ -84,6 +84,11 @@ pub enum Cond {
     /// Unsigned lower or same, which is `f64` "less or equal": `fcmp` sets the
     /// carry on an unordered comparison, so this is false at a NaN.
     Ls,
+    /// Unsigned lower, spelled `cc` by the disassembler. It reads a `u64`
+    /// subtraction that borrowed as well as a `u64` comparison (`D-107`).
+    Lo,
+    /// Unsigned higher.
+    Hi,
     Vs,
     Mi,
     Lt,
@@ -98,8 +103,10 @@ impl Cond {
             Cond::Eq => 0,
             Cond::Ne => 1,
             Cond::Hs => 2,
+            Cond::Lo => 3,
             Cond::Mi => 4,
             Cond::Vs => 6,
+            Cond::Hi => 8,
             Cond::Ls => 9,
             Cond::Ge => 10,
             Cond::Lt => 11,
@@ -124,6 +131,8 @@ impl fmt::Display for Cond {
             Cond::Ne => "ne",
             Cond::Hs => "hs",
             Cond::Ls => "ls",
+            Cond::Lo => "lo",
+            Cond::Hi => "hi",
             Cond::Vs => "vs",
             Cond::Mi => "mi",
             Cond::Lt => "lt",
@@ -143,8 +152,12 @@ pub enum Arith {
     Subs,
     Mul,
     Smulh,
+    /// The unsigned high half, which is the only way to ask whether a `u64`
+    /// product fit (`D-107`).
+    Umulh,
     Smull,
     Sdiv,
+    Udiv,
     And,
     Orr,
     Eor,
@@ -154,6 +167,8 @@ pub enum Arith {
     /// check the backend emits before either (`D-106`).
     Lslv,
     Asrv,
+    /// The logical right shift, which is what an unsigned `shr` means.
+    Lsrv,
 }
 
 impl fmt::Display for Arith {
@@ -165,13 +180,47 @@ impl fmt::Display for Arith {
             Arith::Subs => "subs",
             Arith::Mul => "mul",
             Arith::Smulh => "smulh",
+            Arith::Umulh => "umulh",
             Arith::Smull => "smull",
             Arith::Sdiv => "sdiv",
+            Arith::Udiv => "udiv",
             Arith::And => "and",
             Arith::Orr => "orr",
             Arith::Eor => "eor",
             Arith::Lslv => "lsl",
             Arith::Asrv => "asr",
+            Arith::Lsrv => "lsr",
+        })
+    }
+}
+
+/// The four sub-word extensions, which are bitfield moves the assembler names.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtendOp {
+    Sxtb,
+    Sxth,
+    Uxtb,
+    Uxth,
+}
+
+impl ExtendOp {
+    fn word(self) -> u32 {
+        match self {
+            ExtendOp::Sxtb => 0x9340_1c00,
+            ExtendOp::Sxth => 0x9340_3c00,
+            ExtendOp::Uxtb => 0x5300_1c00,
+            ExtendOp::Uxth => 0x5300_3c00,
+        }
+    }
+}
+
+impl fmt::Display for ExtendOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            ExtendOp::Sxtb => "sxtb",
+            ExtendOp::Sxth => "sxth",
+            ExtendOp::Uxtb => "uxtb",
+            ExtendOp::Uxth => "uxth",
         })
     }
 }
@@ -276,6 +325,17 @@ pub enum Inst {
         dst: Reg,
         src: Reg,
     },
+    /// `sxtb`/`sxth Xd, Wn` and `uxtb`/`uxth Wd, Wn` — the sub-word half of
+    /// the canonicalisation `D-107` asks for.
+    ///
+    /// The unsigned pair writes a 32-bit register, which clears the upper half
+    /// of the 64-bit one; that is what makes it a zero extension to the word
+    /// rather than only to 32 bits.
+    Extend {
+        op: ExtendOp,
+        dst: Reg,
+        src: Reg,
+    },
     /// `ldr Xt, [Xn]` or `ldr Xt, [Xn, #offset]`.
     ///
     /// `None` is not the same as `Some(0)`: they encode alike and print
@@ -338,6 +398,7 @@ impl fmt::Display for Inst {
                 Ok(())
             }
             Inst::Arith { op, dst, lhs, rhs } => write!(f, "{op} {dst}, {lhs}, {rhs}"),
+            Inst::Extend { op, dst, src } => write!(f, "{op} {dst}, {src}"),
             Inst::Msub {
                 dst,
                 lhs,
@@ -453,9 +514,14 @@ impl Instruction for Inst {
                     }
                     Arith::Mul => 0x9b00_7c00 | (m << 16) | (n << 5) | d,
                     Arith::Smulh => 0x9b40_7c00 | (m << 16) | (n << 5) | d,
+                    Arith::Umulh => 0x9bc0_7c00 | (m << 16) | (n << 5) | d,
                     Arith::Smull => 0x9b20_7c00 | (m << 16) | (n << 5) | d,
                     Arith::Sdiv => {
                         let base = if wide { 0x9ac0_0c00 } else { 0x1ac0_0c00 };
+                        base | (m << 16) | (n << 5) | d
+                    }
+                    Arith::Udiv => {
+                        let base = if wide { 0x9ac0_0800 } else { 0x1ac0_0800 };
                         base | (m << 16) | (n << 5) | d
                     }
                     // The shifted-register logical form with a shift of zero.
@@ -473,10 +539,12 @@ impl Instruction for Inst {
                         };
                         base | (m << 16) | (n << 5) | d
                     }
-                    Arith::Lslv | Arith::Asrv => {
+                    Arith::Lslv | Arith::Asrv | Arith::Lsrv => {
                         let base: u32 = match (op, wide) {
                             (Arith::Lslv, true) => 0x9ac0_2000,
                             (Arith::Lslv, false) => 0x1ac0_2000,
+                            (Arith::Lsrv, true) => 0x9ac0_2400,
+                            (Arith::Lsrv, false) => 0x1ac0_2400,
                             (Arith::Asrv, true) => 0x9ac0_2800,
                             _ => 0x1ac0_2800,
                         };
@@ -566,6 +634,7 @@ impl Instruction for Inst {
             }
             Inst::Cset { dst, cond } => 0x9a9f_07e0 | (cond.inverted() << 12) | dst.number()?,
             Inst::Sxtw { dst, src } => 0x9340_7c00 | (src.number()? << 5) | dst.number()?,
+            Inst::Extend { op, dst, src } => op.word() | (src.number()? << 5) | dst.number()?,
             Inst::Load { dst, base, offset }
             | Inst::Store {
                 src: dst,
@@ -886,6 +955,98 @@ mod tests {
                     src: x("w16"),
                 },
                 0x93407e10,
+            ),
+            // The sub-word canonicalisations (`D-107`).
+            (
+                Inst::Extend {
+                    op: ExtendOp::Sxtb,
+                    dst: x("x16"),
+                    src: x("w16"),
+                },
+                0x93401e10,
+            ),
+            (
+                Inst::Extend {
+                    op: ExtendOp::Sxth,
+                    dst: x("x16"),
+                    src: x("w16"),
+                },
+                0x93403e10,
+            ),
+            (
+                Inst::Extend {
+                    op: ExtendOp::Uxtb,
+                    dst: x("w16"),
+                    src: x("w16"),
+                },
+                0x53001e10,
+            ),
+            (
+                Inst::Extend {
+                    op: ExtendOp::Uxth,
+                    dst: x("w16"),
+                    src: x("w16"),
+                },
+                0x53003e10,
+            ),
+            // Writing a 32-bit register clears the upper half, which is the
+            // whole of a `u32`'s canonicalisation.
+            (
+                Inst::Mov {
+                    dst: x("w16"),
+                    src: x("w16"),
+                },
+                0x2a1003f0,
+            ),
+            (
+                Inst::Arith {
+                    op: Arith::Udiv,
+                    dst: x("x16"),
+                    lhs: x("x1"),
+                    rhs: x("x2"),
+                },
+                0x9ac20830,
+            ),
+            (
+                Inst::Arith {
+                    op: Arith::Umulh,
+                    dst: x("x15"),
+                    lhs: x("x1"),
+                    rhs: x("x2"),
+                },
+                0x9bc27c2f,
+            ),
+            (
+                Inst::Arith {
+                    op: Arith::Lsrv,
+                    dst: x("x16"),
+                    lhs: x("x1"),
+                    rhs: x("x2"),
+                },
+                0x9ac22430,
+            ),
+            (
+                Inst::Arith {
+                    op: Arith::Lsrv,
+                    dst: x("w16"),
+                    lhs: x("w1"),
+                    rhs: x("w2"),
+                },
+                0x1ac22430,
+            ),
+            (
+                Inst::Cset {
+                    dst: x("x16"),
+                    cond: Cond::Lo,
+                },
+                0x9a9f27f0,
+            ),
+            (
+                Inst::Cset {
+                    dst: x("x16"),
+                    cond: Cond::Hi,
+                },
+                0x9a9f97f0,
             ),
             (
                 Inst::Arith {
@@ -1307,6 +1468,57 @@ mod tests {
             (
                 Inst::Bcond(Cond::Vs, Target::Named(".Lt".into())),
                 "b.vs .Lt",
+            ),
+            (
+                Inst::Bcond(Cond::Lo, Target::Named(".Lt".into())),
+                "b.lo .Lt",
+            ),
+            (
+                Inst::Bcond(Cond::Hi, Target::Named(".Lt".into())),
+                "b.hi .Lt",
+            ),
+            (
+                Inst::Extend {
+                    op: ExtendOp::Sxtb,
+                    dst: x("x16"),
+                    src: x("w16"),
+                },
+                "sxtb x16, w16",
+            ),
+            (
+                Inst::Extend {
+                    op: ExtendOp::Uxth,
+                    dst: x("w16"),
+                    src: x("w16"),
+                },
+                "uxth w16, w16",
+            ),
+            (
+                Inst::Arith {
+                    op: Arith::Udiv,
+                    dst: x("x16"),
+                    lhs: x("x1"),
+                    rhs: x("x2"),
+                },
+                "udiv x16, x1, x2",
+            ),
+            (
+                Inst::Arith {
+                    op: Arith::Lsrv,
+                    dst: x("x16"),
+                    lhs: x("x1"),
+                    rhs: x("x2"),
+                },
+                "lsr x16, x1, x2",
+            ),
+            (
+                Inst::Arith {
+                    op: Arith::Umulh,
+                    dst: x("x15"),
+                    lhs: x("x1"),
+                    rhs: x("x2"),
+                },
+                "umulh x15, x1, x2",
             ),
             (Inst::B(Target::Forward(2)), "b 2f"),
             (Inst::PushFrame, "stp x29, x30, [sp, #-16]!"),

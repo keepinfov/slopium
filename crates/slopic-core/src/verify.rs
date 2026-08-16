@@ -461,7 +461,8 @@ fn verify_borrow_reads(
 /// is every type that is either `Copy` or already a borrow.
 fn crossable_argument(ty: &Type) -> bool {
     match ty {
-        Type::I32 | Type::I64 | Type::F64 | Type::Bool => true,
+        Type::F64 | Type::Bool => true,
+        _ if ty.is_integer() => true,
         Type::Ref {
             mutable: false,
             inner,
@@ -629,7 +630,7 @@ fn verify_instruction_shape(
             // The bitwise and shift operations are narrower than the rest: an
             // `f64` has no bits to and together, and lowering one here would
             // reach an integer instruction with a double in the register.
-            let numeric = matches!(ty, Type::I32 | Type::I64 | Type::F64);
+            let numeric = ty.is_integer() || *ty == Type::F64;
             let allowed = match op {
                 BinaryOp::Equal | BinaryOp::NotEqual => numeric || *ty == Type::Bool,
                 _ if op.bitwise() || op.shifts() || *op == BinaryOp::Rem => ty.is_integer(),

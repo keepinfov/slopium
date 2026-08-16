@@ -374,9 +374,9 @@ impl Server {
         }
         const KEYWORDS: &[&str] = &[
             "fn", "test", "struct", "enum", "let", "mut", "set", "if", "match", "do", "true",
-            "false", "_", "unit", "bool", "i32", "i64", "f64", "String", "List", "Array", "Slice",
-            "Fn", "lambda", "loop", "while", "break", "continue", "export", "take", "try", "as",
-            "and", "or",
+            "false", "_", "unit", "bool", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
+            "f64", "String", "List", "Array", "Slice", "Fn", "lambda", "loop", "while", "break",
+            "continue", "export", "take", "try", "as", "and", "or",
         ];
         for token in &document.analysis.syntax.tokens {
             if token.kind == SyntaxKind::Atom && KEYWORDS.contains(&token.text.as_str()) {
@@ -384,8 +384,14 @@ impl Server {
                     token.text.as_str(),
                     "unit"
                         | "bool"
+                        | "i8"
+                        | "i16"
                         | "i32"
                         | "i64"
+                        | "u8"
+                        | "u16"
+                        | "u32"
+                        | "u64"
                         | "f64"
                         | "String"
                         | "List"

@@ -1,0 +1,88 @@
+; Every width and both signednesses `D-107` adds, so that `object-check.sh` has
+; one program holding every encoding the patch taught the two backends —
+; `shr`/`div`/`mul` and the constant-count shift on x86-64, `udiv`/`lsr`/`umulh`
+; and the four sub-word extensions on AArch64.
+;
+; Written as identities wherever it can be, for the reason `vocabulary` is: a
+; table of expected values is a table that can be transcribed wrongly, while
+; `a = (a / b) * b + (a % b)` cannot.
+
+(take std:io println println-i64 println-u64)
+(take std:string from-u64 to-u64 equals)
+(take std:option Option)
+
+(fn division-identity ((a u64) (b u64)) -> bool
+  (= a (+ (* (/ a b) b) (% a b))))
+
+; The whole of the canonical-word invariant in one function: a value goes out
+; to a narrow type and comes back, and what returns is what the width can hold.
+(fn round-trip-u8 ((value i64)) -> i64
+  (as i64 (as u8 value)))
+
+(fn round-trip-i8 ((value i64)) -> i64
+  (as i64 (as i8 value)))
+
+(fn add-bytes ((a u8) (b u8)) -> u8
+  (+ a b))
+
+(fn shifted ((value u64) (count u64)) -> u64
+  (shr value count))
+
+(fn big () -> u64 0xFFFF_FFFF_FFFF_FFFF)
+
+(fn main () -> i32
+  ; A signed divide would answer zero for the first and call the second
+  ; negative, so these are the two places a backend that reached for the wrong
+  ; instruction stays plausible instead of crashing.
+  (println-u64 (/ (big) 3))
+  (println-i64 (if (> (big) 3) 1 0))
+  (println-u64 (shifted (big) 60))
+  (println-i64 (round-trip-u8 255))
+  (println-i64 (round-trip-i8 255))
+  (println-i64 (as i64 (add-bytes 200 55)))
+  (let text (from-u64 (big)))
+  (println (& text))
+  0)
+
+(test "unsigned division keeps the identity above 2^63"
+  (and (division-identity (big) 3)
+    (division-identity (big) 10)
+    (division-identity 0x8000_0000_0000_0000 7)
+    (division-identity 1 (big))))
+
+; The claim `D-107` rests on: a conversion is the target's width applied to the
+; source's extension, so a value that already fits comes back unchanged and one
+; that does not comes back as the pattern its width keeps.
+(test "a conversion truncates to the target and extends from the source"
+  (and (= 255 (round-trip-u8 255))
+    (= -1 (round-trip-i8 255))
+    (= 0 (round-trip-u8 256))
+    (= 1 (round-trip-u8 257))
+    (= (as u64 (as i8 -1)) (big))
+    (= (as i64 (as u8 (as i8 -1))) 255)))
+
+(test "a narrow type keeps its own width"
+  (and (= 255 (as i64 (add-bytes 200 55)))
+    (= 128 (as i64 (shl (as u8 1) 7)))
+    (= 0 (as i64 (shl (as u8 128) 1)))
+    (= 65535 (as i64 (bit-not (as u16 0))))
+    (= 32767 (as i64 (bit-not (as i16 0x8000))))))
+
+(test "a right shift is arithmetic when signed and logical when unsigned"
+  (and (= -1 (shr -1 63))
+    (= 1 (as i64 (shr (big) 63)))
+    (= 15 (as i64 (shifted (big) 60)))))
+
+(test "unsigned comparison reads the top bit as a magnitude"
+  (and (> (big) 1)
+    (< (as u64 1) (big))
+    (>= (big) (big))
+    (not (< (big) 0x8000_0000_0000_0000))))
+
+(test "text round-trips through the unsigned width"
+  (let text (from-u64 (big)))
+  (let expected "18446744073709551615")
+  (and (equals (& text) (& expected))
+    (match (to-u64 (& text))
+      ((Option:Some value) (= value (big)))
+      ((Option:None) false))))

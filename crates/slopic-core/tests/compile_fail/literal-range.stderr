@@ -1,0 +1,4 @@
+literal-range.slp:2:3: error[SL0200]: integer literal `255` does not fit in i8
+  |
+ 2 |   255)
+  |   ^^^

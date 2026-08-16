@@ -1,0 +1,6 @@
+(fn flip ((value u64)) -> u64
+  (- value))
+
+(fn main () -> i32
+  (flip 1)
+  0)

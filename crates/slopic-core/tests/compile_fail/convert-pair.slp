@@ -1,5 +1,5 @@
-(fn narrow ((value i64)) -> i32
+(fn truncate ((value f64)) -> i32
   (as i32 value))
 
 (fn main () -> i32
-  (narrow 42))
+  (truncate 42.0))

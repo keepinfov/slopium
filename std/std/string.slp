@@ -17,4 +17,6 @@
   (core:string:split :as split)
   (core:string:from-i64 :as from-i64)
   (core:string:to-i64 :as to-i64)
+  (core:string:from-u64 :as from-u64)
+  (core:string:to-u64 :as to-u64)
   (core:string:hash :as hash))

@@ -1,0 +1,6 @@
+(fn add ((small u8) (large i64)) -> i64
+  (+ small large))
+
+(fn main () -> i32
+  (add 1 2)
+  0)

@@ -1184,18 +1184,24 @@ impl<'a> Analyzer<'a> {
         let typed = match &expr.kind {
             ExprKind::Unit => self.typed(expr, Type::Unit, TExprKind::Unit),
             ExprKind::Bool(value) => self.typed(expr, Type::Bool, TExprKind::Bool(*value)),
+            // A literal takes its type from what is expected of it and falls
+            // back to `i64`, and the range it has to fit is that type's rather
+            // than the word's (`D-107`). Only `sema` can decide this, which is
+            // why `numeric_atom` stopped trying to.
             ExprKind::Int(value) => {
-                let ty = match expected {
-                    Some(Type::I32) => Type::I32,
-                    _ => Type::I64,
+                let ty = match expected.and_then(|ty| ty.int_kind().map(|_| ty.clone())) {
+                    Some(ty) => ty,
+                    None => Type::I64,
                 };
-                if ty == Type::I32 && i32::try_from(*value).is_err() {
+                let kind = ty.int_kind().expect("the fallback is an integer type");
+                let word = value.at(kind).unwrap_or_else(|| {
                     self.error(
                         expr.span,
-                        format!("integer literal `{value}` does not fit in i32"),
+                        format!("integer literal `{value}` does not fit in {ty}"),
                     );
-                }
-                self.typed(expr, ty, TExprKind::Int(*value))
+                    0
+                });
+                self.typed(expr, ty, TExprKind::Int(word))
             }
             ExprKind::Float(value) => self.typed(expr, Type::F64, TExprKind::Float(*value)),
             ExprKind::String(value) => {
@@ -2191,19 +2197,23 @@ impl<'a> Analyzer<'a> {
                 TPattern::Bool(*value)
             }
             PatternKind::Int(value) => {
-                if !matches!(expected, Type::I32 | Type::I64) {
-                    self.error(
-                        pattern.span,
-                        format!("integer pattern does not match `{expected}`"),
-                    );
-                }
-                if *expected == Type::I32 && i32::try_from(*value).is_err() {
-                    self.error(
-                        pattern.span,
-                        format!("pattern `{value}` does not fit in i32"),
-                    );
-                }
-                TPattern::Int(*value)
+                let word = match expected.int_kind() {
+                    Some(kind) => value.at(kind).unwrap_or_else(|| {
+                        self.error(
+                            pattern.span,
+                            format!("pattern `{value}` does not fit in {expected}"),
+                        );
+                        0
+                    }),
+                    None => {
+                        self.error(
+                            pattern.span,
+                            format!("integer pattern does not match `{expected}`"),
+                        );
+                        0
+                    }
+                };
+                TPattern::Int(word)
             }
             PatternKind::Enum { path, fields } => {
                 let mut info = if let Some(info) = self.variants.get(path).cloned() {
@@ -2811,15 +2821,26 @@ impl<'a> Analyzer<'a> {
     /// rule so that v0.8 freezes a list a later version can add a row to
     /// (`D-090`). A conversion that is not in it is refused by name, because
     /// the alternative is a language where `as` means "trust me".
+    /// `(as T value)`, which since `D-107` is a table rather than a single row.
+    ///
+    /// Every integer converts to every integer, by one rule: **the source's
+    /// signedness extends and the target's width truncates**. So
+    /// `(as u64 (i8 -1))` is every bit set and `(as u8 (i8 -1))` is `255`.
+    /// Nothing else converts — `D-090` says a conversion is a form and never
+    /// implicit, and widening the integer axis does not weaken that for `f64`
+    /// or `bool`.
     fn convert(&mut self, expr: &Expr, target: &Type, value: &Expr) -> TExpr {
-        const PAIRS: &[(Type, Type)] = &[(Type::I32, Type::I64)];
-
-        let value = self.expr(value, None);
         let target = self.normalize_type(target, expr.span);
-        let allowed = PAIRS
-            .iter()
-            .any(|(from, to)| *from == value.ty && *to == target);
-        if !allowed {
+        // A literal takes the target's type directly, so `(as u64 …)` can be
+        // written above 2^63 and `(as u8 300)` is refused rather than quietly
+        // truncated. Only a literal: an expectation carried into anything else
+        // would be a second, implicit conversion.
+        let expected = match (&value.kind, target.is_integer()) {
+            (ExprKind::Int(_), true) => Some(target.clone()),
+            _ => None,
+        };
+        let value = self.expr(value, expected.as_ref());
+        if !(value.ty.is_integer() && target.is_integer()) {
             self.diagnostics.push(
                 Diagnostic::error(
                     codes::NAME_OR_TYPE,
@@ -2827,7 +2848,10 @@ impl<'a> Analyzer<'a> {
                     expr.span,
                     format!("`as` cannot convert `{}` to `{target}`", value.ty),
                 )
-                .with_help("the only conversion is `(as i64 value)` from an `i32`"),
+                .with_help(
+                    "`as` converts between the integer types; the source's signedness \
+                     extends and the target's width truncates",
+                ),
             );
         }
         self.typed(
@@ -3612,7 +3636,7 @@ impl<'a> Analyzer<'a> {
             return self.typed(expr, Type::Unit, TExprKind::Unit);
         }
         let numeric_expectation = match expected {
-            Some(Type::I32 | Type::I64 | Type::F64) => expected,
+            Some(ty) if ty.is_integer() || *ty == Type::F64 => expected,
             _ => None,
         };
         let left = self.expr(&args[0], numeric_expectation);
@@ -3638,6 +3662,24 @@ impl<'a> Analyzer<'a> {
         }
         if spec.shift {
             self.check_shift_amount(callee, &left.ty, args.get(1));
+        }
+        // Negation on an unsigned type can only answer for zero, so it is a
+        // mistake rather than a value that traps. Refusing it here says so with
+        // the type in hand, where the runtime could only say "overflow".
+        if callee == "-" && args.len() == 1 {
+            if let Some(kind) = left.ty.int_kind() {
+                if !kind.signed {
+                    self.diagnostics.push(
+                        Diagnostic::error(
+                            codes::NAME_OR_TYPE,
+                            self.file,
+                            expr.span,
+                            format!("`{}` is unsigned and has no negation", left.ty),
+                        )
+                        .with_help("subtract from zero if that is what you meant, and it traps"),
+                    );
+                }
+            }
         }
         let result = if spec.answers_bool {
             Type::Bool
@@ -3667,8 +3709,11 @@ impl<'a> Analyzer<'a> {
         let ExprKind::Int(written) = amount.kind else {
             return;
         };
-        let width = if *ty == Type::I32 { 32 } else { 64 };
-        if written >= 0 && written < width {
+        // The bound is the type's own width, not the machine word's: a `u8`
+        // shifted by 8 has nothing left, and traps for the same reason an
+        // `i64` shifted by 64 does (`D-107`).
+        let width = u64::from(ty.int_kind().map_or(64, |kind| kind.bits));
+        if !written.negative && written.magnitude < width {
             return;
         }
         self.diagnostics.push(
@@ -4265,19 +4310,22 @@ fn contains_parameter(ty: &Type, parameters: &HashSet<String>) -> bool {
 }
 
 const EXTERN_PARAMETER_HELP: &str =
-    "an `extern` parameter is `i32`, `i64`, `f64`, `bool`, `(& String)` or `(& (Slice T))`";
+    "an `extern` parameter is an integer type, `f64`, `bool`, `(& String)` or `(& (Slice T))`";
 
 const EXTERN_RESULT_HELP: &str =
-    "an `extern` returns `unit`, `i32`, `i64`, `f64`, `bool` or an owned `String`";
+    "an `extern` returns `unit`, an integer type, `f64`, `bool` or an owned `String`";
 
 /// Whether a parameter type is one the C boundary can carry (`D-065`).
 ///
-/// The list is short because the language has no `u8`, no `char` and no
-/// unsigned types, and it is closed on purpose: a type that is not here has no
-/// agreed C spelling, and guessing one is how an FFI starts lying.
+/// The list grew by the widths C actually has when `D-107` gave the language
+/// eight integer types, and is still closed on purpose: a type that is not here
+/// has no agreed C spelling, and guessing one is how an FFI starts lying. What
+/// stays out is every aggregate — a `String` or a `Slice` crosses as a borrow
+/// or not at all.
 fn extern_parameter_is_expressible(ty: &Type) -> bool {
     match ty {
-        Type::I32 | Type::I64 | Type::F64 | Type::Bool => true,
+        Type::F64 | Type::Bool => true,
+        _ if ty.is_integer() => true,
         // A borrow is the only way a non-scalar crosses: an `extern` may not
         // take ownership, because the drop glue would then run where the
         // compiler cannot see it.
@@ -4296,10 +4344,7 @@ fn extern_parameter_is_expressible(ty: &Type) -> bool {
 /// A returned `String` is owned by the caller, so C must have allocated it
 /// through `sl_rt_string_new`. Everything else is a scalar or nothing.
 fn extern_result_is_expressible(ty: &Type) -> bool {
-    matches!(
-        ty,
-        Type::Unit | Type::Bool | Type::I32 | Type::I64 | Type::F64 | Type::String
-    )
+    ty.is_integer() || matches!(ty, Type::Unit | Type::Bool | Type::F64 | Type::String)
 }
 
 fn contains_borrowed_type(ty: &Type) -> bool {
@@ -4316,8 +4361,14 @@ fn contains_borrowed_type(ty: &Type) -> bool {
         Type::Fn { .. } => false,
         Type::Unit
         | Type::Bool
+        | Type::I8
+        | Type::I16
         | Type::I32
         | Type::I64
+        | Type::U8
+        | Type::U16
+        | Type::U32
+        | Type::U64
         | Type::F64
         | Type::String
         | Type::Named(_) => false,

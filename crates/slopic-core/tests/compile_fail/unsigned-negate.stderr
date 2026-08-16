@@ -1,0 +1,5 @@
+unsigned-negate.slp:2:3: error[SL0200]: `u64` is unsigned and has no negation
+  |
+ 2 |   (- value))
+  |   ^^^^^^^^^
+  = help: subtract from zero if that is what you meant, and it traps

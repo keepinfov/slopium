@@ -13,11 +13,11 @@
 //! keeps most locals in registers (`D-020`), so the loads are the exception,
 //! and the uniform shape is worth more here than the last instruction would be.
 
-use crate::aarch64_inst::{Arith, Cond, FloatOp, Inst, Reg};
+use crate::aarch64_inst::{Arith, Cond, ExtendOp, FloatOp, Inst, Reg};
 use crate::asm::{Assembly, Item, Section, Target};
-use crate::ast::Type;
+use crate::ast::{IntKind, Type};
 use crate::cfg::Cfg;
-use crate::codegen::{align_to, Backend, CodegenOptions, TargetSpec, AARCH64_LINUX_GNU};
+use crate::codegen::{align_to, regime, Backend, CodegenOptions, TargetSpec, AARCH64_LINUX_GNU};
 use crate::diagnostic::{codes, CompileResult, Diagnostic, Span};
 use crate::lowering::{
     address_taken, call_symbol, call_words, clone_function, drop_function, enum_clone_size,
@@ -37,8 +37,6 @@ use std::collections::HashMap;
 /// setup untouched.
 struct RegisterFile {
     wide: &'static [Reg],
-    /// The 32-bit views of `wide`, index for index, for `i32` arithmetic.
-    narrow: &'static [Reg],
     /// How many leading entries are caller-saved and so need no prologue save.
     volatile: usize,
 }
@@ -57,18 +55,6 @@ const CALLEE_SAVED: RegisterFile = RegisterFile {
         Reg("x26"),
         Reg("x27"),
         Reg("x28"),
-    ],
-    narrow: &[
-        Reg("w19"),
-        Reg("w20"),
-        Reg("w21"),
-        Reg("w22"),
-        Reg("w23"),
-        Reg("w24"),
-        Reg("w25"),
-        Reg("w26"),
-        Reg("w27"),
-        Reg("w28"),
     ],
     volatile: 0,
 };
@@ -96,24 +82,6 @@ const LEAF: RegisterFile = RegisterFile {
         Reg("x26"),
         Reg("x27"),
         Reg("x28"),
-    ],
-    narrow: &[
-        Reg("w9"),
-        Reg("w10"),
-        Reg("w11"),
-        Reg("w12"),
-        Reg("w13"),
-        Reg("w14"),
-        Reg("w19"),
-        Reg("w20"),
-        Reg("w21"),
-        Reg("w22"),
-        Reg("w23"),
-        Reg("w24"),
-        Reg("w25"),
-        Reg("w26"),
-        Reg("w27"),
-        Reg("w28"),
     ],
     volatile: 6,
 };
@@ -173,7 +141,6 @@ const FLOAT_ARGUMENTS: [Reg; 8] = [
 /// the calling convention.
 const X0: Reg = Reg("x0");
 const X15: Reg = Reg("x15");
-const W15: Reg = Reg("w15");
 const X16: Reg = Reg("x16");
 const W16: Reg = Reg("w16");
 const X17: Reg = Reg("x17");
@@ -433,19 +400,6 @@ impl<'a> Generator<'a> {
         }
     }
 
-    /// The 32-bit view of whatever [`Generator::read`] would return.
-    fn read_narrow(&mut self, local: LocalId, scratch: usize) -> Reg {
-        match self.alloc.location(local) {
-            Location::Register(register) => self.registers.narrow[register],
-            Location::Memory(_) => {
-                let offset = self.slot_offset(local);
-                let (wide, narrow) = SCRATCH[scratch];
-                self.load(wide, offset);
-                narrow
-            }
-        }
-    }
-
     /// Stores a register into a local, or moves it when the local has one.
     fn write(&mut self, local: LocalId, source: Reg) {
         match self.alloc.location(local) {
@@ -695,17 +649,37 @@ impl<'a> Generator<'a> {
                     self.write(*local, X16);
                     floats += 1;
                 }
-            } else if integers >= INTEGER_ARGUMENTS.len() {
-                self.inst(Inst::Load {
-                    dst: X16,
-                    base: X29,
-                    offset: Some((16 + stack * 8) as u32),
-                });
-                self.write(*local, X16);
-                stack += 1;
             } else {
-                self.write(*local, INTEGER_ARGUMENTS[integers]);
-                integers += 1;
+                // A narrow parameter is canonicalised on the way in. Every
+                // Slopium caller already places a canonical word, but a C
+                // caller leaves the upper half of a narrow argument register
+                // undefined — and the invariant every narrow operation below
+                // rests on has to be true of the values a function was handed,
+                // not only of the ones it computed (`D-074`, `D-107`).
+                let kind = ty.int_kind().filter(|kind| !kind.is_full_width());
+                if integers >= INTEGER_ARGUMENTS.len() {
+                    self.inst(Inst::Load {
+                        dst: X16,
+                        base: X29,
+                        offset: Some((16 + stack * 8) as u32),
+                    });
+                    stack += 1;
+                } else {
+                    let source = INTEGER_ARGUMENTS[integers];
+                    integers += 1;
+                    if kind.is_none() {
+                        self.write(*local, source);
+                        continue;
+                    }
+                    self.inst(Inst::Mov {
+                        dst: X16,
+                        src: source,
+                    });
+                }
+                if let Some(kind) = kind {
+                    self.canonicalize(kind);
+                }
+                self.write(*local, X16);
             }
         }
     }
@@ -979,91 +953,89 @@ impl<'a> Generator<'a> {
         rhs: LocalId,
         ty: &Type,
     ) {
-        let narrow = *ty == Type::I32;
+        // Every operand arrives canonical in its full machine word (`D-074`,
+        // generalised by `D-107`), so every regime computes at 64 bits. What
+        // differs is how overflow is asked about: a signed word reads `V`, a
+        // `u64` reads the carry, and a narrow type is asked afterwards whether
+        // its result survived its own width.
+        let kind = regime(ty);
         match op {
             BinaryOp::Add | BinaryOp::Sub => {
-                let op = if matches!(op, BinaryOp::Add) {
-                    Arith::Adds
-                } else {
-                    Arith::Subs
-                };
-                if narrow {
-                    let left = self.read_narrow(lhs, 1);
-                    let right = self.read_narrow(rhs, 2);
-                    self.inst(Inst::Arith {
-                        op,
-                        dst: W16,
-                        lhs: left,
-                        rhs: right,
-                    });
-                    self.trap_on_overflow();
-                    // The 32-bit form leaves the upper half zero; the local
-                    // holds a sign-extended i32.
-                    self.inst(Inst::Sxtw { dst: X16, src: W16 });
-                } else {
-                    let left = self.read(lhs, 1);
-                    let right = self.read(rhs, 2);
-                    self.inst(Inst::Arith {
-                        op,
-                        dst: X16,
-                        lhs: left,
-                        rhs: right,
-                    });
-                    self.trap_on_overflow();
-                }
-                self.write(dst, X16);
-            }
-            BinaryOp::Mul if narrow => {
-                let left = self.read_narrow(lhs, 1);
-                let right = self.read_narrow(rhs, 2);
-                // The full 64-bit product; it fits in an i32 exactly when it
-                // equals the sign extension of its own low half.
+                let adding = matches!(op, BinaryOp::Add);
+                let flagged = if adding { Arith::Adds } else { Arith::Subs };
+                let left = self.read(lhs, 1);
+                let right = self.read(rhs, 2);
                 self.inst(Inst::Arith {
-                    op: Arith::Smull,
+                    op: flagged,
                     dst: X16,
                     lhs: left,
                     rhs: right,
                 });
-                self.inst(Inst::CmpExtended { lhs: X16, rhs: W16 });
-                self.inst(Inst::Bcond(Cond::Ne, overflow_trampoline()));
-                self.inst(Inst::Sxtw { dst: X16, src: W16 });
+                if kind.is_full_width() {
+                    // A borrow clears the carry, so a subtraction that went
+                    // below zero is `lo` where an addition that carried out of
+                    // the top is `hs`.
+                    let carried = match (kind.signed, adding) {
+                        (true, _) => Cond::Vs,
+                        (false, true) => Cond::Hs,
+                        (false, false) => Cond::Lo,
+                    };
+                    self.inst(Inst::Bcond(carried, overflow_trampoline()));
+                }
+                self.canonicalize_checked(kind);
                 self.write(dst, X16);
             }
             BinaryOp::Mul => {
                 let left = self.read(lhs, 1);
                 let right = self.read(rhs, 2);
                 // `mul` does not set flags, so the check is the high half of
-                // the product against the sign of the low half.
-                self.inst(Inst::Arith {
-                    op: Arith::Smulh,
-                    dst: X15,
-                    lhs: left,
-                    rhs: right,
-                });
+                // the product: signed, against the sign of the low half;
+                // unsigned, against zero. A narrow product needs neither — two
+                // operands of at most 32 bits have an exact 64-bit product —
+                // and is caught by the range check instead.
+                if kind.is_full_width() {
+                    self.inst(Inst::Arith {
+                        op: if kind.signed {
+                            Arith::Smulh
+                        } else {
+                            Arith::Umulh
+                        },
+                        dst: X15,
+                        lhs: left,
+                        rhs: right,
+                    });
+                }
                 self.inst(Inst::Arith {
                     op: Arith::Mul,
                     dst: X16,
                     lhs: left,
                     rhs: right,
                 });
-                self.inst(Inst::CmpShifted {
-                    lhs: X15,
-                    rhs: X16,
-                    amount: 63,
-                });
-                self.inst(Inst::Bcond(Cond::Ne, overflow_trampoline()));
+                if kind.is_full_width() {
+                    if kind.signed {
+                        self.inst(Inst::CmpShifted {
+                            lhs: X15,
+                            rhs: X16,
+                            amount: 63,
+                        });
+                        self.inst(Inst::Bcond(Cond::Ne, overflow_trampoline()));
+                    } else {
+                        self.inst(Inst::Cbnz(X15, overflow_trampoline()));
+                    }
+                }
+                self.canonicalize_checked(kind);
                 self.write(dst, X16);
             }
-            BinaryOp::Div | BinaryOp::Rem => self.divide(dst, op, lhs, rhs, narrow),
+            BinaryOp::Div | BinaryOp::Rem => self.divide(dst, op, lhs, rhs, kind),
             BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => {
                 let logical = match op {
                     BinaryOp::BitAnd => Arith::And,
                     BinaryOp::BitOr => Arith::Orr,
                     _ => Arith::Eor,
                 };
-                // No `sxtw` tail on the narrow path: a bit operation on two
-                // sign-extended `i32`s leaves a sign-extended `i32`, which is
-                // not true of the arithmetic above it.
+                // No canonicalising tail: a bit operation carries canonical
+                // operands to a canonical result at every width, because the
+                // bits above the type are uniform on both sides and stay so.
                 let left = self.read(lhs, 1);
                 let right = self.read(rhs, 2);
                 self.inst(Inst::Arith {
@@ -1074,7 +1046,7 @@ impl<'a> Generator<'a> {
                 });
                 self.write(dst, X16);
             }
-            BinaryOp::Shl | BinaryOp::Shr => self.shift(dst, op, lhs, rhs, narrow),
+            BinaryOp::Shl | BinaryOp::Shr => self.shift(dst, op, lhs, rhs, kind),
             BinaryOp::Less
             | BinaryOp::Greater
             | BinaryOp::LessEqual
@@ -1089,11 +1061,52 @@ impl<'a> Generator<'a> {
                 });
                 self.inst(Inst::Cset {
                     dst: X16,
-                    cond: integer_condition(op),
+                    cond: integer_condition(op, kind),
                 });
                 self.write(dst, X16);
             }
         }
+    }
+
+    /// Puts `x16` back into the canonical machine word of a narrow type, and
+    /// does nothing for a full-width one.
+    fn canonicalize(&mut self, kind: IntKind) {
+        let op = match (kind.bits, kind.signed) {
+            (64, _) => return,
+            (32, true) => {
+                self.inst(Inst::Sxtw { dst: X16, src: W16 });
+                return;
+            }
+            // Writing a 32-bit register clears the upper half of the 64-bit
+            // one, which is the whole of a `u32`'s canonicalisation.
+            (32, false) => {
+                self.inst(Inst::Mov { dst: W16, src: W16 });
+                return;
+            }
+            (8, true) => ExtendOp::Sxtb,
+            (16, true) => ExtendOp::Sxth,
+            (8, false) => ExtendOp::Uxtb,
+            _ => ExtendOp::Uxth,
+        };
+        let dst = if kind.signed { X16 } else { W16 };
+        self.inst(Inst::Extend { op, dst, src: W16 });
+    }
+
+    /// Canonicalises `x16` and traps if that changed it.
+    ///
+    /// `D-031`'s overflow check for the six narrow types, and the reason none
+    /// of them needs a bound constant written down: an operation overflows
+    /// exactly when its result does not survive the round trip through its own
+    /// width. `x15` is free — the only thing that used it was a high half this
+    /// regime does not compute.
+    fn canonicalize_checked(&mut self, kind: IntKind) {
+        if kind.is_full_width() {
+            return;
+        }
+        self.inst(Inst::Mov { dst: X15, src: X16 });
+        self.canonicalize(kind);
+        self.inst(Inst::Cmp { lhs: X16, rhs: X15 });
+        self.inst(Inst::Bcond(Cond::Ne, overflow_trampoline()));
     }
 
     /// A shift, with the count checked against the operand width first.
@@ -1101,12 +1114,13 @@ impl<'a> Generator<'a> {
     /// `lslv` and `asrv` reduce the count modulo the width and x86-64's `shl`
     /// masks it to five or six bits, so an unchecked shift by the width faults
     /// on neither machine and answers differently on each. `D-106` says such a
-    /// shift traps; this is where it does. The comparison is unsigned, so a
-    /// negative count — an enormous unsigned number — takes the same branch and
-    /// needs no second test.
-    fn shift(&mut self, dst: LocalId, op: BinaryOp, lhs: LocalId, rhs: LocalId, narrow: bool) {
+    /// shift traps; this is where it does, at the *type's* width rather than
+    /// the word's. The comparison is unsigned, so a negative count — an
+    /// enormous unsigned number — takes the same branch and needs no second
+    /// test.
+    fn shift(&mut self, dst: LocalId, op: BinaryOp, lhs: LocalId, rhs: LocalId, kind: IntKind) {
         let count = self.read(rhs, 2);
-        self.materialize(X15, if narrow { 32 } else { 64 });
+        self.materialize(X15, u64::from(kind.bits));
         self.inst(Inst::Cmp {
             lhs: count,
             rhs: X15,
@@ -1115,38 +1129,29 @@ impl<'a> Generator<'a> {
             Cond::Hs,
             Target::Named(".Lsl_panic_shift_trampoline".into()),
         ));
-        let variable = if op == BinaryOp::Shl {
-            Arith::Lslv
-        } else {
-            Arith::Asrv
+        let variable = match (op, kind.signed) {
+            (BinaryOp::Shl, _) => Arith::Lslv,
+            (_, true) => Arith::Asrv,
+            (_, false) => Arith::Lsrv,
         };
-        if narrow {
-            let left = self.read_narrow(lhs, 1);
-            let amount = self.read_narrow(rhs, 2);
-            self.inst(Inst::Arith {
-                op: variable,
-                dst: W16,
-                lhs: left,
-                rhs: amount,
-            });
-            // The 32-bit form leaves the upper half zero; the local holds a
-            // sign-extended i32, and a left shift into the sign bit is a
-            // pattern this must carry rather than refuse.
-            self.inst(Inst::Sxtw { dst: X16, src: W16 });
-        } else {
-            let left = self.read(lhs, 1);
-            self.inst(Inst::Arith {
-                op: variable,
-                dst: X16,
-                lhs: left,
-                rhs: count,
-            });
+        let left = self.read(lhs, 1);
+        self.inst(Inst::Arith {
+            op: variable,
+            dst: X16,
+            lhs: left,
+            rhs: count,
+        });
+        // A left shift truncates rather than trapping (`D-112`); a right shift
+        // only removes bits, so what it leaves is canonical already.
+        if op == BinaryOp::Shl {
+            self.canonicalize(kind);
         }
         self.write(dst, X16);
     }
 
-    /// Signed division and remainder, with the two inputs that have no quotient
-    /// rejected first: a zero divisor, and the most negative value over `-1`.
+    /// Division and remainder, with the inputs that have no quotient rejected
+    /// first: a zero divisor, and — for a signed word — the most negative value
+    /// over `-1`.
     ///
     /// `sdiv` traps on neither — it returns zero and saturates respectively —
     /// so unlike x86 the checks are the only thing standing between those
@@ -1155,78 +1160,57 @@ impl<'a> Generator<'a> {
     ///
     /// There is no remainder instruction, so `%` is the quotient multiplied
     /// back out and subtracted: `msub Rd, Rq, Rm, Rn` is `n - q * m`. That is
-    /// truncated toward zero because `sdiv` is, which is exactly the identity
-    /// `D-106` asks `%` to keep with `/`.
-    fn divide(&mut self, dst: LocalId, op: BinaryOp, lhs: LocalId, rhs: LocalId, narrow: bool) {
-        let (left, right) = if narrow {
-            (self.read_narrow(lhs, 1), self.read_narrow(rhs, 2))
-        } else {
-            (self.read(lhs, 1), self.read(rhs, 2))
-        };
+    /// truncated toward zero because the division is, which is exactly the
+    /// identity `D-106` asks `%` to keep with `/`.
+    fn divide(&mut self, dst: LocalId, op: BinaryOp, lhs: LocalId, rhs: LocalId, kind: IntKind) {
+        let left = self.read(lhs, 1);
+        let right = self.read(rhs, 2);
         self.inst(Inst::Cbz(
             right,
             Target::Named(".Lsl_panic_div_zero_trampoline".into()),
         ));
-        let most_negative = if narrow {
-            i64::from(i32::MIN) as u64
+        // A narrow operand cannot be the most negative *word*, so that guard is
+        // unreachable there, and the one narrow quotient that overflows — the
+        // least `i8` over `-1` — is caught by the range check below. An
+        // unsigned divide has no such input at all.
+        if kind.is_full_width() && kind.signed {
+            self.materialize(X15, i64::MIN as u64);
+            self.inst(Inst::Cmp {
+                lhs: left,
+                rhs: X15,
+            });
+            self.inst(Inst::Bcond(Cond::Ne, Target::Forward(1)));
+            // `cmn r, #1` is `cmp r, #-1` without needing a negative immediate.
+            self.inst(Inst::CmnImm { lhs: right, imm: 1 });
+            self.inst(Inst::Bcond(Cond::Eq, overflow_trampoline()));
+            self.asm.push(Item::Numeric(1));
+        }
+        // A narrow unsigned operand is a small non-negative word, so the signed
+        // divide answers identically and only `u64` needs `udiv`.
+        let divide = if kind.signed || !kind.is_full_width() {
+            Arith::Sdiv
         } else {
-            i64::MIN as u64
+            Arith::Udiv
         };
-        self.materialize(X15, most_negative);
-        let extreme = if narrow { W15 } else { X15 };
-        self.inst(Inst::Cmp {
+        self.inst(Inst::Arith {
+            op: divide,
+            dst: X16,
             lhs: left,
-            rhs: extreme,
+            rhs: right,
         });
-        self.inst(Inst::Bcond(Cond::Ne, Target::Forward(1)));
-        // `cmn r, #1` is `cmp r, #-1` without needing a negative immediate.
-        self.inst(Inst::CmnImm { lhs: right, imm: 1 });
-        self.inst(Inst::Bcond(Cond::Eq, overflow_trampoline()));
-        self.asm.push(Item::Numeric(1));
-        if narrow {
-            self.inst(Inst::Arith {
-                op: Arith::Sdiv,
-                dst: W16,
-                lhs: left,
-                rhs: right,
-            });
-            if op == BinaryOp::Rem {
-                self.inst(Inst::Msub {
-                    dst: W16,
-                    lhs: W16,
-                    rhs: right,
-                    addend: left,
-                });
-            }
-            self.inst(Inst::Sxtw { dst: X16, src: W16 });
-        } else {
-            self.inst(Inst::Arith {
-                op: Arith::Sdiv,
+        if op == BinaryOp::Rem {
+            self.inst(Inst::Msub {
                 dst: X16,
-                lhs: left,
+                lhs: X16,
                 rhs: right,
+                addend: left,
             });
-            if op == BinaryOp::Rem {
-                self.inst(Inst::Msub {
-                    dst: X16,
-                    lhs: X16,
-                    rhs: right,
-                    addend: left,
-                });
-            }
+        }
+        // A remainder is bounded by its divisor and cannot leave the width.
+        if op == BinaryOp::Div {
+            self.canonicalize_checked(kind);
         }
         self.write(dst, X16);
-    }
-
-    /// Branches to the overflow trampoline when the last flag-setting
-    /// instruction overflowed.
-    ///
-    /// A conditional branch reaches ±1 MiB, so a `.text` section larger than
-    /// that between an arithmetic instruction and the trampoline at its end
-    /// fails to assemble. That is a loud build-time error, not a miscompile,
-    /// and no program this compiler can express comes close.
-    fn trap_on_overflow(&mut self) {
-        self.inst(Inst::Bcond(Cond::Vs, overflow_trampoline()));
     }
 
     fn float_binary(&mut self, dst: LocalId, op: BinaryOp, lhs: LocalId, rhs: LocalId) {
@@ -1297,23 +1281,22 @@ impl<'a> Generator<'a> {
                 self.write(dst, X16);
             }
             // C leaves the upper half of `x0` undefined for a narrow return,
-            // and Slopium keeps an `i32` sign-extended everywhere else
-            // (`D-074`).
-            Type::I32 if extern_declaration(self.module, callee).is_some() => {
-                self.inst(Inst::Sxtw {
-                    dst: RESULT,
-                    src: Reg("w0"),
-                });
-                self.write(dst, RESULT);
-            }
-            // A move into a 32-bit register zeroes the upper half, which is the
-            // whole of what a `bool` needs on the way back from C.
-            Type::Bool if extern_declaration(self.module, callee).is_some() => {
+            // and Slopium keeps an integer canonical in its full machine word
+            // everywhere else (`D-074`, generalised by `D-107`).
+            _ if extern_declaration(self.module, callee).is_some()
+                && (result.is_integer() || *result == Type::Bool) =>
+            {
                 self.inst(Inst::Mov {
-                    dst: Reg("w0"),
-                    src: Reg("w0"),
+                    dst: X16,
+                    src: RESULT,
                 });
-                self.write(dst, RESULT);
+                match result.int_kind() {
+                    Some(kind) => self.canonicalize(kind),
+                    // A move into a 32-bit register zeroes the upper half,
+                    // which is the whole of what a `bool` needs.
+                    None => self.inst(Inst::Mov { dst: W16, src: W16 }),
+                }
+                self.write(dst, X16);
             }
             _ => self.write(dst, RESULT),
         }
@@ -1887,8 +1870,16 @@ fn overflow_trampoline() -> Target {
     Target::Named(".Lsl_panic_overflow_trampoline".into())
 }
 
-fn integer_condition(op: BinaryOp) -> Cond {
+/// Only `u64` needs the unsigned conditions: a narrower unsigned type is held
+/// zero-extended, so its value is a small non-negative word and the signed
+/// comparison answers identically (`D-107`).
+fn integer_condition(op: BinaryOp, kind: IntKind) -> Cond {
+    let unsigned = !kind.signed && kind.is_full_width();
     match op {
+        BinaryOp::Less if unsigned => Cond::Lo,
+        BinaryOp::Greater if unsigned => Cond::Hi,
+        BinaryOp::LessEqual if unsigned => Cond::Ls,
+        BinaryOp::GreaterEqual if unsigned => Cond::Hs,
         BinaryOp::Less => Cond::Lt,
         BinaryOp::Greater => Cond::Gt,
         BinaryOp::LessEqual => Cond::Le,
