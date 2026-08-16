@@ -118,7 +118,48 @@ reader who has no notes.
 - Do not edit `Cargo.lock` by hand or bump a dependency unless the task is about
   that dependency.
 
-## 4. Task flow
+## 4. You are not alone in this tree
+
+Assume that a person, or another agent, is editing this repository at the same
+time as you. Nothing here is theoretical: this working tree is shared, and a
+change that was correct in isolation still destroys somebody's afternoon when it
+lands on top of their unsaved work.
+
+Before you start, run `git status`. Every path it lists that you did not touch
+belongs to someone else. Do not edit it, do not stage it, do not reformat it,
+and do not "fix" it in passing. If your task genuinely needs one of those files,
+say so and ask before touching it.
+
+While you work:
+
+- Stage by path — `git add <paths>` — and never `git add -A`, `git add .`, or
+  `git commit -a`. Read `git diff --cached --name-only` before every commit and
+  confirm that every entry is yours.
+- Re-read a file immediately before editing it if any time has passed since you
+  last read it. Prefer a small targeted edit over rewriting a file you only
+  partly own.
+- Never run `git restore`, `git checkout --`, `git stash`, `git reset`, or
+  `git clean` over a path you did not create in this session. There is no undo
+  for somebody else's uncommitted work.
+- Never amend, reword, or drop a commit you did not author in this session.
+- `cargo fmt --all` rewrites every file in the workspace, including the one
+  somebody is halfway through. Run `cargo fmt --all -- --check`, as
+  `scripts/verify.sh` does, and format only the files you changed.
+- Two `scripts/verify.sh` runs at once share `target/` and the fixture trees.
+  Cargo's own lock makes concurrent builds wait rather than corrupt, but
+  `SLOPIUM_UPDATE_FIXTURES=1 scripts/publish-check.sh` writes into
+  `tests/registry` and `tests/consumer` and must never run while another
+  regeneration or another agent's checks are in flight.
+- If `main` moved while you worked, stop and ask. Do not rebase, merge, or
+  transplant your work onto it on your own.
+
+When several agents work in parallel, give each one its own `git worktree` and
+its own branch, and assign file ownership up front. Two writers in one worktree
+is not a workflow. Coordinate through `.notes/messages/` when notes are present;
+otherwise say plainly in your report which files you claimed and which you left
+alone, so the next worker can read it.
+
+## 5. Task flow
 
 Work directly in the working tree for a single focused change. For anything that
 touches three or more of {compiler, manager, manifest layer, runtime, standard
@@ -132,7 +173,7 @@ WIP and fixup commits are fine while working and must not survive. If `main`
 moved underneath you, stop and ask rather than rebasing or transplanting on your
 own.
 
-## 5. Commit contract
+## 6. Commit contract
 
 This is the part a contributor cannot guess from the code, so it is spelled out
 completely. Read `git log` for calibration; the last twenty commits are all in
@@ -186,7 +227,7 @@ If the explanation does not fit in two paragraphs, it is not a longer commit
 message. It is a `docs/` change when a user of the language needs it, and a
 `.notes/DECISIONS.md` or handoff entry when it is project reasoning.
 
-## 6. Version and tag
+## 7. Version and tag
 
 Every `feat` commit that lands is a release:
 
@@ -203,7 +244,7 @@ Creating the tag is a release action: propose the version and the rationale and
 wait for approval. Pushing the commit or the tag is a remote mutation — confirm
 the remote and the refspec first.
 
-## 7. What must change together
+## 8. What must change together
 
 A change is incomplete until its companions are updated. This table is the main
 reason a contributor without notes can still land a correct commit.
@@ -232,7 +273,7 @@ Their being byte-identical on a re-run is itself an assertion — reproducible
 archives and deterministic Ed25519 signing. A diff there is a regression, not a
 timestamp.
 
-## 8. Validation
+## 9. Validation
 
 The gate for a code change is the full suite, from the repository root:
 
@@ -260,7 +301,7 @@ Rules:
   `SLOPIUM_ASAN_DETECT_LEAKS=1`, `project-tests.sh`, and `nix flake check`.
   Passing locally is the standard; CI is the backstop.
 
-## 9. Code rules
+## 10. Code rules
 
 - Rust 2021, `rustfmt` defaults, clippy clean at `-D warnings`.
 - Keep the `slopic` / `slopium` split: the compiler is handed roots, the manager
@@ -276,13 +317,13 @@ Rules:
 - Do not commit build output: `target/`, `*.o`, `*.s`, `*.out`, `nvim.log`, and
   lockfiles under `tests/projects` and `examples` are ignored for a reason.
 
-## 10. Before you commit
+## 11. Before you commit
 
 - [ ] `scripts/verify.sh` is green, or the exact subset you ran and why is in
       your report.
 - [ ] `git status` and `git diff --cached --name-only` reviewed — no `.notes`,
       no build output, no stray fixture.
-- [ ] The companions in §7 are updated.
+- [ ] The companions in §8 are updated.
 - [ ] The version is bumped if this is a `feat`, and untouched otherwise.
 - [ ] Subject: conventional, imperative, lowercase, ≤ 95 characters, about
       behavior rather than files.
