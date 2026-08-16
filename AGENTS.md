@@ -134,9 +134,23 @@ say so and ask before touching it.
 
 While you work:
 
-- Stage by path — `git add <paths>` — and never `git add -A`, `git add .`, or
-  `git commit -a`. Read `git diff --cached --name-only` before every commit and
-  confirm that every entry is yours.
+- The index is shared as surely as the tree is. `git add` followed by
+  `git commit` commits everything else that happens to be staged, including
+  work somebody staged a second earlier, so commit with an explicit pathspec:
+
+  ```sh
+  git commit -F <message-file> -- AGENTS.md scripts/commit-check.sh
+  ```
+
+  That form takes the paths you name and ignores the rest of the index. Never
+  `git add -A`, `git add .`, or `git commit -a`.
+- Read `git diff --cached --name-only` as a command of its own, before you
+  commit. A check whose output arrives in the same breath as the commit is not
+  a check.
+- `git commit --amend` rewrites whatever HEAD points at, which is not
+  necessarily the commit you just made. Confirm with `git log -1` immediately
+  beforehand; a worker who committed in the intervening minute is otherwise
+  about to lose their message.
 - Re-read a file immediately before editing it if any time has passed since you
   last read it. Prefer a small targeted edit over rewriting a file you only
   partly own.
@@ -342,8 +356,10 @@ Rules:
 
 - [ ] `scripts/verify.sh` is green, or the exact subset you ran and why is in
       your report.
-- [ ] `git status` and `git diff --cached --name-only` reviewed — every path is
-      one you touched, and none is `.notes`, build output, or a stray fixture.
+- [ ] `git status` and `git diff --cached --name-only` reviewed in their own
+      right — every path is one you touched, and none is `.notes`, build
+      output, or a stray fixture.
+- [ ] The commit names its paths: `git commit -F <message-file> -- <paths>`.
 - [ ] The companions in §8 are updated.
 - [ ] The version is bumped if this is a `feat`, and untouched otherwise.
 - [ ] Subject: conventional, imperative, lowercase, ≤ 95 characters, about
