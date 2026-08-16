@@ -15,7 +15,7 @@
 use crate::ast::Type;
 use crate::cfg::{defs, successors, terminator_uses, uses, Cfg};
 use crate::diagnostic::{codes, Diagnostic};
-use crate::mir::{BinaryOp, Instruction, MirFunction, MirModule};
+use crate::mir::{BinaryOp, Instruction, MirFunction, MirModule, Terminator};
 
 /// Whether MIR verification should run.
 ///
@@ -50,7 +50,9 @@ fn verify_module_after(file: &str, module: &MirModule, phase: Option<&str>) -> V
         .chain(module.tests.iter().map(|test| &test.function))
     {
         verify_extern_calls(file, module, function, phase, &mut errors);
+        verify_direct_calls(file, module, function, phase, &mut errors);
         verify_indirect_calls(file, function, phase, &mut errors);
+        verify_returns(file, function, phase, &mut errors);
         verify_borrow_reads(file, function, phase, &mut errors);
     }
     errors
@@ -128,6 +130,159 @@ fn verify_extern_calls(
                     "{where_} taking `{result:?}` as the result, declared `{:?}`",
                     declaration.result
                 ));
+            }
+        }
+    }
+}
+
+/// Checks every call to a Slopium function against the function it names.
+///
+/// A direct call links, so a wrong *symbol* is caught by the linker. A wrong
+/// *type* is not: the caller picks integer against SSE argument registers from
+/// `Call.arg_types` through `lowering::value_words`, and the callee's prologue
+/// picks them from `locals[param].ty`. If the two disagree by a single `F64`
+/// the argument is written to `xmm0` and read from `rdi` — it assembles, links,
+/// runs, and answers wrongly. The callee's `MirFunction` is in the module this
+/// pass already walks, so the agreement is one lookup rather than a convention.
+///
+/// A callee that is not in the module is skipped: nothing here can check it.
+fn verify_direct_calls(
+    file: &str,
+    module: &MirModule,
+    function: &MirFunction,
+    phase: Option<&str>,
+    errors: &mut Vec<Diagnostic>,
+) {
+    let after = phase.map_or(String::new(), |phase| format!(" after {phase}"));
+    let mut report = |message: String| {
+        errors.push(Diagnostic::error(
+            codes::INTERNAL,
+            file,
+            function.span,
+            format!(
+                "internal compiler error: MIR verification failed{after} in `{}`: {message}; \
+                 this is a compiler bug",
+                function.name
+            ),
+        ));
+    };
+
+    for (index, block) in function.blocks.iter().enumerate() {
+        for (position, instruction) in block.instructions().enumerate() {
+            let Instruction::Call {
+                dst,
+                callee,
+                arg_types,
+                result,
+                ..
+            } = instruction
+            else {
+                continue;
+            };
+            let where_ = format!("block {index} instruction {position} calls `{callee}`");
+
+            // The result the call produces and the slot it lands in are two
+            // records of the same type, and both backends trust the slot.
+            if let Some(local) = function.locals.get(*dst) {
+                if &local.ty != result {
+                    report(format!(
+                        "{where_} taking `{result:?}` into _{dst}, which holds `{:?}`",
+                        local.ty
+                    ));
+                }
+            }
+
+            if crate::lowering::extern_declaration(module, callee).is_some() {
+                // Checked against the declaration by `verify_extern_calls`.
+                continue;
+            }
+            let Some(declaration) = module
+                .functions
+                .iter()
+                .find(|candidate| &candidate.name == callee)
+            else {
+                continue;
+            };
+            if arg_types.len() != declaration.params.len() {
+                report(format!(
+                    "{where_} with {} arguments but it takes {}",
+                    arg_types.len(),
+                    declaration.params.len()
+                ));
+                continue;
+            }
+            for (argument, (actual, param)) in arg_types.iter().zip(&declaration.params).enumerate()
+            {
+                let Some(declared) = declaration.locals.get(*param) else {
+                    continue;
+                };
+                if actual != &declared.ty {
+                    report(format!(
+                        "{where_} passing `{actual:?}` as argument {argument}, which it takes as \
+                         `{:?}`",
+                        declared.ty
+                    ));
+                }
+            }
+            if result != &declaration.return_type {
+                report(format!(
+                    "{where_} taking `{result:?}` as the result, which it returns as `{:?}`",
+                    declaration.return_type
+                ));
+            }
+        }
+    }
+}
+
+/// Checks that what a function returns is what it says it returns.
+///
+/// The other half of the direct-call check: agreeing with the caller is worth
+/// nothing if the value in `rax` came from a local of a different shape.
+fn verify_returns(
+    file: &str,
+    function: &MirFunction,
+    phase: Option<&str>,
+    errors: &mut Vec<Diagnostic>,
+) {
+    let after = phase.map_or(String::new(), |phase| format!(" after {phase}"));
+    let mut report = |message: String| {
+        errors.push(Diagnostic::error(
+            codes::INTERNAL,
+            file,
+            function.span,
+            format!(
+                "internal compiler error: MIR verification failed{after} in `{}`: {message}; \
+                 this is a compiler bug",
+                function.name
+            ),
+        ));
+    };
+
+    for (index, block) in function.blocks.iter().enumerate() {
+        let Terminator::Return(value) = &block.terminator else {
+            continue;
+        };
+        match value {
+            Some(local) => {
+                let Some(returned) = function.locals.get(*local) else {
+                    // Out of range is already reported by the operand check.
+                    continue;
+                };
+                if returned.ty != function.return_type {
+                    report(format!(
+                        "block {index} returns _{local}, which holds `{:?}`, from a function \
+                         declared `{:?}`",
+                        returned.ty, function.return_type
+                    ));
+                }
+            }
+            None => {
+                if function.return_type != Type::Unit {
+                    report(format!(
+                        "block {index} returns nothing from a function declared `{:?}`",
+                        function.return_type
+                    ));
+                }
             }
         }
     }
@@ -739,6 +894,64 @@ mod tests {
                 .iter()
                 .any(|error| error.message.contains("declared")),
             "a mismatched extern argument must be reported: {errors:?}"
+        );
+    }
+
+    /// No source program can express this: `mir::lower` reads both sides of a
+    /// call from the same typed tree. It is checked at the MIR level because
+    /// the disagreement it catches is silent — an `F64` argument written to
+    /// `xmm0` and read from `rdi` assembles, links and runs.
+    #[test]
+    fn a_call_must_agree_with_the_function_it_names() {
+        let source = r#"
+            (fn helper ((a i64)) -> i64 a)
+            (fn main () -> i32 (helper 20) 0)
+        "#;
+        let mut mir = compile_to_mir("test.slp", source, &CompileOptions::default()).unwrap();
+        assert_eq!(verify_module("test.slp", &mir), Vec::new());
+
+        for function in &mut mir.functions {
+            for block in &mut function.blocks {
+                for statement in &mut block.statements {
+                    if let Instruction::Call {
+                        callee, arg_types, ..
+                    } = &mut statement.instruction
+                    {
+                        if callee == "helper" {
+                            arg_types[0] = Type::F64;
+                        }
+                    }
+                }
+            }
+        }
+        let errors = verify_module("test.slp", &mir);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("as argument 0, which it takes as")),
+            "a mismatched call argument must be reported: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn a_return_must_agree_with_the_signature() {
+        let mut function = probe(
+            vec![BasicBlock::synthetic(
+                vec![Instruction::ConstBool {
+                    dst: 0,
+                    value: true,
+                }],
+                Terminator::Return(Some(0)),
+            )],
+            1,
+        );
+        function.locals[0].ty = Type::Bool;
+        let errors = verify_module("test.slp", &module_with(function));
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("from a function declared")),
+            "{errors:?}"
         );
     }
 
