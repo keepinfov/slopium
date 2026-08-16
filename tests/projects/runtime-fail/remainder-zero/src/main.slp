@@ -1,0 +1,9 @@
+; `%` reaches the same divisor check `/` does, through the same instruction.
+
+(take std:io println-i64)
+
+(fn main () -> i32
+  (println-i64 (% 42 0))
+  0)
+
+(test "fixture compiles" true)

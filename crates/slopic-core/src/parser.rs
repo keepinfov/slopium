@@ -4,7 +4,8 @@ use crate::lexer::{Token, TokenKind};
 #[derive(Clone, Debug, PartialEq)]
 pub enum SExprKind {
     Atom(String),
-    String(String),
+    /// A text literal's bytes (see `lexer::TokenKind::String`).
+    String(Vec<u8>),
     List(Vec<SExpr>),
 }
 

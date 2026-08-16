@@ -291,13 +291,25 @@ pub fn is_pointer_like(ty: &Type) -> bool {
 /// answer it identically — a string one emits and the other omits would be a
 /// difference the cross-backend suite has to chase (`D-025`).
 ///
-/// Integer add, subtract and multiply check for overflow; integer division
-/// checks for a zero divisor *and* for the most-negative-over-`-1` overflow, so
-/// it reaches both. Float arithmetic and comparisons trap on nothing.
+/// Integer add, subtract and multiply check for overflow; integer division and
+/// remainder check for a zero divisor *and* for the most-negative-over-`-1`
+/// overflow, so they reach both. A shift checks its count, which is neither of
+/// those things and says so in its own words. Bitwise operations, float
+/// arithmetic and comparisons trap on nothing.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct TrapUsage {
     pub overflow: bool,
     pub div_zero: bool,
+    /// A shift by a negative amount or by the operand width or more. It is not
+    /// an overflow — no value was too large — and reusing the overflow message
+    /// for it would misdescribe the only bug a driver author writes here.
+    pub shift: bool,
+}
+
+impl TrapUsage {
+    fn complete(self) -> bool {
+        self.overflow && self.div_zero && self.shift
+    }
 }
 
 pub fn trap_usage<'a>(functions: impl Iterator<Item = &'a MirFunction>) -> TrapUsage {
@@ -315,15 +327,24 @@ pub fn trap_usage<'a>(functions: impl Iterator<Item = &'a MirFunction>) -> TrapU
                 }
                 match op {
                     BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul => usage.overflow = true,
-                    BinaryOp::Div => {
+                    BinaryOp::Div | BinaryOp::Rem => {
                         usage.overflow = true;
                         usage.div_zero = true;
                     }
-                    BinaryOp::Less | BinaryOp::Greater | BinaryOp::Equal => {}
+                    BinaryOp::Shl | BinaryOp::Shr => usage.shift = true,
+                    BinaryOp::BitAnd
+                    | BinaryOp::BitOr
+                    | BinaryOp::BitXor
+                    | BinaryOp::Less
+                    | BinaryOp::Greater
+                    | BinaryOp::LessEqual
+                    | BinaryOp::GreaterEqual
+                    | BinaryOp::Equal
+                    | BinaryOp::NotEqual => {}
                 }
             }
         }
-        if usage.overflow && usage.div_zero {
+        if usage.complete() {
             break;
         }
     }

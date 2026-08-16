@@ -69,14 +69,10 @@
   0)
 
 (test "a function value calls the function it names"
-  (if (= (apply double 21) 42)
-    (= (twice add-ten 1) 21)
-    false))
+  (and (= (apply double 21) 42) (= (twice add-ten 1) 21)))
 
 (test "a generic function value resolves to one instance"
   (= (apply identity 99) 99))
 
 (test "a function value chosen at run time is the one that runs"
-  (if (= (apply (pick true) 5) 10)
-    (= (apply (pick false) 5) 15)
-    false))
+  (and (= (apply (pick true) 5) 10) (= (apply (pick false) 5) 15)))

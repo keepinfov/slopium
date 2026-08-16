@@ -1,0 +1,4 @@
+not-non-bool.slp:2:7: error[SL0200]: operator `not` does not support `i64`
+  |
+ 2 |   (if (not 1) 0 1))
+  |       ^^^^^^^

@@ -141,7 +141,10 @@ pub enum Instruction {
     },
     StringNew {
         dst: LocalId,
-        value: String,
+        /// The literal's bytes. Any byte: a Slopium `String` is a length and a
+        /// buffer (`D-079`), and `\xNN` writes one of them (`D-106`).
+        #[serde(serialize_with = "escaped_bytes")]
+        value: Vec<u8>,
     },
     Assign {
         dst: LocalId,
@@ -249,15 +252,93 @@ pub enum Instruction {
     },
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
+/// Writes a literal's bytes as an escaped string rather than a list of
+/// numbers.
+///
+/// `--emit mir` is a debugging aid over an internal protocol (`D-002`), and an
+/// array of 116 numbers where a program has `"hello"` is not one.
+fn escaped_bytes<S: serde::Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(&escape_bytes(bytes))
+}
+
+/// A literal's bytes, spelled the way the source would spell them.
+pub fn escape_bytes(bytes: &[u8]) -> String {
+    let mut text = String::new();
+    for byte in bytes {
+        match byte {
+            b'\n' => text.push_str("\\n"),
+            b'\r' => text.push_str("\\r"),
+            b'\t' => text.push_str("\\t"),
+            b'"' => text.push_str("\\\""),
+            b'\\' => text.push_str("\\\\"),
+            0x20..=0x7e => text.push(*byte as char),
+            other => text.push_str(&format!("\\x{other:02x}")),
+        }
+    }
+    text
+}
+
+/// What `Instruction::Binary` does to its two operands.
+///
+/// Every operator in the language is one of these, including the three unary
+/// ones: `(- x)` is `Sub` from a zero, `(not b)` is `Equal` against `false`,
+/// and `(bit-not x)` is `BitXor` against `-1` (`D-106`). A unary variant would
+/// have bought a shape both backends and the verifier would have to learn for
+/// operators that already have an exact binary spelling.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum BinaryOp {
     Add,
     Sub,
     Mul,
     Div,
+    /// Remainder, truncated so that `a = (a / b) * b + (a % b)` holds for every
+    /// pair, which is what `/` truncating toward zero forces (`D-106`).
+    Rem,
     Less,
     Greater,
+    LessEqual,
+    GreaterEqual,
     Equal,
+    NotEqual,
+    BitAnd,
+    BitOr,
+    BitXor,
+    /// Left shift. A bit operation, so it does **not** trap when bits leave the
+    /// top — `(shl 1 63)` is `i64::MIN` and that is the answer. Only the count
+    /// is checked, by [`BinaryOp::shifts`].
+    Shl,
+    /// Right shift, arithmetic on a signed type and logical on an unsigned one
+    /// — one name whose meaning follows the operand type (`D-106`).
+    Shr,
+}
+
+impl BinaryOp {
+    /// Whether this operation compares and therefore produces a `bool`.
+    pub fn compares(self) -> bool {
+        matches!(
+            self,
+            BinaryOp::Less
+                | BinaryOp::Greater
+                | BinaryOp::LessEqual
+                | BinaryOp::GreaterEqual
+                | BinaryOp::Equal
+                | BinaryOp::NotEqual
+        )
+    }
+
+    /// Whether this operation shifts, and so must check its count before it
+    /// commits: x86-64 masks the count to five or six bits in hardware and
+    /// AArch64 masks it modulo the width, so an unchecked shift by the width
+    /// does not fault on either — it quietly answers two different things.
+    pub fn shifts(self) -> bool {
+        matches!(self, BinaryOp::Shl | BinaryOp::Shr)
+    }
+
+    /// Whether this operation is bitwise, which is the set that has no meaning
+    /// on an `f64` and never traps.
+    pub fn bitwise(self) -> bool {
+        matches!(self, BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor)
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -642,6 +723,53 @@ impl Builder {
         self.local(ty, None, false)
     }
 
+    /// The two operands a unary operator turns into.
+    ///
+    /// `(- x)` is `0 - x` and the order is the whole point; `(not b)` and
+    /// `(bit-not x)` are commutative, so their constant goes on the right where
+    /// it reads as an argument rather than as a subject.
+    ///
+    /// The float negation subtracts from **negative** zero. `0.0 - 0.0` is
+    /// `+0.0` and `-(0.0)` is `-0.0`, and `core:float` reads the sign bit
+    /// directly (`D-097`), so the positive zero would have been a wrong answer
+    /// that only printing could see.
+    fn unary_operands(&mut self, callee: &str, ty: &Type, operand: LocalId) -> (LocalId, LocalId) {
+        match callee {
+            "-" if *ty == Type::F64 => {
+                let zero = self.temp(Type::F64);
+                self.emit(Instruction::ConstFloat {
+                    dst: zero,
+                    bits: (-0.0f64).to_bits(),
+                });
+                (zero, operand)
+            }
+            "-" => {
+                let zero = self.temp(ty.clone());
+                self.emit(Instruction::ConstInt {
+                    dst: zero,
+                    value: 0,
+                });
+                (zero, operand)
+            }
+            "not" => {
+                let no = self.temp(Type::Bool);
+                self.emit(Instruction::ConstBool {
+                    dst: no,
+                    value: false,
+                });
+                (operand, no)
+            }
+            _ => {
+                let ones = self.temp(ty.clone());
+                self.emit(Instruction::ConstInt {
+                    dst: ones,
+                    value: -1,
+                });
+                (operand, ones)
+            }
+        }
+    }
+
     fn emit(&mut self, instruction: Instruction) {
         let block = self.current;
         self.emit_in(block, instruction);
@@ -876,18 +1004,45 @@ impl Builder {
                     "-" => Some(BinaryOp::Sub),
                     "*" => Some(BinaryOp::Mul),
                     "/" => Some(BinaryOp::Div),
+                    "%" => Some(BinaryOp::Rem),
                     "<" => Some(BinaryOp::Less),
                     ">" => Some(BinaryOp::Greater),
+                    "<=" => Some(BinaryOp::LessEqual),
+                    ">=" => Some(BinaryOp::GreaterEqual),
                     "=" => Some(BinaryOp::Equal),
+                    "!=" => Some(BinaryOp::NotEqual),
+                    "bit-and" => Some(BinaryOp::BitAnd),
+                    "bit-or" => Some(BinaryOp::BitOr),
+                    "bit-xor" => Some(BinaryOp::BitXor),
+                    // The three unary operators, each spelled as the binary one
+                    // that already means it. `not` and `bit-not` are here
+                    // rather than beside their siblings because the operand
+                    // they need does not exist in the source (`D-106`).
+                    "bit-not" => Some(BinaryOp::BitXor),
+                    "not" => Some(BinaryOp::Equal),
+                    "shl" => Some(BinaryOp::Shl),
+                    "shr" => Some(BinaryOp::Shr),
                     _ => None,
                 };
                 if let Some(op) = op {
+                    let ty = args[0].ty.clone();
+                    // A unary operator arrives with one argument and leaves
+                    // with two: the constant that makes it the binary
+                    // operation it already was. Neither backend learns a
+                    // shape, and the trap comes along for free — `0 - x`
+                    // overflows at the smallest integer exactly as `(- 0 x)`
+                    // did before this patch (`D-106`).
+                    let (lhs, rhs) = if lowered.len() == 2 {
+                        (lowered[0], lowered[1])
+                    } else {
+                        self.unary_operands(&callee.clone(), &ty, lowered[0])
+                    };
                     self.emit(Instruction::Binary {
                         dst,
                         op,
-                        lhs: lowered[0],
-                        rhs: lowered[1],
-                        ty: args[0].ty.clone(),
+                        lhs,
+                        rhs,
+                        ty,
                     });
                 } else if callee == "clone" && arg_types.first().is_some_and(reads_through_borrow) {
                     // The dereference (`D-100`). A borrow of a pointer-shaped

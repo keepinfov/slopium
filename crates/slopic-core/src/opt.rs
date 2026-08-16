@@ -348,7 +348,23 @@ pub(crate) fn fold_binary(
             BinaryOp::Div => Constant::Float((lhs / rhs).to_bits()),
             BinaryOp::Less => Constant::Bool(lhs < rhs),
             BinaryOp::Greater => Constant::Bool(lhs > rhs),
+            BinaryOp::LessEqual => Constant::Bool(lhs <= rhs),
+            BinaryOp::GreaterEqual => Constant::Bool(lhs >= rhs),
             BinaryOp::Equal => Constant::Bool(lhs == rhs),
+            // Not `!(lhs == rhs)` by accident: Rust's `!=` on `f64` is already
+            // the unordered-is-not-equal answer that IEEE 754 and both
+            // backends give, and writing the negation would have been a
+            // different function at a NaN.
+            BinaryOp::NotEqual => Constant::Bool(lhs != rhs),
+            // `sema` refuses every one of these on an `f64` and `verify` says
+            // so again, so reaching here means a lowering bug. Declining to
+            // fold is how a bug stays visible instead of becoming a constant.
+            BinaryOp::Rem
+            | BinaryOp::BitAnd
+            | BinaryOp::BitOr
+            | BinaryOp::BitXor
+            | BinaryOp::Shl
+            | BinaryOp::Shr => return None,
         });
     }
 
@@ -359,14 +375,50 @@ pub(crate) fn fold_binary(
     };
     let lhs = integer(lhs)?;
     let rhs = integer(rhs)?;
+
+    // Shifts leave before the generic tail below, because that tail narrows an
+    // `i32` result by refusing anything outside the range — and `(shl 1 31)` on
+    // an `i32` is `i32::MIN`, a value the backend produces and the tail would
+    // have declined. Declining is safe but wrong: it would leave the one fold a
+    // mask-writing program most wants undone.
+    if op.shifts() {
+        let width = if *ty == Type::I32 { 32 } else { 64 };
+        let amount = u32::try_from(rhs).ok().filter(|amount| *amount < width)?;
+        return Some(Constant::Int(if *ty == Type::I32 {
+            let narrow = lhs as i32;
+            i64::from(match op {
+                BinaryOp::Shl => narrow.wrapping_shl(amount),
+                _ => narrow >> amount,
+            })
+        } else {
+            match op {
+                BinaryOp::Shl => lhs.wrapping_shl(amount),
+                _ => lhs >> amount,
+            }
+        }));
+    }
+
     let value = match op {
         BinaryOp::Add => lhs.checked_add(rhs).map(Constant::Int),
         BinaryOp::Sub => lhs.checked_sub(rhs).map(Constant::Int),
         BinaryOp::Mul => lhs.checked_mul(rhs).map(Constant::Int),
         BinaryOp::Div => lhs.checked_div(rhs).map(Constant::Int),
+        // `checked_rem` declines on both inputs that trap — a zero divisor and
+        // the most negative value over `-1` — which is the same reason
+        // `checked_div` is here rather than `%`.
+        BinaryOp::Rem => lhs.checked_rem(rhs).map(Constant::Int),
         BinaryOp::Less => Some(Constant::Bool(lhs < rhs)),
         BinaryOp::Greater => Some(Constant::Bool(lhs > rhs)),
+        BinaryOp::LessEqual => Some(Constant::Bool(lhs <= rhs)),
+        BinaryOp::GreaterEqual => Some(Constant::Bool(lhs >= rhs)),
         BinaryOp::Equal => Some(Constant::Bool(lhs == rhs)),
+        BinaryOp::NotEqual => Some(Constant::Bool(lhs != rhs)),
+        // Bitwise operations cannot trap and cannot leave the width they were
+        // given, so they fold unconditionally.
+        BinaryOp::BitAnd => Some(Constant::Int(lhs & rhs)),
+        BinaryOp::BitOr => Some(Constant::Int(lhs | rhs)),
+        BinaryOp::BitXor => Some(Constant::Int(lhs ^ rhs)),
+        BinaryOp::Shl | BinaryOp::Shr => unreachable!("shifts returned above"),
     }?;
     if *ty == Type::I32 {
         if let Constant::Int(value) = value {

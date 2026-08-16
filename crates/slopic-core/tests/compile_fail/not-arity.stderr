@@ -1,0 +1,9 @@
+not-arity.slp:2:7: error[SL0200]: operator `not` expects one argument
+  |
+ 2 |   (if (not true false) 0 1))
+  |       ^^^^^^^^^^^^^^^^
+
+not-arity.slp:2:7: error[SL0200]: expected `bool`, found `unit`
+  |
+ 2 |   (if (not true false) 0 1))
+  |       ^^^^^^^^^^^^^^^^

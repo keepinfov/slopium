@@ -1,0 +1,4 @@
+remainder-float.slp:2:14: error[SL0200]: operator `%` does not support `f64`
+  |
+ 2 |   (if (= 0.0 (% 1.5 2.0)) 0 1))
+  |              ^^^^^^^^^^^

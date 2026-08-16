@@ -468,17 +468,25 @@ fn verify_instruction_shape(
             // bool but still compares two operands. Codegen selects integer or
             // float instructions from it, so a wrong one is a silent
             // miscompile, and since `D-089` a comparison operand is a scalar
-            // too. `Equal` additionally accepts `bool`, which pattern lowering
-            // emits for a boolean pattern and `<`/`>` never see.
+            // too. `Equal` and `NotEqual` additionally accept `bool`, which
+            // pattern lowering and `(not b)` emit and `<`/`>` never see.
+            //
+            // The bitwise and shift operations are narrower than the rest: an
+            // `f64` has no bits to and together, and lowering one here would
+            // reach an integer instruction with a double in the register.
             let numeric = matches!(ty, Type::I32 | Type::I64 | Type::F64);
             let allowed = match op {
-                BinaryOp::Equal => numeric || *ty == Type::Bool,
+                BinaryOp::Equal | BinaryOp::NotEqual => numeric || *ty == Type::Bool,
+                _ if op.bitwise() || op.shifts() || *op == BinaryOp::Rem => ty.is_integer(),
                 _ => numeric,
             };
             if !allowed {
-                let complaint = match op {
-                    BinaryOp::Less | BinaryOp::Greater | BinaryOp::Equal => "compares non-scalar",
-                    _ => "performs arithmetic on non-numeric",
+                let complaint = if op.compares() {
+                    "compares non-scalar"
+                } else if op.bitwise() || op.shifts() {
+                    "performs a bit operation on non-integer"
+                } else {
+                    "performs arithmetic on non-numeric"
                 };
                 report(format!(
                     "block {index} instruction {position} {complaint} type `{ty:?}`"

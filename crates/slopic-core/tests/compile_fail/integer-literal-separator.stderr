@@ -1,0 +1,4 @@
+integer-literal-separator.slp:2:14: error[SL0100]: `1_` is not a number
+  |
+ 2 |   (let value 1_)
+  |              ^^

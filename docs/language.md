@@ -4,6 +4,19 @@ Slopium source consists of S-expressions. `;` starts a line comment. Integer,
 floating-point, boolean (`true`, `false`), and escaped string literals are
 supported.
 
+An integer literal is decimal, hexadecimal (`0xB8000`) or binary (`0b1010`),
+and `_` may appear between its digits: `1_000_000`, `0xdead_beef`. **A
+hexadecimal or binary literal is a bit pattern and a decimal one is a number**,
+so `0xFFFF_FFFF_FFFF_FFFF` is `-1` and `0x8000_0000_0000_0000` is the smallest
+`i64`, while the same values written in decimal are out of range and refused.
+A mask is not a magnitude, and a driver that had to spell one as a negative
+decimal would be a driver nobody could review.
+
+A string literal is bytes, not characters. Besides `\n`, `\r`, `\t`, `\"` and
+`\\` it takes `\0` and `\xNN`, and **`\xNN` is exactly one byte** for every
+`NN` from `00` to `ff`. A `String` is a length and a buffer, so a literal may
+hold a NUL or any other byte and `len` counts bytes.
+
 ## Files, modules, and imports
 
 Every `.slp` file contains declarations. Its module name is derived from its
@@ -75,14 +88,36 @@ rather than a value, so what it converts to is read the way a type is read and
 not the way a variable is. Turning an `f64` into an integer is not in the
 vocabulary at all; turning one into text is `from-f64`, in the library.
 
-`+`, `-`, `*`, `/`, `<`, and `>` take two operands of one numeric type. `=`
-takes two `bool`, `i32`, `i64`, or `f64` operands and nothing else (`D-089`):
-comparing two `String`s, two structs, two enums, two borrows, or two values of
-an unconstrained type parameter is an error. Text is compared with
+`+`, `-`, `*`, `/`, `<`, `>`, `<=`, and `>=` take two operands of one numeric
+type. `%` is the remainder and takes two integers; it truncates so that
+`(= a (+ (* (/ a b) b) (% a b)))` holds for every pair, matching `/`, and it
+traps on a zero divisor exactly as `/` does. `=` and `!=` take two `bool`,
+`i32`, `i64`, or `f64` operands and nothing else (`D-089`): comparing two
+`String`s, two structs, two enums, two borrows, or two values of an
+unconstrained type parameter is an error. Text is compared with
 `core:string:equals`, which `std:string` re-exports. Without traits there is no
 way to give `=` a meaning for a type the compiler did not define, and comparing
 such values by the machine word that holds them would answer about identity
 while looking like it answered about contents.
+
+`(- x)` with one operand is negation, and it traps on the smallest integer for
+the reason `(- 0 x)` does.
+
+`bit-and`, `bit-or`, `bit-xor` and `bit-not` are the bitwise operations and
+`shl` and `shr` the shifts, all on integers. They are spelled out because `&`
+is a borrow and a language where `(& a b)` is a bitwise and while `(& a)` is a
+borrow has a trap in it. `shr` is arithmetic on a signed type. **A shift by a
+negative amount, or by the width of the type or more, traps** — the two
+architectures disagree about what such a shift would otherwise mean, and
+neither answer is one a program asked for. **A shift does not trap when bits
+leave the top**: `(shl 1 63)` is the smallest `i64` and that is the answer, not
+an overflow, because a shift describes a pattern of bits rather than a
+magnitude.
+
+`and` and `or` are forms rather than calls, because they stop at the operand
+that answers: `(and (holds table key) (trust (lookup table key)))` does not
+look the key up when the table does not hold it. Each takes two operands or
+more and every one must be a `bool`. `not` is an ordinary operator over one.
 
 ## Function types
 

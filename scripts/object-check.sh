@@ -42,6 +42,12 @@ programs=(
   # anything else in this corpus, and `replace` is a runtime call neither
   # backend had emitted.
   "tests/projects/pass/maps/src/main.slp"
+  # The largest single addition to this corpus so far (`D-106`): a remainder,
+  # six bitwise operations, two shifts and four comparisons, on both widths.
+  # Nine of those encodings neither backend had ever emitted, and the AArch64
+  # half includes `msub` — the only four-register instruction the compiler
+  # selects, and therefore the one most worth holding against `as`.
+  "tests/projects/pass/vocabulary/src/main.slp"
   "examples/fibonacci.slp"
   "examples/lists.slp"
   "examples/match.slp"
@@ -171,9 +177,14 @@ host_run=0
 for source in "${programs[@]}"; do
   "$slopic" --emit exe -o "$scratch/ours.out" "$source" >/dev/null
   SLOPIUM_OBJECT_WRITER=external "$slopic" --emit exe -o "$scratch/gas.out" "$source" >/dev/null
-  ours="$("$scratch/ours.out" </dev/null 2>&1; echo "exit=$?")"
-  theirs="$("$scratch/gas.out" </dev/null 2>&1; echo "exit=$?")"
-  if [ "$ours" != "$theirs" ]; then
+  # Through files rather than `$(...)`: a program is allowed to print a NUL
+  # (`D-079`), and command substitution drops one — quietly weakening the
+  # comparison for exactly the byte a payload is most likely to carry.
+  "$scratch/ours.out" </dev/null >"$scratch/ours.run" 2>&1
+  echo "exit=$?" >>"$scratch/ours.run"
+  "$scratch/gas.out" </dev/null >"$scratch/gas.run" 2>&1
+  echo "exit=$?" >>"$scratch/gas.run"
+  if ! cmp --silent "$scratch/ours.run" "$scratch/gas.run"; then
     fail "$source: the two object paths disagree at run time"
   fi
   host_run=$((host_run + 1))
@@ -207,9 +218,11 @@ for source in "${programs[@]}"; do
     -o "$scratch/ours.out" "$source" >/dev/null
   SLOPIUM_OBJECT_WRITER=external "$slopic" --emit exe --cc "$cross_cc" \
     --target "$cross_target" -o "$scratch/gas.out" "$source" >/dev/null
-  ours="$("$qemu" "$scratch/ours.out" </dev/null 2>&1; echo "exit=$?")"
-  theirs="$("$qemu" "$scratch/gas.out" </dev/null 2>&1; echo "exit=$?")"
-  if [ "$ours" != "$theirs" ]; then
+  "$qemu" "$scratch/ours.out" </dev/null >"$scratch/ours.run" 2>&1
+  echo "exit=$?" >>"$scratch/ours.run"
+  "$qemu" "$scratch/gas.out" </dev/null >"$scratch/gas.run" 2>&1
+  echo "exit=$?" >>"$scratch/gas.run"
+  if ! cmp --silent "$scratch/ours.run" "$scratch/gas.run"; then
     fail "$source: the two object paths disagree at run time on aarch64"
   fi
   cross_run=$((cross_run + 1))

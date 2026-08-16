@@ -10,7 +10,7 @@ use crate::lowering::{
 };
 use crate::mir::{BasicBlock, BinaryOp, Instruction, LocalId, MirFunction, MirModule, Terminator};
 use crate::regalloc::{allocate, Allocation, Location};
-use crate::x86_64_inst::{AluOp, Cond, Inst, Mem, Operand, Reg, Size, SseOp};
+use crate::x86_64_inst::{AluOp, Cond, Inst, Mem, Operand, Reg, ShiftOp, Size, SseOp};
 use serde::Serialize;
 use std::collections::HashMap;
 
@@ -165,6 +165,10 @@ fn overflow_trampoline() -> Target {
 
 fn div_zero_trampoline() -> Target {
     Target::Named(".Lsl_panic_div_zero_trampoline".into())
+}
+
+fn shift_trampoline() -> Target {
+    Target::Named(".Lsl_panic_shift_trampoline".into())
 }
 
 /// A register as an operand, which is what most of them are.
@@ -338,8 +342,8 @@ struct Generator<'a> {
     module: &'a MirModule,
     options: &'a CodegenOptions,
     asm: Assembly<Inst>,
-    strings: Vec<(String, String)>,
-    string_ids: HashMap<String, String>,
+    strings: Vec<(String, Vec<u8>)>,
+    string_ids: HashMap<Vec<u8>, String>,
     diagnostics: Vec<Diagnostic>,
     /// Where the locals of the function currently being emitted live, and the
     /// register set it draws on. The helper functions below read both, so both
@@ -385,9 +389,12 @@ impl<'a> Generator<'a> {
             if traps.overflow {
                 self.byte_string(".Lsl_panic_overflow", b"integer overflow");
             }
+            if traps.shift {
+                self.byte_string(".Lsl_panic_shift", b"shift amount out of range");
+            }
         }
         for (label, value) in self.strings.clone() {
-            self.byte_string(&label, value.as_bytes());
+            self.byte_string(&label, &value);
         }
         self.asm.push(Item::Section(Section::Text));
 
@@ -468,12 +475,12 @@ impl<'a> Generator<'a> {
         // nothing to print it, so the string need not exist either.
         if self.options.test_harness {
             for test in &self.module.tests {
-                self.intern(&test.name);
+                self.intern(test.name.as_bytes());
             }
         }
     }
 
-    fn intern(&mut self, value: &str) -> String {
+    fn intern(&mut self, value: &[u8]) -> String {
         if let Some(label) = self.string_ids.get(value) {
             return label.clone();
         }
@@ -1113,14 +1120,15 @@ impl<'a> Generator<'a> {
         match op {
             BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul
                 if self.accumulate_in_place(dst, op, lhs, rhs, ty) => {}
-            BinaryOp::Less | BinaryOp::Greater | BinaryOp::Equal
-                if self.compare_in_place(dst, op, lhs, rhs) => {}
+            _ if op.bitwise() && self.accumulate_in_place(dst, op, lhs, rhs, ty) => {}
+            _ if op.compares() && self.compare_in_place(dst, op, lhs, rhs) => {}
             _ => self.integer_binary_through_rax(dst, op, lhs, rhs, ty),
         }
     }
 
-    /// Computes an addition, subtraction or multiplication straight into the
-    /// destination register, so the result never travels through `rax`.
+    /// Computes an addition, subtraction, multiplication or bit operation
+    /// straight into the destination register, so the result never travels
+    /// through `rax`.
     ///
     /// Returns false when the shape does not allow it: a destination in memory
     /// (`add [slot], [slot]` has two memory operands), or a destination that is
@@ -1158,9 +1166,17 @@ impl<'a> Generator<'a> {
             BinaryOp::Add => self.inst(Inst::Alu(AluOp::Add, Operand::Reg(target), source)),
             BinaryOp::Sub => self.inst(Inst::Alu(AluOp::Sub, Operand::Reg(target), source)),
             BinaryOp::Mul => self.inst(Inst::Imul(target, source)),
+            BinaryOp::BitAnd => self.inst(Inst::Alu(AluOp::And, Operand::Reg(target), source)),
+            BinaryOp::BitOr => self.inst(Inst::Alu(AluOp::Or, Operand::Reg(target), source)),
+            BinaryOp::BitXor => self.inst(Inst::Alu(AluOp::Xor, Operand::Reg(target), source)),
             _ => unreachable!("only the accumulating operators reach here"),
         }
-        self.inst(Inst::Jcc(Cond::O, overflow_trampoline()));
+        // A bit operation cannot overflow — it produces a pattern, not a
+        // magnitude — and the flag `and`/`or`/`xor` leave is always clear, so
+        // the branch would be dead weight rather than merely harmless.
+        if !op.bitwise() {
+            self.inst(Inst::Jcc(Cond::O, overflow_trampoline()));
+        }
         if narrow {
             // The 32-bit form zero-extends into the full register; the local's
             // value is a sign-extended i32.
@@ -1234,7 +1250,13 @@ impl<'a> Generator<'a> {
                 ));
                 self.inst(Inst::Jcc(Cond::O, overflow_trampoline()));
             }
-            BinaryOp::Div => {
+            // One sequence for both, because the machine computes both at once:
+            // `idiv` leaves the quotient in the accumulator and the remainder
+            // in `rdx`, so `%` differs from `/` only in which register is read
+            // afterwards. The two checks in front are `D-031`'s and are not
+            // optional — `#DE` for a zero divisor is a fault with no message,
+            // and the most negative value over `-1` has no quotient at all.
+            BinaryOp::Div | BinaryOp::Rem => {
                 self.inst(Inst::Test(argument.clone(), argument.clone()));
                 self.inst(Inst::Jcc(Cond::E, div_zero_trampoline()));
                 if *ty == Type::I32 {
@@ -1255,14 +1277,47 @@ impl<'a> Generator<'a> {
                     self.inst(Inst::Cqo);
                     self.inst(Inst::Idiv(Reg("rcx")));
                 }
+                if op == BinaryOp::Rem {
+                    let remainder = reg(if width == "e" { "edx" } else { "rdx" });
+                    self.inst(Inst::Mov(accumulator.clone(), remainder));
+                }
             }
-            BinaryOp::Less | BinaryOp::Greater | BinaryOp::Equal => {
+            BinaryOp::BitAnd => self.inst(Inst::Alu(AluOp::And, accumulator.clone(), argument)),
+            BinaryOp::BitOr => self.inst(Inst::Alu(AluOp::Or, accumulator.clone(), argument)),
+            BinaryOp::BitXor => self.inst(Inst::Alu(AluOp::Xor, accumulator.clone(), argument)),
+            // The count is checked against the width before the shift, and the
+            // comparison is *unsigned*: a negative count is an enormous
+            // unsigned number and takes the same branch, so one compare covers
+            // both halves of `D-106`'s rule. Without it the two backends would
+            // not even fault — x86-64 masks the count to five or six bits and
+            // AArch64 reduces it modulo the width, so a shift by the width
+            // would quietly answer two different things.
+            BinaryOp::Shl | BinaryOp::Shr => {
+                let bits = if *ty == Type::I32 { 32 } else { 64 };
+                self.inst(Inst::Alu(AluOp::Cmp, argument, Operand::Imm(bits)));
+                self.inst(Inst::Jcc(Cond::Ae, shift_trampoline()));
+                let shift = if op == BinaryOp::Shl {
+                    ShiftOp::Shl
+                } else {
+                    ShiftOp::Sar
+                };
+                self.inst(Inst::Shift(
+                    shift,
+                    Reg(if width == "e" { "eax" } else { "rax" }),
+                ));
+            }
+            BinaryOp::Less
+            | BinaryOp::Greater
+            | BinaryOp::LessEqual
+            | BinaryOp::GreaterEqual
+            | BinaryOp::Equal
+            | BinaryOp::NotEqual => {
                 self.inst(Inst::Alu(AluOp::Cmp, reg("rax"), reg("rcx")));
                 self.inst(Inst::Setcc(set_condition(op), Reg("al")));
                 self.inst(Inst::Movzx(Reg("rax"), Reg("al")));
             }
         }
-        if *ty == Type::I32 && !matches!(op, BinaryOp::Less | BinaryOp::Greater | BinaryOp::Equal) {
+        if *ty == Type::I32 && !op.compares() {
             self.inst(Inst::Movsxd(Reg("rax"), Reg("eax")));
         }
         self.inst(Inst::Mov(
@@ -1299,6 +1354,19 @@ impl<'a> Generator<'a> {
                 self.inst(Inst::Setcc(Cond::A, Reg("al")));
                 self.widen_flag_into_xmm0();
             }
+            BinaryOp::LessEqual => {
+                // The mirror of `Less`: ask whether the right side is above or
+                // equal, because `setae` reads the carry alone and `ucomisd`
+                // sets the carry when the comparison was unordered.
+                self.inst(Inst::Sse(SseOp::Ucomi, Reg("xmm1"), Reg("xmm0")));
+                self.inst(Inst::Setcc(Cond::Ae, Reg("al")));
+                self.widen_flag_into_xmm0();
+            }
+            BinaryOp::GreaterEqual => {
+                self.inst(Inst::Sse(SseOp::Ucomi, Reg("xmm0"), Reg("xmm1")));
+                self.inst(Inst::Setcc(Cond::Ae, Reg("al")));
+                self.widen_flag_into_xmm0();
+            }
             BinaryOp::Equal => {
                 // Equality has no single condition that excludes unordered, so
                 // the parity flag — set only when unordered — is anded in.
@@ -1307,6 +1375,27 @@ impl<'a> Generator<'a> {
                 self.inst(Inst::Setcc(Cond::Np, Reg("cl")));
                 self.inst(Inst::Alu(AluOp::And, reg("al"), reg("cl")));
                 self.widen_flag_into_xmm0();
+            }
+            BinaryOp::NotEqual => {
+                // And its exact opposite: a NaN is *not equal* to everything,
+                // including itself, so parity is ored in rather than anded.
+                // `(not (= a b))` would have been a different function here,
+                // which is why `!=` is an operator and not a rewrite.
+                self.inst(Inst::Sse(SseOp::Ucomi, Reg("xmm0"), Reg("xmm1")));
+                self.inst(Inst::Setcc(Cond::Ne, Reg("al")));
+                self.inst(Inst::Setcc(Cond::P, Reg("cl")));
+                self.inst(Inst::Alu(AluOp::Or, reg("al"), reg("cl")));
+                self.widen_flag_into_xmm0();
+            }
+            // `sema` refuses each of these on an `f64` and `verify` refuses it
+            // again, so arriving here is a lowering bug rather than a program.
+            BinaryOp::Rem
+            | BinaryOp::BitAnd
+            | BinaryOp::BitOr
+            | BinaryOp::BitXor
+            | BinaryOp::Shl
+            | BinaryOp::Shr => {
+                unreachable!("`{op:?}` is refused on `f64` before it reaches code generation")
             }
         }
         let destination = operand(&self.alloc, self.registers, dst);
@@ -1573,7 +1662,7 @@ impl<'a> Generator<'a> {
             Operand::Imm(0),
         ));
         for (index, test) in self.module.tests.iter().enumerate() {
-            let name = self.string_ids[&test.name].clone();
+            let name = self.string_ids[test.name.as_bytes()].clone();
             self.inst(Inst::Call(self.symbol(&test.function.name, true)));
             self.inst(Inst::Mov(reg("esi"), reg("eax")));
             self.inst(Inst::Lea(Reg("rdi"), Operand::Rip(name.to_owned())));
@@ -1649,6 +1738,11 @@ impl<'a> Generator<'a> {
                 traps.overflow,
                 ".Lsl_panic_overflow_trampoline",
                 ".Lsl_panic_overflow",
+            ),
+            (
+                traps.shift,
+                ".Lsl_panic_shift_trampoline",
+                ".Lsl_panic_shift",
             ),
         ] {
             if !used {
@@ -2017,7 +2111,10 @@ fn set_condition(op: BinaryOp) -> Cond {
     match op {
         BinaryOp::Less => Cond::L,
         BinaryOp::Greater => Cond::G,
+        BinaryOp::LessEqual => Cond::Le,
+        BinaryOp::GreaterEqual => Cond::Ge,
         BinaryOp::Equal => Cond::E,
+        BinaryOp::NotEqual => Cond::Ne,
         _ => unreachable!("only the comparison operators produce a flag byte"),
     }
 }

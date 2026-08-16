@@ -1,0 +1,2 @@
+(fn main () -> i32
+  (if (and true) 0 1))

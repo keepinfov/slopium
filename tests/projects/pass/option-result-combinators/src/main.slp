@@ -13,7 +13,7 @@
   (* value 2))
 
 (fn halve ((value i64)) -> (Option i64)
-  (if (= 0 (- value (* (/ value 2) 2)))
+  (if (= 0 (% value 2))
     (Option:Some (/ value 2))
     (Option:None)))
 
@@ -73,23 +73,19 @@
   0)
 
 (test "map carries a payload through and leaves the empty case empty"
-  (if (= 42 (unwrap-or (option-map (Option:Some 21) double) 0))
-    (= 7 (unwrap-or (option-map (nothing) double) 7))
-    false))
+  (and (= 42 (unwrap-or (option-map (Option:Some 21) double) 0)) (= 7 (unwrap-or (
+          option-map (nothing) double) 7))))
 
 (test "and-then does not nest"
-  (if (= 4 (unwrap-or (and-then (Option:Some 8) halve) 0))
-    (= 0 (unwrap-or (and-then (Option:Some 9) halve) 0))
-    false))
+  (and (= 4 (unwrap-or (and-then (Option:Some 8) halve) 0)) (= 0 (unwrap-or (and-then (
+            Option:Some 9) halve) 0))))
 
 (test "or-else runs only when there is nothing"
-  (if (= 99 (unwrap-or (or-else (nothing) fallback) 0))
-    (= 1 (unwrap-or (or-else (Option:Some 1) fallback) 0))
-    false))
+  (and (= 99 (unwrap-or (or-else (nothing) fallback) 0)) (= 1 (unwrap-or (or-else (
+            Option:Some 1) fallback) 0))))
 
 (test "a Result maps its value, and recovers from its error"
   (let text "21")
   (let bad "twenty")
-  (if (= 42 (result-unwrap-or (result-map (parse (& text)) double) 0))
-    (= 12 (result-unwrap-or (result-or-else (parse (& bad)) recover) 0))
-    false))
+  (and (= 42 (result-unwrap-or (result-map (parse (& text)) double) 0)) (= 12 (
+        result-unwrap-or (result-or-else (parse (& bad)) recover) 0))))

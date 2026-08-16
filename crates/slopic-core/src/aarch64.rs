@@ -219,8 +219,8 @@ struct Generator<'a> {
     module: &'a MirModule,
     options: &'a CodegenOptions,
     asm: Assembly<Inst>,
-    strings: Vec<(String, String)>,
-    string_ids: HashMap<String, String>,
+    strings: Vec<(String, Vec<u8>)>,
+    string_ids: HashMap<Vec<u8>, String>,
     diagnostics: Vec<Diagnostic>,
     alloc: Allocation,
     registers: &'static RegisterFile,
@@ -261,9 +261,12 @@ impl<'a> Generator<'a> {
             if traps.overflow {
                 self.byte_string(".Lsl_panic_overflow", b"integer overflow");
             }
+            if traps.shift {
+                self.byte_string(".Lsl_panic_shift", b"shift amount out of range");
+            }
         }
         for (label, value) in self.strings.clone() {
-            self.byte_string(&label, value.as_bytes());
+            self.byte_string(&label, &value);
         }
         self.asm.push(Item::Section(Section::Text));
 
@@ -338,12 +341,12 @@ impl<'a> Generator<'a> {
         }
         if self.options.test_harness {
             for test in &self.module.tests {
-                self.intern(&test.name);
+                self.intern(test.name.as_bytes());
             }
         }
     }
 
-    fn intern(&mut self, value: &str) -> String {
+    fn intern(&mut self, value: &[u8]) -> String {
         if let Some(label) = self.string_ids.get(value) {
             return label.clone();
         }
@@ -1051,8 +1054,33 @@ impl<'a> Generator<'a> {
                 self.inst(Inst::Bcond(Cond::Ne, overflow_trampoline()));
                 self.write(dst, X16);
             }
-            BinaryOp::Div => self.divide(dst, lhs, rhs, narrow),
-            BinaryOp::Less | BinaryOp::Greater | BinaryOp::Equal => {
+            BinaryOp::Div | BinaryOp::Rem => self.divide(dst, op, lhs, rhs, narrow),
+            BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => {
+                let logical = match op {
+                    BinaryOp::BitAnd => Arith::And,
+                    BinaryOp::BitOr => Arith::Orr,
+                    _ => Arith::Eor,
+                };
+                // No `sxtw` tail on the narrow path: a bit operation on two
+                // sign-extended `i32`s leaves a sign-extended `i32`, which is
+                // not true of the arithmetic above it.
+                let left = self.read(lhs, 1);
+                let right = self.read(rhs, 2);
+                self.inst(Inst::Arith {
+                    op: logical,
+                    dst: X16,
+                    lhs: left,
+                    rhs: right,
+                });
+                self.write(dst, X16);
+            }
+            BinaryOp::Shl | BinaryOp::Shr => self.shift(dst, op, lhs, rhs, narrow),
+            BinaryOp::Less
+            | BinaryOp::Greater
+            | BinaryOp::LessEqual
+            | BinaryOp::GreaterEqual
+            | BinaryOp::Equal
+            | BinaryOp::NotEqual => {
                 let left = self.read(lhs, 1);
                 let right = self.read(rhs, 2);
                 self.inst(Inst::Cmp {
@@ -1068,14 +1096,68 @@ impl<'a> Generator<'a> {
         }
     }
 
-    /// Signed division, with the two inputs that have no quotient rejected
-    /// first: a zero divisor, and the most negative value over `-1`.
+    /// A shift, with the count checked against the operand width first.
+    ///
+    /// `lslv` and `asrv` reduce the count modulo the width and x86-64's `shl`
+    /// masks it to five or six bits, so an unchecked shift by the width faults
+    /// on neither machine and answers differently on each. `D-106` says such a
+    /// shift traps; this is where it does. The comparison is unsigned, so a
+    /// negative count — an enormous unsigned number — takes the same branch and
+    /// needs no second test.
+    fn shift(&mut self, dst: LocalId, op: BinaryOp, lhs: LocalId, rhs: LocalId, narrow: bool) {
+        let count = self.read(rhs, 2);
+        self.materialize(X15, if narrow { 32 } else { 64 });
+        self.inst(Inst::Cmp {
+            lhs: count,
+            rhs: X15,
+        });
+        self.inst(Inst::Bcond(
+            Cond::Hs,
+            Target::Named(".Lsl_panic_shift_trampoline".into()),
+        ));
+        let variable = if op == BinaryOp::Shl {
+            Arith::Lslv
+        } else {
+            Arith::Asrv
+        };
+        if narrow {
+            let left = self.read_narrow(lhs, 1);
+            let amount = self.read_narrow(rhs, 2);
+            self.inst(Inst::Arith {
+                op: variable,
+                dst: W16,
+                lhs: left,
+                rhs: amount,
+            });
+            // The 32-bit form leaves the upper half zero; the local holds a
+            // sign-extended i32, and a left shift into the sign bit is a
+            // pattern this must carry rather than refuse.
+            self.inst(Inst::Sxtw { dst: X16, src: W16 });
+        } else {
+            let left = self.read(lhs, 1);
+            self.inst(Inst::Arith {
+                op: variable,
+                dst: X16,
+                lhs: left,
+                rhs: count,
+            });
+        }
+        self.write(dst, X16);
+    }
+
+    /// Signed division and remainder, with the two inputs that have no quotient
+    /// rejected first: a zero divisor, and the most negative value over `-1`.
     ///
     /// `sdiv` traps on neither — it returns zero and saturates respectively —
     /// so unlike x86 the checks are the only thing standing between those
     /// inputs and a wrong answer, rather than a nicer message for a fault that
     /// would happen anyway.
-    fn divide(&mut self, dst: LocalId, lhs: LocalId, rhs: LocalId, narrow: bool) {
+    ///
+    /// There is no remainder instruction, so `%` is the quotient multiplied
+    /// back out and subtracted: `msub Rd, Rq, Rm, Rn` is `n - q * m`. That is
+    /// truncated toward zero because `sdiv` is, which is exactly the identity
+    /// `D-106` asks `%` to keep with `/`.
+    fn divide(&mut self, dst: LocalId, op: BinaryOp, lhs: LocalId, rhs: LocalId, narrow: bool) {
         let (left, right) = if narrow {
             (self.read_narrow(lhs, 1), self.read_narrow(rhs, 2))
         } else {
@@ -1108,6 +1190,14 @@ impl<'a> Generator<'a> {
                 lhs: left,
                 rhs: right,
             });
+            if op == BinaryOp::Rem {
+                self.inst(Inst::Msub {
+                    dst: W16,
+                    lhs: W16,
+                    rhs: right,
+                    addend: left,
+                });
+            }
             self.inst(Inst::Sxtw { dst: X16, src: W16 });
         } else {
             self.inst(Inst::Arith {
@@ -1116,6 +1206,14 @@ impl<'a> Generator<'a> {
                 lhs: left,
                 rhs: right,
             });
+            if op == BinaryOp::Rem {
+                self.inst(Inst::Msub {
+                    dst: X16,
+                    lhs: X16,
+                    rhs: right,
+                    addend: left,
+                });
+            }
         }
         self.write(dst, X16);
     }
@@ -1150,13 +1248,28 @@ impl<'a> Generator<'a> {
             BinaryOp::Sub => self.inst(arithmetic(FloatOp::Sub)),
             BinaryOp::Mul => self.inst(arithmetic(FloatOp::Mul)),
             BinaryOp::Div => self.inst(arithmetic(FloatOp::Div)),
-            BinaryOp::Less | BinaryOp::Greater | BinaryOp::Equal => {
+            BinaryOp::Less
+            | BinaryOp::Greater
+            | BinaryOp::LessEqual
+            | BinaryOp::GreaterEqual
+            | BinaryOp::Equal
+            | BinaryOp::NotEqual => {
                 self.inst(Inst::Fcmp { lhs: D0, rhs: D1 });
                 self.inst(Inst::Cset {
                     dst: X16,
                     cond: float_condition(op),
                 });
                 self.inst(Inst::Fmov { dst: D0, src: X16 });
+            }
+            // Refused by `sema` and again by `verify`, so reaching here is a
+            // lowering bug and not a program.
+            BinaryOp::Rem
+            | BinaryOp::BitAnd
+            | BinaryOp::BitOr
+            | BinaryOp::BitXor
+            | BinaryOp::Shl
+            | BinaryOp::Shr => {
+                unreachable!("`{op:?}` is refused on `f64` before it reaches code generation")
             }
         }
         self.inst(Inst::Fmov { dst: X16, src: D0 });
@@ -1437,7 +1550,7 @@ impl<'a> Generator<'a> {
         self.materialize(X16, 0);
         self.store(X16, 0);
         for test in &self.module.tests {
-            let name = self.string_ids[&test.name].clone();
+            let name = self.string_ids[test.name.as_bytes()].clone();
             let symbol = function_symbol(&test.function.name, true);
             self.inst(Inst::Bl(symbol));
             self.inst(Inst::Mov {
@@ -1490,7 +1603,11 @@ impl<'a> Generator<'a> {
     }
 
     fn runtime_panic_trampolines(&mut self, traps: TrapUsage) {
-        for (used, message) in [(traps.div_zero, "div_zero"), (traps.overflow, "overflow")] {
+        for (used, message) in [
+            (traps.div_zero, "div_zero"),
+            (traps.overflow, "overflow"),
+            (traps.shift, "shift"),
+        ] {
             if !used {
                 continue;
             }
@@ -1774,7 +1891,10 @@ fn integer_condition(op: BinaryOp) -> Cond {
     match op {
         BinaryOp::Less => Cond::Lt,
         BinaryOp::Greater => Cond::Gt,
+        BinaryOp::LessEqual => Cond::Le,
+        BinaryOp::GreaterEqual => Cond::Ge,
         BinaryOp::Equal => Cond::Eq,
+        BinaryOp::NotEqual => Cond::Ne,
         _ => unreachable!("only the comparison operators produce a condition"),
     }
 }
@@ -1782,11 +1902,21 @@ fn integer_condition(op: BinaryOp) -> Cond {
 /// Conditions for a comparison of two doubles.
 ///
 /// `fcmp` reports "unordered" — either side a NaN — as a fourth outcome, and
-/// these three conditions are all false for it. That is what IEEE 754 asks for:
-/// a NaN is neither less than, greater than, nor equal to anything, itself
-/// included.
+/// every condition here except `Ne` is false for it. That is what IEEE 754 asks
+/// for: a NaN is neither less than, greater than, nor equal to anything, itself
+/// included — and *is* unequal to everything, which is why `!=` reads a
+/// different condition than "the opposite of equal" and could not have been a
+/// rewrite of `(not (= a b))`.
+///
+/// The two new ones are the unsigned spellings on purpose. `fcmp` leaves the
+/// carry set on an unordered comparison, so `ls` ("lower or same") is false at
+/// a NaN where `le` would be true, and `ge` reads `N == V`, which an unordered
+/// comparison also breaks.
 fn float_condition(op: BinaryOp) -> Cond {
     match op {
+        BinaryOp::LessEqual => Cond::Ls,
+        BinaryOp::GreaterEqual => Cond::Ge,
+        BinaryOp::NotEqual => Cond::Ne,
         BinaryOp::Less => Cond::Mi,
         BinaryOp::Greater => Cond::Gt,
         BinaryOp::Equal => Cond::Eq,

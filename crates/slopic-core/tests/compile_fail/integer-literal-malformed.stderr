@@ -1,0 +1,4 @@
+integer-literal-malformed.slp:2:14: error[SL0100]: `0xZZ` is not a number
+  |
+ 2 |   (let value 0xZZ)
+  |              ^^^^

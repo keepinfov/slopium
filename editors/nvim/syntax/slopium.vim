@@ -6,8 +6,8 @@ syntax match slopiumComment ";.*$" contains=slopiumTodo,@Spell
 syntax keyword slopiumTodo TODO FIXME NOTE SAFETY contained
 
 syntax region slopiumString start=+"+ skip=+\\\\\|\\"+ end=+"+ contains=slopiumEscape
-syntax match slopiumEscape +\\[nrt"\\]+ contained
-syntax match slopiumNumber "\v(^|[[:space:](])\zs-?\d+(\.\d+)?([eE][+-]?\d+)?\ze($|[[:space:])])"
+syntax match slopiumEscape +\\\%([nrt0"\\]\|x\x\x\)+ contained
+syntax match slopiumNumber "\v(^|[[:space:](])\zs[-+]?(0[xX][0-9A-Fa-f_]+|0[bB][01_]+|\d[\d_]*(\.\d+)?([eE][+-]?\d+)?)\ze($|[[:space:])])"
 syntax keyword slopiumBoolean true false
 syntax match slopiumDelimiter "[()]"
 
@@ -33,7 +33,7 @@ syntax match slopiumVariableDefinition "[a-z_][A-Za-z0-9_-]*" contained
 syntax keyword slopiumAssignmentKeyword set nextgroup=slopiumVariable skipwhite
 syntax match slopiumVariable "[a-z_][A-Za-z0-9_-]*" contained
 syntax keyword slopiumControl do loop while break continue
-syntax keyword slopiumConditional if match try
+syntax keyword slopiumConditional if match try and or
 " Anchored after `(` so the `:as` of an import alias stays a field.
 syntax match slopiumConversion "\%((\s*\)\@<=as\>"
 syntax keyword slopiumModuleKeyword export take
@@ -43,8 +43,8 @@ syntax keyword slopiumModuleKeyword export take
 syntax match slopiumParameter "\v<[a-z_][A-Za-z0-9_-]*>\ze\s+(&mut|&)?(unit|bool|i32|i64|f64|String|[A-Z][A-Za-z0-9_-]*)\s*\)"
 
 syntax match slopiumOwnership "&mut\|&"
-syntax keyword slopiumBuiltin clone list array slice len push get get-ref pop remove replace
-syntax match slopiumOperator "\%((\s*\)\@<=[-+*/<>=]"
+syntax keyword slopiumBuiltin clone list array slice len push get get-ref pop remove replace not bit-and bit-or bit-xor bit-not shl shr
+syntax match slopiumOperator "\%((\s*\)\@<=\%([<>!]\=[=]\|[-+*/<>%]\)"
 syntax keyword slopiumType unit bool i32 i64 f64 String List Array Slice Fn
 syntax match slopiumEnumPath "\v<[A-Za-z_][A-Za-z0-9_-]*(:[A-Za-z_][A-Za-z0-9_-]*)+>"
 syntax match slopiumField "\v:[A-Za-z_][A-Za-z0-9_-]*"

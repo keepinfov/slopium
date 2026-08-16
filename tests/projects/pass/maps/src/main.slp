@@ -119,9 +119,7 @@
   (let one 1)
   (let held (unwrap-or (map-lookup (& notes) (& one)) "none"))
   (let want "second")
-  (if (= 1 (map-size (& notes)))
-    (equals (& held) (& want))
-    false))
+  (and (= 1 (map-size (& notes))) (equals (& held) (& want))))
 
 (test "deleting a key that was never there changes nothing"
   (let mut names (empty-names))
@@ -136,6 +134,4 @@
   (set marks (map-insert marks (- smallest 1) 111))
   (set marks (map-insert marks 7 70))
   (let key (- smallest 1))
-  (if (= 111 (unwrap-or (map-lookup (& marks) (& key)) 0))
-    (= 2 (map-size (& marks)))
-    false))
+  (and (= 111 (unwrap-or (map-lookup (& marks) (& key)) 0)) (= 2 (map-size (& marks)))))

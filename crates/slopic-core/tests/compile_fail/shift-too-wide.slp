@@ -1,0 +1,10 @@
+; The bound is the operand type's width, not a constant: sixty-four is a legal
+; amount for nothing and thirty-two is legal for an `i64` alone.
+(fn wide ((value i64)) -> i64
+  (shl value 64))
+
+(fn narrow ((value i32)) -> i32
+  (shr value 32))
+
+(fn main () -> i32
+  (narrow 1))

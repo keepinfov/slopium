@@ -1,0 +1,5 @@
+string-escape-hex.slp:2:15: error[SL0001]: `\x` takes exactly two hexadecimal digits
+  |
+ 2 |   (let text "\xZZ")
+  |               ^
+  = help: a byte is written `\x00` to `\xff`

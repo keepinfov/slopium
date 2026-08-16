@@ -1,4 +1,6 @@
-use crate::ast::{Capture, Expr, ExprKind, Function, Param, Pattern, PatternKind, Program, Type};
+use crate::ast::{
+    Capture, Expr, ExprKind, Function, LogicalOp, Param, Pattern, PatternKind, Program, Type,
+};
 use crate::diagnostic::{codes, CompileResult, Diagnostic, Span};
 use serde::Serialize;
 use std::collections::VecDeque;
@@ -95,7 +97,8 @@ pub enum TExprKind {
     Bool(bool),
     Int(i64),
     Float(f64),
-    String(String),
+    /// A text literal's bytes (see `lexer::TokenKind::String`).
+    String(Vec<u8>),
     Var(BindingId),
     Let {
         id: BindingId,
@@ -1266,6 +1269,7 @@ impl<'a> Analyzer<'a> {
                 }
                 self.typed(expr, Type::Unit, TExprKind::Continue)
             }
+            ExprKind::Logical { op, operands } => self.logical(expr, *op, operands),
             ExprKind::Match { value, arms } => self.match_expr(expr, value, arms, expected),
             ExprKind::Borrow { mutable, value } => self.borrow(expr, *mutable, value),
             ExprKind::Try(value) => self.try_expr(expr, value),
@@ -1662,6 +1666,68 @@ impl<'a> Analyzer<'a> {
                 else_expr: Box::new(else_expr),
             },
         )
+    }
+
+    /// `and` and `or`, typed here and gone by the time anything else looks
+    /// (`D-106`).
+    ///
+    /// Every operand is typed against `bool`, which is what makes `(and 1 2)`
+    /// say "expected `bool`, found `i64`" at the `1` rather than complaining
+    /// about a constant the compiler invented. What comes out is nested `If`s —
+    /// `(and a b)` is `(if a b false)`, `(or a b)` is `(if a true b)` — so the
+    /// short circuit is the branch that `if` already lowers to, and neither
+    /// `mir` nor either backend learns anything.
+    ///
+    /// Folded from the right, so `(and a b c)` evaluates `a` first and stops at
+    /// the first operand that answers.
+    fn logical(&mut self, expr: &Expr, op: LogicalOp, operands: &[Expr]) -> TExpr {
+        let mut typed = Vec::new();
+        let base = self.env.clone();
+        for (index, operand) in operands.iter().enumerate() {
+            // Everything after the first runs only sometimes, so a move inside
+            // one is a move on one path — the rule `if_expr` applies to its
+            // branches, and the reason each gets its own scope.
+            if index > 0 {
+                self.env.push();
+            }
+            typed.push(self.expr(operand, Some(&Type::Bool)));
+            if index > 0 {
+                self.env.pop();
+            }
+        }
+        // A binding moved in an operand that may not run is still moved: the
+        // conservative answer is the only sound one, and it is what `if_expr`
+        // reaches by merging both branches.
+        let moved = self.env.clone();
+        self.env = base;
+        for (id, binding) in &mut self.env.bindings {
+            if moved.bindings.get(id).map(|held| held.state) == Some(OwnershipState::Moved) {
+                binding.state = OwnershipState::Moved;
+            }
+        }
+
+        let constant = |kind: bool| TExpr {
+            ty: Type::Bool,
+            kind: TExprKind::Bool(kind),
+            span: expr.span,
+        };
+        let mut folded = typed.pop().expect("`and`/`or` has at least two operands");
+        while let Some(condition) = typed.pop() {
+            let (then_expr, else_expr) = match op {
+                LogicalOp::And => (folded, constant(false)),
+                LogicalOp::Or => (constant(true), folded),
+            };
+            folded = TExpr {
+                ty: Type::Bool,
+                span: expr.span,
+                kind: TExprKind::If {
+                    condition: Box::new(condition),
+                    then_expr: Box::new(then_expr),
+                    else_expr: Box::new(else_expr),
+                },
+            };
+        }
+        folded
     }
 
     fn loop_expr(&mut self, expr: &Expr, condition: Option<&Expr>, body: &Expr) -> TExpr {
@@ -2332,7 +2398,7 @@ impl<'a> Analyzer<'a> {
         if self.variants.contains_key(callee) {
             return self.enum_init(expr, callee, args, expected);
         }
-        if matches!(callee, "+" | "-" | "*" | "/" | "<" | ">" | "=") {
+        if is_operator(callee) {
             return self.operator_call(expr, callee, args, expected);
         }
         let Some(signature) = self.signatures.get(callee).cloned() else {
@@ -3534,10 +3600,14 @@ impl<'a> Analyzer<'a> {
         args: &[Expr],
         expected: Option<&Type>,
     ) -> TExpr {
-        if args.len() != 2 {
+        let spec = OPERATORS
+            .iter()
+            .find(|spec| spec.name == callee)
+            .expect("`call` only routes names this table holds");
+        if !spec.arity.accepts(args.len()) {
             self.error(
                 expr.span,
-                format!("operator `{callee}` expects two arguments"),
+                format!("operator `{callee}` expects {}", spec.arity.describe()),
             );
             return self.typed(expr, Type::Unit, TExprKind::Unit);
         }
@@ -3546,42 +3616,73 @@ impl<'a> Analyzer<'a> {
             _ => None,
         };
         let left = self.expr(&args[0], numeric_expectation);
-        let right = self.expr(&args[1], Some(&left.ty));
-        let valid = match callee {
-            "+" | "-" | "*" | "/" => left.ty.is_integer() || left.ty == Type::F64,
-            "<" | ">" => left.ty.is_integer() || left.ty == Type::F64,
-            // Scalars only, per `D-089`. Every other type is one machine word
-            // in a local — `Type` has no aggregate variant — so a wider `=`
-            // would compare handles rather than contents, and would hand an
-            // unconstrained type parameter a capability `D-012` denies it.
-            "=" => left.ty.is_integer() || matches!(left.ty, Type::F64 | Type::Bool),
-            _ => false,
-        };
-        if !valid {
+        // The right operand takes the left one's type, including for a shift:
+        // `Instruction::Binary` records one operand type and both backends
+        // select from it, so a count of a different width would make that field
+        // a half-truth. `D-090` says a conversion is written, and a shift is not
+        // the operator that gets an exception.
+        let right = (args.len() == 2).then(|| self.expr(&args[1], Some(&left.ty)));
+        if !spec.domain.accepts(&left.ty) {
             let mut diagnostic = Diagnostic::error(
                 codes::NAME_OR_TYPE,
                 self.file,
                 expr.span,
                 format!("operator `{callee}` does not support `{}`", left.ty),
             );
-            if callee == "=" && is_text(&left.ty) {
+            // `D-089`'s help, and `!=` inherits it by sharing this line rather
+            // than by a second claim that the two behave alike.
+            if matches!(spec.domain, Domain::Scalar) && is_text(&left.ty) {
                 diagnostic = diagnostic.with_help("compare text with `core:string:equals`");
             }
             self.diagnostics.push(diagnostic);
         }
-        let result = if matches!(callee, "<" | ">" | "=") {
+        if spec.shift {
+            self.check_shift_amount(callee, &left.ty, args.get(1));
+        }
+        let result = if spec.answers_bool {
             Type::Bool
         } else {
             left.ty.clone()
         };
+        let mut typed = vec![left];
+        typed.extend(right);
         self.typed(
             expr,
             result,
             TExprKind::Call {
                 callee: callee.to_owned(),
-                args: vec![left, right],
+                args: typed,
             },
         )
+    }
+
+    /// Refuses a shift by a literal amount the type has no room for.
+    ///
+    /// Only a literal: everything else is a value, and a value is checked where
+    /// every other trapping input is, at run time. But when the count is
+    /// written down the compiler knows, and a diagnostic naming the width beats
+    /// a panic that names none.
+    fn check_shift_amount(&mut self, callee: &str, ty: &Type, amount: Option<&Expr>) {
+        let Some(amount) = amount else { return };
+        let ExprKind::Int(written) = amount.kind else {
+            return;
+        };
+        let width = if *ty == Type::I32 { 32 } else { 64 };
+        if written >= 0 && written < width {
+            return;
+        }
+        self.diagnostics.push(
+            Diagnostic::error(
+                codes::NAME_OR_TYPE,
+                self.file,
+                amount.span,
+                format!("`{callee}` by {written} leaves nothing of `{ty}`"),
+            )
+            .with_help(format!(
+                "a shift amount is between 0 and {}; anything else traps",
+                width - 1
+            )),
+        );
     }
 
     fn materialize_typed_expr(&mut self, expression: &mut TExpr) {
@@ -3861,6 +3962,210 @@ fn is_text(ty: &Type) -> bool {
     }
 }
 
+/// How many operands an operator takes.
+#[derive(Clone, Copy, Debug)]
+enum Arity {
+    One,
+    Two,
+    /// `-` alone: `(- a b)` subtracts and `(- a)` negates (`D-106`).
+    OneOrTwo,
+}
+
+impl Arity {
+    fn accepts(self, count: usize) -> bool {
+        match self {
+            Arity::One => count == 1,
+            Arity::Two => count == 2,
+            Arity::OneOrTwo => count == 1 || count == 2,
+        }
+    }
+
+    fn describe(self) -> &'static str {
+        match self {
+            Arity::One => "one argument",
+            Arity::Two => "two arguments",
+            Arity::OneOrTwo => "one or two arguments",
+        }
+    }
+}
+
+/// Which types an operator is defined on.
+#[derive(Clone, Copy, Debug)]
+enum Domain {
+    /// Every number: the integers and `f64`.
+    Numeric,
+    /// The integers alone. A remainder, a bit and a shift are statements about
+    /// a pattern of bits, and an `f64` has none to speak of.
+    Integer,
+    Bool,
+    /// What `=` accepts and nothing wider (`D-089`): every other type is one
+    /// machine word in a local, so a wider comparison would answer about the
+    /// handle while looking like it answered about the contents.
+    Scalar,
+}
+
+impl Domain {
+    fn accepts(self, ty: &Type) -> bool {
+        match self {
+            Domain::Numeric => ty.is_integer() || *ty == Type::F64,
+            Domain::Integer => ty.is_integer(),
+            Domain::Bool => *ty == Type::Bool,
+            Domain::Scalar => ty.is_integer() || matches!(ty, Type::F64 | Type::Bool),
+        }
+    }
+}
+
+struct OperatorSpec {
+    name: &'static str,
+    arity: Arity,
+    domain: Domain,
+    /// Whether the result is a `bool` rather than the operand type.
+    answers_bool: bool,
+    /// Whether the second operand is a shift amount, and so is checked against
+    /// the operand width when it is written down.
+    shift: bool,
+}
+
+/// Every operator the language has, and what each accepts (`D-106`).
+///
+/// One table rather than four scattered `match`es, because the properties that
+/// used to be spread across an arity check, a validity check and a result
+/// choice are per-operator facts and disagreed the moment there were more than
+/// seven of them.
+const OPERATORS: &[OperatorSpec] = &[
+    OperatorSpec {
+        name: "+",
+        arity: Arity::Two,
+        domain: Domain::Numeric,
+        answers_bool: false,
+        shift: false,
+    },
+    OperatorSpec {
+        name: "-",
+        arity: Arity::OneOrTwo,
+        domain: Domain::Numeric,
+        answers_bool: false,
+        shift: false,
+    },
+    OperatorSpec {
+        name: "*",
+        arity: Arity::Two,
+        domain: Domain::Numeric,
+        answers_bool: false,
+        shift: false,
+    },
+    OperatorSpec {
+        name: "/",
+        arity: Arity::Two,
+        domain: Domain::Numeric,
+        answers_bool: false,
+        shift: false,
+    },
+    OperatorSpec {
+        name: "%",
+        arity: Arity::Two,
+        domain: Domain::Integer,
+        answers_bool: false,
+        shift: false,
+    },
+    OperatorSpec {
+        name: "<",
+        arity: Arity::Two,
+        domain: Domain::Numeric,
+        answers_bool: true,
+        shift: false,
+    },
+    OperatorSpec {
+        name: ">",
+        arity: Arity::Two,
+        domain: Domain::Numeric,
+        answers_bool: true,
+        shift: false,
+    },
+    OperatorSpec {
+        name: "<=",
+        arity: Arity::Two,
+        domain: Domain::Numeric,
+        answers_bool: true,
+        shift: false,
+    },
+    OperatorSpec {
+        name: ">=",
+        arity: Arity::Two,
+        domain: Domain::Numeric,
+        answers_bool: true,
+        shift: false,
+    },
+    OperatorSpec {
+        name: "=",
+        arity: Arity::Two,
+        domain: Domain::Scalar,
+        answers_bool: true,
+        shift: false,
+    },
+    OperatorSpec {
+        name: "!=",
+        arity: Arity::Two,
+        domain: Domain::Scalar,
+        answers_bool: true,
+        shift: false,
+    },
+    OperatorSpec {
+        name: "not",
+        arity: Arity::One,
+        domain: Domain::Bool,
+        answers_bool: true,
+        shift: false,
+    },
+    OperatorSpec {
+        name: "bit-and",
+        arity: Arity::Two,
+        domain: Domain::Integer,
+        answers_bool: false,
+        shift: false,
+    },
+    OperatorSpec {
+        name: "bit-or",
+        arity: Arity::Two,
+        domain: Domain::Integer,
+        answers_bool: false,
+        shift: false,
+    },
+    OperatorSpec {
+        name: "bit-xor",
+        arity: Arity::Two,
+        domain: Domain::Integer,
+        answers_bool: false,
+        shift: false,
+    },
+    OperatorSpec {
+        name: "bit-not",
+        arity: Arity::One,
+        domain: Domain::Integer,
+        answers_bool: false,
+        shift: false,
+    },
+    OperatorSpec {
+        name: "shl",
+        arity: Arity::Two,
+        domain: Domain::Integer,
+        answers_bool: false,
+        shift: true,
+    },
+    OperatorSpec {
+        name: "shr",
+        arity: Arity::Two,
+        domain: Domain::Integer,
+        answers_bool: false,
+        shift: true,
+    },
+];
+
+/// Whether a name in head position is an operator rather than a call.
+pub fn is_operator(name: &str) -> bool {
+    OPERATORS.iter().any(|spec| spec.name == name)
+}
+
 fn collect_variable_names(expr: &Expr, output: &mut HashSet<String>) {
     match &expr.kind {
         ExprKind::Var { name, .. } => {
@@ -3912,6 +4217,11 @@ fn collect_variable_names(expr: &Expr, output: &mut HashSet<String>) {
         ExprKind::Call { args, .. } => {
             for argument in args {
                 collect_variable_names(argument, output);
+            }
+        }
+        ExprKind::Logical { operands, .. } => {
+            for operand in operands {
+                collect_variable_names(operand, output);
             }
         }
         ExprKind::Unit

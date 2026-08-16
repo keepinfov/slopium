@@ -1,0 +1,6 @@
+; A malformed literal used to become a binding here, which matched everything
+; and made every arm below it unreachable without saying a word.
+(fn main () -> i32
+  (match 1
+    (0xZZ 0)
+    (_ 1)))

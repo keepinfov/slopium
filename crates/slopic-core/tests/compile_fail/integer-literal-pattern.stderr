@@ -1,0 +1,4 @@
+integer-literal-pattern.slp:5:6: error[SL0100]: `0xZZ` is not a pattern
+  |
+ 5 |     (0xZZ 0)
+  |      ^^^^

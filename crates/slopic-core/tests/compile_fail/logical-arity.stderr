@@ -1,0 +1,4 @@
+logical-arity.slp:2:7: error[SL0100]: `and` expects at least two operands
+  |
+ 2 |   (if (and true) 0 1))
+  |       ^^^^^^^^^^

@@ -1,0 +1,4 @@
+(fn main () -> i32
+  (let left "abc")
+  (let right "abc")
+  (if (!= left right) 0 1))

@@ -52,9 +52,7 @@
   0)
 
 (test "generic function has multiple instances"
-  (if (= (identity 42) 42)
-    (= (identity true) true)
-    false))
+  (and (= (identity 42) 42) (= (identity true) true)))
 
 (test "generic struct materializes"
   (do
@@ -63,11 +61,8 @@
     (= (. boxed value) 7)))
 
 (test "try success and error paths"
-  (if
-    (match (forward true)
+  (and (match (forward true)
       ((Result:Ok value) (= value 42))
-      ((Result:Err error) false))
-    (match (forward false)
+      ((Result:Err error) false)) (match (forward false)
       ((Result:Ok value) false)
-      ((Result:Err error) true))
-    false))
+      ((Result:Err error) true))))

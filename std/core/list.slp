@@ -83,7 +83,7 @@
 (fn find (T) ((items (& (List T))) (holds (Fn ((& T)) bool))) -> (Option i64)
   (let size (len items))
   (let mut index 0)
-  (let mut found (- 0 1))
+  (let mut found -1)
   (while (< index size)
     (if (holds (get-ref items index))
       (do

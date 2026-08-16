@@ -84,33 +84,21 @@
   (let words (list "a"))
   (let first (first-of (& words)))
   (let expected "a")
-  (if (= 5 (first-of (& numbers)))
-    (equals (& first) (& expected))
-    false))
+  (and (= 5 (first-of (& numbers))) (equals (& first) (& expected))))
 
 (test "matching through a borrow leaves the value alone"
   (let value (Option:Some 9))
-  (if (= 9 (payload-or (& value) 0))
-    (= 9 (payload-or (& value) 0))
-    false))
+  (and (= 9 (payload-or (& value) 0)) (= 9 (payload-or (& value) 0))))
 
 (test "a question about an option does not consume it"
   (let value (Option:Some 1))
   (let missing (none-i64))
-  (if (is-some (& value))
-    (if (is-none (& missing))
-      (= 1 (unwrap-or value 0))
-      false)
-    false))
+  (and (is-some (& value)) (is-none (& missing)) (= 1 (unwrap-or value 0))))
 
 (test "a question about a result does not consume it"
   (let good (ok-i64))
   (let bad (err-i64))
-  (if (is-ok (& good))
-    (if (is-err (& bad))
-      (if (is-ok (& good)) (is-err (& bad)) false)
-      false)
-    false))
+  (and (is-ok (& good)) (is-err (& bad)) (is-ok (& good)) (is-err (& bad))))
 
 (test "a nested pattern borrows every field it reaches"
   (let dot (Shape:Dot (Point :x 42 :label "answer")))

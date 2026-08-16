@@ -177,7 +177,15 @@ pub enum Cond {
     Z,
     G,
     L,
+    Ge,
+    Le,
     A,
+    /// Above or equal — the *unsigned* one. It reads a shift count against the
+    /// operand width, where a negative count is an enormous unsigned number and
+    /// so trips the same branch, and it reads `ucomisd`'s carry flag, which is
+    /// set both when the left side is smaller and when either side is a NaN.
+    Ae,
+    P,
     Np,
 }
 
@@ -185,11 +193,15 @@ impl Cond {
     pub fn code(self) -> u8 {
         match self {
             Cond::O => 0x0,
+            Cond::Ae => 0x3,
             Cond::E | Cond::Z => 0x4,
             Cond::Ne => 0x5,
             Cond::A => 0x7,
+            Cond::P => 0xa,
             Cond::Np => 0xb,
             Cond::L => 0xc,
+            Cond::Ge => 0xd,
+            Cond::Le => 0xe,
             Cond::G => 0xf,
         }
     }
@@ -204,7 +216,11 @@ impl fmt::Display for Cond {
             Cond::Z => "z",
             Cond::G => "g",
             Cond::L => "l",
+            Cond::Ge => "ge",
+            Cond::Le => "le",
             Cond::A => "a",
+            Cond::Ae => "ae",
+            Cond::P => "p",
             Cond::Np => "np",
         })
     }
@@ -214,6 +230,7 @@ impl fmt::Display for Cond {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AluOp {
     Add,
+    Or,
     Sub,
     And,
     Xor,
@@ -226,6 +243,7 @@ impl AluOp {
     fn digit(self) -> u8 {
         match self {
             AluOp::Add => 0,
+            AluOp::Or => 1,
             AluOp::And => 4,
             AluOp::Sub => 5,
             AluOp::Xor => 6,
@@ -237,6 +255,7 @@ impl AluOp {
     fn base(self) -> u8 {
         match self {
             AluOp::Add => 0x00,
+            AluOp::Or => 0x08,
             AluOp::And => 0x20,
             AluOp::Sub => 0x28,
             AluOp::Xor => 0x30,
@@ -249,10 +268,46 @@ impl fmt::Display for AluOp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             AluOp::Add => "add",
+            AluOp::Or => "or",
             AluOp::Sub => "sub",
             AluOp::And => "and",
             AluOp::Xor => "xor",
             AluOp::Cmp => "cmp",
+        })
+    }
+}
+
+/// The two shifts the backend selects, which share the `D3 /n` encoding and
+/// differ only in the digit.
+///
+/// Only the `cl` form is here. A shift count is a local by the time code
+/// generation sees it — `sema` refuses a literal that is out of range and the
+/// constant folder turns the rest into a value, not into an immediate operand —
+/// so the `C1 /n ib` form would be an encoding nothing emits, which
+/// `aarch64_inst.rs` calls out as the thing to avoid.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ShiftOp {
+    /// `shl`, which the assembler also spells `sal`.
+    Shl,
+    /// `sar` — arithmetic, so the sign is carried down. Every integer is signed
+    /// until `D-107`, at which point `shr` joins it for the unsigned half.
+    Sar,
+}
+
+impl ShiftOp {
+    fn digit(self) -> u8 {
+        match self {
+            ShiftOp::Shl => 4,
+            ShiftOp::Sar => 7,
+        }
+    }
+}
+
+impl fmt::Display for ShiftOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            ShiftOp::Shl => "shl",
+            ShiftOp::Sar => "sar",
         })
     }
 }
@@ -316,6 +371,9 @@ pub enum Inst {
     Jmp(Target),
     Jcc(Cond, Target),
     Setcc(Cond, Reg),
+    /// `shl`/`sar r, cl`. The count register is always `cl` — the machine has
+    /// no other variable-count form — so it is not an operand here.
+    Shift(ShiftOp, Reg),
     Idiv(Reg),
     /// Sign-extend `rax` into `rdx`, and its 32-bit counterpart.
     Cqo,
@@ -346,6 +404,7 @@ impl fmt::Display for Inst {
             Inst::Jmp(target) => write!(f, "jmp {target}"),
             Inst::Jcc(cond, target) => write!(f, "j{cond} {target}"),
             Inst::Setcc(cond, register) => write!(f, "set{cond} {register}"),
+            Inst::Shift(op, register) => write!(f, "{op} {register}, cl"),
             Inst::Idiv(register) => write!(f, "idiv {register}"),
             Inst::Cqo => f.write_str("cqo"),
             Inst::Cdq => f.write_str("cdq"),
@@ -716,6 +775,13 @@ impl Instruction for Inst {
                     .extend_from_slice(&[0x0f, 0x90 + cond.code()]);
                 encoding.registers(0, register.number()?);
             }
+            Inst::Shift(op, register) => {
+                if register.width()? == Width::Qword {
+                    encoding.wide();
+                }
+                encoding.opcode.push(0xd3);
+                encoding.registers(op.digit(), register.number()?);
+            }
             Inst::Idiv(register) => {
                 if register.width()? == Width::Qword {
                     encoding.wide();
@@ -904,6 +970,11 @@ mod tests {
             ),
             (Inst::Idiv(r("rcx")), &[0x48, 0xf7, 0xf9]),
             (Inst::Idiv(r("ecx")), &[0xf7, 0xf9]),
+            // `D3 /n` — the count is `cl` and is not encoded.
+            (Inst::Shift(ShiftOp::Shl, r("rax")), &[0x48, 0xd3, 0xe0]),
+            (Inst::Shift(ShiftOp::Sar, r("rax")), &[0x48, 0xd3, 0xf8]),
+            (Inst::Shift(ShiftOp::Shl, r("eax")), &[0xd3, 0xe0]),
+            (Inst::Shift(ShiftOp::Sar, r("eax")), &[0xd3, 0xf8]),
             // `FF /2` is 64-bit by default in long mode, so `rax` takes no REX
             // at all and `r11` takes only REX.B.
             (Inst::CallReg(r("rax")), &[0xff, 0xd0]),
@@ -916,6 +987,19 @@ mod tests {
             (Inst::Setcc(Cond::L, r("al")), &[0x0f, 0x9c, 0xc0]),
             (Inst::Setcc(Cond::A, r("al")), &[0x0f, 0x97, 0xc0]),
             (Inst::Setcc(Cond::Np, r("cl")), &[0x0f, 0x9b, 0xc1]),
+            (Inst::Setcc(Cond::Le, r("al")), &[0x0f, 0x9e, 0xc0]),
+            (Inst::Setcc(Cond::Ge, r("al")), &[0x0f, 0x9d, 0xc0]),
+            (Inst::Setcc(Cond::Ae, r("al")), &[0x0f, 0x93, 0xc0]),
+            (Inst::Setcc(Cond::P, r("cl")), &[0x0f, 0x9a, 0xc1]),
+            (
+                Inst::Alu(AluOp::Or, reg("rax"), reg("rcx")),
+                &[0x48, 0x09, 0xc8],
+            ),
+            (Inst::Alu(AluOp::Or, reg("eax"), reg("ecx")), &[0x09, 0xc8]),
+            (
+                Inst::Alu(AluOp::Or, slot(-8), reg("rax")),
+                &[0x48, 0x09, 0x45, 0xf8],
+            ),
             (
                 Inst::Sse(SseOp::Add, r("xmm0"), r("xmm1")),
                 &[0xf2, 0x0f, 0x58, 0xc1],
@@ -1045,6 +1129,20 @@ mod tests {
                 "jne .Lbb1",
             ),
             (Inst::Setcc(Cond::Np, r("cl")), "setnp cl"),
+            (Inst::Setcc(Cond::Le, r("al")), "setle al"),
+            (Inst::Setcc(Cond::Ge, r("al")), "setge al"),
+            (Inst::Setcc(Cond::Ae, r("al")), "setae al"),
+            (Inst::Setcc(Cond::P, r("cl")), "setp cl"),
+            (
+                Inst::Jcc(
+                    Cond::Ae,
+                    Target::Named(".Lsl_panic_shift_trampoline".into()),
+                ),
+                "jae .Lsl_panic_shift_trampoline",
+            ),
+            (Inst::Alu(AluOp::Or, reg("rax"), reg("rcx")), "or rax, rcx"),
+            (Inst::Shift(ShiftOp::Shl, r("rax")), "shl rax, cl"),
+            (Inst::Shift(ShiftOp::Sar, r("eax")), "sar eax, cl"),
             (Inst::Imul(r("rax"), reg("rcx")), "imul rax, rcx"),
             (
                 Inst::Sse(SseOp::Ucomi, r("xmm0"), r("xmm1")),

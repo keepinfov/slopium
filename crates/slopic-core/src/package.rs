@@ -773,6 +773,11 @@ impl Resolver<'_> {
                     self.rewrite_expr(argument, diagnostics);
                 }
             }
+            ExprKind::Logical { operands, .. } => {
+                for operand in operands {
+                    self.rewrite_expr(operand, diagnostics);
+                }
+            }
             // A capture is a local by construction, so there is nothing to
             // resolve about the names; the types are another matter, since a
             // parameter or a result may name something from another module.
@@ -1025,6 +1030,9 @@ fn collect_qualified_names<'a>(program: &'a Program, output: &mut Vec<&'a str>) 
                 }
                 args.iter().for_each(|argument| expr(argument, output));
             }
+            ExprKind::Logical { operands, .. } => {
+                operands.iter().for_each(|operand| expr(operand, output));
+            }
             ExprKind::Lambda {
                 params,
                 result,
@@ -1126,29 +1134,29 @@ fn valid_module_name(name: &str) -> bool {
         })
 }
 
+/// Whether a name in head position belongs to the language rather than to a
+/// module.
+///
+/// The operators come from `sema`'s table rather than being listed again here:
+/// there were two copies of the seven, and two copies of eighteen would have
+/// drifted on the first patch that added a nineteenth.
 fn is_builtin(name: &str) -> bool {
-    matches!(
-        name,
-        "clone"
-            | "list"
-            | "array"
-            | "slice"
-            | "len"
-            | "push"
-            | "get"
-            | "get-ref"
-            | "pop"
-            | "remove"
-            | "replace"
-            | "+"
-            | "-"
-            | "*"
-            | "/"
-            | "<"
-            | ">"
-            | "="
-            | "."
-    )
+    crate::sema::is_operator(name)
+        || matches!(
+            name,
+            "clone"
+                | "list"
+                | "array"
+                | "slice"
+                | "len"
+                | "push"
+                | "get"
+                | "get-ref"
+                | "pop"
+                | "remove"
+                | "replace"
+                | "."
+        )
 }
 
 fn shift_span(span: &mut Span, base: usize) {
@@ -1207,6 +1215,11 @@ fn shift_program(program: &mut Program, base: usize) {
             ExprKind::Call { args, .. } => {
                 args.iter_mut()
                     .for_each(|argument| shift_expr(argument, base));
+            }
+            ExprKind::Logical { operands, .. } => {
+                operands
+                    .iter_mut()
+                    .for_each(|operand| shift_expr(operand, base));
             }
             ExprKind::Lambda {
                 captures,

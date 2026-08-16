@@ -23,7 +23,7 @@
 (extern "sl_rt_last_error" (last-error) -> i64)
 
 (fn arg ((index i64)) -> (Option String)
-  (if (if (< index 0) false (< index (args-len)))
+  (if (and (>= index 0) (< index (args-len)))
     (Option:Some (arg-raw index))
     (Option:None)))
 

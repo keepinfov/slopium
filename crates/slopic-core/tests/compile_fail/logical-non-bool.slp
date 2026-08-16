@@ -1,0 +1,4 @@
+; `and` types every operand against `bool`, so the complaint lands on the
+; operand rather than on a constant the compiler synthesized (`D-106`).
+(fn main () -> i32
+  (if (and 1 2) 0 1))

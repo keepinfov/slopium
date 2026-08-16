@@ -24,6 +24,8 @@ local static_items = {
   { label = "match", kind = kinds.Snippet, detail = "pattern match", insertText = "match ${1:value}\n    (${2:pattern} ${0:body})", insertTextFormat = 2 },
   { label = "lambda", kind = kinds.Snippet, detail = "closure over named captures", insertText = "lambda (${1:capture}) ((${2:arg} ${3:type})) -> ${4:type}\n    ${0:body}", insertTextFormat = 2 },
   { label = "do", kind = kinds.Keyword, detail = "expression sequence" },
+  { label = "and", kind = kinds.Snippet, detail = "short-circuiting conjunction", insertText = "and ${1:left} ${0:right}", insertTextFormat = 2 },
+  { label = "or", kind = kinds.Snippet, detail = "short-circuiting disjunction", insertText = "or ${1:left} ${0:right}", insertTextFormat = 2 },
   { label = "loop", kind = kinds.Snippet, detail = "unconditional loop", insertText = "loop\n    ${0:body}", insertTextFormat = 2 },
   { label = "while", kind = kinds.Snippet, detail = "conditional loop", insertText = "while ${1:condition}\n    ${0:body}", insertTextFormat = 2 },
   { label = "break", kind = kinds.Keyword },
@@ -65,6 +67,17 @@ local static_items = {
   { label = "<", kind = kinds.Function, detail = "less than" },
   { label = ">", kind = kinds.Function, detail = "greater than" },
   { label = "=", kind = kinds.Function, detail = "equality" },
+  { label = "%", kind = kinds.Function, detail = "integer remainder" },
+  { label = "<=", kind = kinds.Function, detail = "less than or equal" },
+  { label = ">=", kind = kinds.Function, detail = "greater than or equal" },
+  { label = "!=", kind = kinds.Function, detail = "inequality" },
+  { label = "not", kind = kinds.Function, detail = "not(bool) -> bool" },
+  { label = "bit-and", kind = kinds.Function, detail = "bitwise and" },
+  { label = "bit-or", kind = kinds.Function, detail = "bitwise or" },
+  { label = "bit-xor", kind = kinds.Function, detail = "bitwise exclusive or" },
+  { label = "bit-not", kind = kinds.Function, detail = "bitwise complement" },
+  { label = "shl", kind = kinds.Function, detail = "left shift" },
+  { label = "shr", kind = kinds.Function, detail = "right shift, arithmetic" },
 }
 
 local function add(items, seen, label, kind, detail)
@@ -150,7 +163,7 @@ function M.omnifunc(findstart, base)
   if findstart == 1 then
     local line = vim.api.nvim_get_current_line()
     local column = vim.fn.col(".") - 1
-    while column > 0 and line:sub(column, column):match("[%w_&:.+*/<>=-]") do
+    while column > 0 and line:sub(column, column):match("[%w_&:.+*/<>=%%!-]") do
       column = column - 1
     end
     return column

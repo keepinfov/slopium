@@ -1,0 +1,4 @@
+inequality-struct.slp:6:7: error[SL0200]: operator `!=` does not support `Point`
+  |
+ 6 |   (if (!= left right) 0 1))
+  |       ^^^^^^^^^^^^^^^

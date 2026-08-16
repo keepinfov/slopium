@@ -79,9 +79,7 @@
   (let hundred (from-f64 100.0))
   (let expected-one "1.0")
   (let expected-hundred "100.0")
-  (if (equals (& one) (& expected-one))
-    (equals (& hundred) (& expected-hundred))
-    false))
+  (and (equals (& one) (& expected-one)) (equals (& hundred) (& expected-hundred))))
 
 (test "seventeen digits is the width that comes back"
   (let tenth (from-f64 0.1))
@@ -89,22 +87,15 @@
   (equals (& tenth) (& expected)))
 
 (test "every shape of value survives the trip"
-  (if (round-trips 0.1)
-    (if (round-trips (/ 1.0 3.0))
-      (if (round-trips (- 0.0 3.75))
-        (round-trips 12345.6789)
-        false)
-      false)
-    false))
+  (and (round-trips 0.1) (round-trips (/ 1.0 3.0)) (round-trips (- 0.0 3.75)) (
+      round-trips 12345.6789)))
 
 (test "a zero keeps the sign it had"
   (let plain (from-f64 0.0))
   (let signed (from-f64 (negative-zero)))
   (let expected-plain "0.0")
   (let expected-signed "-0.0")
-  (if (equals (& plain) (& expected-plain))
-    (equals (& signed) (& expected-signed))
-    false))
+  (and (equals (& plain) (& expected-plain)) (equals (& signed) (& expected-signed))))
 
 (test "the three values with no digits have names"
   (let up (from-f64 (infinity)))
@@ -113,20 +104,15 @@
   (let expected-up "inf")
   (let expected-down "-inf")
   (let expected-none "nan")
-  (if (equals (& up) (& expected-up))
-    (if (equals (& down) (& expected-down))
-      (equals (& none) (& expected-none))
-      false)
-    false))
+  (and (equals (& up) (& expected-up)) (equals (& down) (& expected-down)) (equals (&
+        none) (& expected-none))))
 
 (test "a name reads back as the value it names"
   (let up "inf")
   (let down "-inf")
-  (if (= (read (& up)) (infinity))
-    (do
+  (and (= (read (& up)) (infinity)) (do
       (let value (read (& down)))
-      (= value (- 0.0 (infinity))))
-    false))
+      (= value (- 0.0 (infinity))))))
 
 (test "text that is not a number is refused"
   (let doubled "1.2.3")
@@ -134,13 +120,8 @@
   (let trailing "1.")
   (let leading ".5")
   (let empty "")
-  (if (refused (& doubled))
-    (if (refused (& letters))
-      (if (refused (& trailing))
-        (if (refused (& leading)) (refused (& empty)) false)
-        false)
-      false)
-    false))
+  (and (refused (& doubled)) (refused (& letters)) (refused (& trailing)) (refused (&
+        leading)) (refused (& empty))))
 
 (test "a whole number needs no point to be read"
   (let text "42")
@@ -149,14 +130,12 @@
 (test "past the top of the range is an infinity, and past the bottom a zero"
   (let huge (one-and-zeros 400))
   (let tiny (zeros-then-one 400))
-  (if (= (read (& huge)) (infinity))
-    (= (read (& tiny)) 0.0)
-    false))
+  (and (= (read (& huge)) (infinity)) (= (read (& tiny)) 0.0)))
 
 (test "a subnormal is a value like any other"
   (let text (zeros-then-one 322))
   (let value (read (& text)))
-  (if (> value 0.0) (round-trips value) false))
+  (and (> value 0.0) (round-trips value)))
 
 ; The claim `D-098` rests on, made by a program rather than by prose: this
 ; literal was pasted from the output of `(from-f64 (/ 2.0 7.0))`.

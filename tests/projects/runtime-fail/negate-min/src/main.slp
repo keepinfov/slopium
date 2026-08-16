@@ -1,0 +1,12 @@
+; `(- x)` is `0 - x`, so the smallest integer has no negation and overflows
+; saying so — the same trap `(- 0 x)` reached before there was a unary `-`.
+
+(take std:io println-i64)
+
+(fn smallest () -> i64 -9223372036854775808)
+
+(fn main () -> i32
+  (println-i64 (- (smallest)))
+  0)
+
+(test "fixture compiles" true)

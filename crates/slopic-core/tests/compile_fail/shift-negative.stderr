@@ -1,0 +1,5 @@
+shift-negative.slp:2:10: error[SL0200]: `shr` by -1 leaves nothing of `i32`
+  |
+ 2 |   (shr 1 -1))
+  |          ^^
+  = help: a shift amount is between 0 and 31; anything else traps

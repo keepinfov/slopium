@@ -1,0 +1,9 @@
+negate-arity.slp:2:3: error[SL0200]: operator `-` expects one or two arguments
+  |
+ 2 |   (- 1 2 3))
+  |   ^^^^^^^^^
+
+negate-arity.slp:2:3: error[SL0200]: expected `i32`, found `unit`
+  |
+ 2 |   (- 1 2 3))
+  |   ^^^^^^^^^

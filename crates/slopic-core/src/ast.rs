@@ -219,13 +219,30 @@ pub struct Expr {
     pub span: Span,
 }
 
+/// Which of the two short-circuiting forms this is.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub enum LogicalOp {
+    And,
+    Or,
+}
+
+impl LogicalOp {
+    pub fn name(self) -> &'static str {
+        match self {
+            LogicalOp::And => "and",
+            LogicalOp::Or => "or",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub enum ExprKind {
     Unit,
     Bool(bool),
     Int(i64),
     Float(f64),
-    String(String),
+    /// A text literal's bytes (see `lexer::TokenKind::String`).
+    String(Vec<u8>),
     /// A bare name: a local, or a top-level `fn` used as a value (`D-092`).
     ///
     /// `resolved` is what the name would mean as a top-level item in the module
@@ -274,6 +291,22 @@ pub enum ExprKind {
         value: Box<Expr>,
     },
     Try(Box<Expr>),
+    /// `(and a b ...)` and `(or a b ...)` — forms, not calls (`D-106`).
+    ///
+    /// A call evaluates its arguments, and short-circuiting is the entire
+    /// point: `(and (holds map key) (trust (lookup map key)))` must not look
+    /// the key up when the map does not hold it. So they join `if` here.
+    ///
+    /// They stop at `sema`, which types every operand against `bool` and folds
+    /// them into nested `If`s — `(and a b)` is `(if a b false)` and `(or a b)`
+    /// is `(if a true b)`. Typing the operands directly is what keeps the
+    /// diagnostic honest: a desugar in this file would type the second operand
+    /// against the *caller's* expectation and then complain about the
+    /// synthesized constant, at a span nobody wrote.
+    Logical {
+        op: LogicalOp,
+        operands: Vec<Expr>,
+    },
     /// `(as i64 value)` — a widening between two named numeric types.
     ///
     /// A form rather than a call, so the target type is parsed as a type and
@@ -559,8 +592,9 @@ impl AstBuilder<'_> {
             return None;
         }
         let return_type = self.ty(&items[4])?;
+        let symbol = self.text_literal(symbol, items[1].span, "a C symbol")?;
         Some(ExternDecl {
-            symbol: symbol.clone(),
+            symbol,
             name,
             params,
             return_type,
@@ -578,8 +612,9 @@ impl AstBuilder<'_> {
             self.error(items[1].span, "test name must be a string literal");
             return None;
         };
+        let name = self.text_literal(name, items[1].span, "a test name")?;
         Some(Test {
-            name: name.clone(),
+            name,
             body: self.body(&items[2..], span)?,
             span,
         })
@@ -759,10 +794,13 @@ impl AstBuilder<'_> {
             SExprKind::List(parts)
                 if parts.len() == 3 && matches!(atom(&parts[0]), Some("Array")) =>
             {
-                let length = self
-                    .required_atom(&parts[2], "array length")?
-                    .parse::<usize>()
-                    .ok();
+                // The same literal grammar as everywhere else: an array of
+                // `0x100` is a length written the way a program that cares
+                // about a power of two writes one.
+                let length = match numeric_atom(self.required_atom(&parts[2], "array length")?) {
+                    NumericAtom::Integer(length) => usize::try_from(length).ok(),
+                    _ => None,
+                };
                 let Some(length) = length else {
                     self.error(parts[2].span, "array length must be a non-negative integer");
                     return None;
@@ -858,20 +896,18 @@ impl AstBuilder<'_> {
                     ExprKind::Bool(true)
                 } else if value == "false" {
                     ExprKind::Bool(false)
-                } else if let Ok(number) = value.parse::<i64>() {
-                    ExprKind::Int(number)
-                } else if value.contains('.') {
-                    match value.parse::<f64>() {
-                        Ok(number) => ExprKind::Float(number),
-                        Err(_) => ExprKind::Var {
+                } else {
+                    match numeric_atom(value) {
+                        NumericAtom::Integer(number) => ExprKind::Int(number),
+                        NumericAtom::Float(number) => ExprKind::Float(number),
+                        NumericAtom::Malformed => {
+                            self.error(form.span, format!("`{value}` is not a number"));
+                            return None;
+                        }
+                        NumericAtom::Name => ExprKind::Var {
                             name: value.clone(),
                             resolved: None,
                         },
-                    }
-                } else {
-                    ExprKind::Var {
-                        name: value.clone(),
-                        resolved: None,
                     }
                 }
             }
@@ -910,6 +946,29 @@ impl AstBuilder<'_> {
                             then_expr: Box::new(self.expr(&items[2])?),
                             else_expr: Box::new(self.expr(&items[3])?),
                         }
+                    }
+                    "and" | "or" => {
+                        let op = if head == "and" {
+                            LogicalOp::And
+                        } else {
+                            LogicalOp::Or
+                        };
+                        // At least two, because `(and x)` is `x` spelled longer
+                        // and `(and)` is a puzzle rather than a program.
+                        // Refusing them now stays compatible with allowing them
+                        // after the freeze; the reverse would not be.
+                        if items.len() < 3 {
+                            self.error(
+                                form.span,
+                                format!("`{head}` expects at least two operands"),
+                            );
+                            return None;
+                        }
+                        let mut operands = Vec::new();
+                        for item in &items[1..] {
+                            operands.push(self.expr(item)?);
+                        }
+                        ExprKind::Logical { op, operands }
                     }
                     "loop" => {
                         if items.len() < 2 {
@@ -1125,15 +1184,39 @@ impl AstBuilder<'_> {
                 path: value.to_owned(),
                 fields: Vec::new(),
             },
-            value => match value.parse::<i64>() {
-                Ok(value) => PatternKind::Int(value),
-                Err(_) => PatternKind::Binding(value.to_owned()),
+            // A malformed number here is the sharpest edge the literal parser
+            // closes: this used to fall through to `Binding`, so `0xZZ` in an
+            // arm bound a variable named `0xZZ`, matched everything, and made
+            // every arm below it unreachable without a word being said.
+            value => match numeric_atom(value) {
+                NumericAtom::Integer(value) => PatternKind::Int(value),
+                NumericAtom::Float(_) | NumericAtom::Malformed => {
+                    self.error(form.span, format!("`{value}` is not a pattern"));
+                    return None;
+                }
+                NumericAtom::Name => PatternKind::Binding(value.to_owned()),
             },
         };
         Some(Pattern {
             kind,
             span: form.span,
         })
+    }
+
+    /// A string literal in a position that is genuinely *text*.
+    ///
+    /// A text literal holds bytes, and most of them are a value the program
+    /// carries. Two are not: a C symbol is a name the linker resolves and a
+    /// test name is something the harness prints, so both have to be readable
+    /// as text and neither may be an arbitrary payload.
+    fn text_literal(&mut self, bytes: &[u8], span: Span, purpose: &str) -> Option<String> {
+        match std::str::from_utf8(bytes) {
+            Ok(text) => Some(text.to_owned()),
+            Err(_) => {
+                self.error(span, format!("{purpose} must be text, not arbitrary bytes"));
+                None
+            }
+        }
     }
 
     fn required_atom<'a>(&mut self, form: &'a SExpr, purpose: &str) -> Option<&'a str> {
@@ -1168,6 +1251,91 @@ fn atom(form: &SExpr) -> Option<&str> {
         SExprKind::Atom(value) => Some(value),
         _ => None,
     }
+}
+
+/// What an atom that might be a number turned out to be.
+pub enum NumericAtom {
+    Integer(i64),
+    Float(f64),
+    /// It began like a number and is not one. Distinguishing this from a name
+    /// is the whole point of the type: `0xZZ` used to become a *variable* in an
+    /// expression and a catch-all *binding* in a pattern, and neither said a
+    /// word about the literal being wrong.
+    Malformed,
+    /// It never looked like a number at all.
+    Name,
+}
+
+/// Reads an integer or float literal, in every base the language has
+/// (`D-106`).
+///
+/// **A hexadecimal or binary literal is a bit pattern; a decimal one is a
+/// number.** So `0xFFFF_FFFF_FFFF_FFFF` is `-1` and `0x8000_0000_0000_0000` is
+/// the smallest `i64`, while the same values in decimal are refused for being
+/// out of range. A mask is not a magnitude, and requiring one to be written as
+/// a negative decimal is how `core:float` ended up taking the sign bit off a
+/// double by adding `2^62` to it twice.
+///
+/// An `_` may appear only *between* digits. `_1` is a name, and `1_` and
+/// `0x_ff` are malformed: the separator groups digits and does not blur the
+/// line between a number and a name.
+pub fn numeric_atom(text: &str) -> NumericAtom {
+    let (negative, digits) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text.strip_prefix('+').unwrap_or(text)),
+    };
+    if !digits.starts_with(|ch: char| ch.is_ascii_digit()) {
+        return NumericAtom::Name;
+    }
+
+    let (radix, body) = match digits.get(..2) {
+        Some("0x" | "0X") => (16, &digits[2..]),
+        Some("0b" | "0B") => (2, &digits[2..]),
+        _ => (10, digits),
+    };
+    let Some(body) = strip_separators(body) else {
+        return NumericAtom::Malformed;
+    };
+
+    if radix == 10 && body.contains(['.', 'e', 'E']) {
+        // A float keeps the range and the spelling Rust gives it; `D-106` adds
+        // separators to integer literals and says nothing about these.
+        return match text.parse::<f64>() {
+            Ok(number) => NumericAtom::Float(number),
+            Err(_) => NumericAtom::Malformed,
+        };
+    }
+
+    let Ok(magnitude) = u64::from_str_radix(&body, radix) else {
+        return NumericAtom::Malformed;
+    };
+    if negative {
+        // `-9223372036854775808` is the smallest `i64` and is written exactly
+        // that way, so the magnitude is allowed to reach `2^63` and no further.
+        match i64::try_from(magnitude).ok().and_then(i64::checked_neg) {
+            Some(value) => NumericAtom::Integer(value),
+            None if magnitude == 1 << 63 => NumericAtom::Integer(i64::MIN),
+            None => NumericAtom::Malformed,
+        }
+    } else if radix == 10 {
+        match i64::try_from(magnitude) {
+            Ok(value) => NumericAtom::Integer(value),
+            Err(_) => NumericAtom::Malformed,
+        }
+    } else {
+        NumericAtom::Integer(magnitude as i64)
+    }
+}
+
+/// Removes the `_`s from a literal, or refuses one that is not between digits.
+fn strip_separators(body: &str) -> Option<String> {
+    if body.is_empty() || body.starts_with('_') || body.ends_with('_') {
+        return None;
+    }
+    if body.contains("__") {
+        return None;
+    }
+    Some(body.replace('_', ""))
 }
 
 #[cfg(test)]

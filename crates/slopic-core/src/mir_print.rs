@@ -178,9 +178,18 @@ fn operator(op: BinaryOp) -> &'static str {
         BinaryOp::Sub => "-",
         BinaryOp::Mul => "*",
         BinaryOp::Div => "/",
+        BinaryOp::Rem => "%",
         BinaryOp::Less => "<",
         BinaryOp::Greater => ">",
+        BinaryOp::LessEqual => "<=",
+        BinaryOp::GreaterEqual => ">=",
         BinaryOp::Equal => "==",
+        BinaryOp::NotEqual => "!=",
+        BinaryOp::BitAnd => "&",
+        BinaryOp::BitOr => "|",
+        BinaryOp::BitXor => "^",
+        BinaryOp::Shl => "<<",
+        BinaryOp::Shr => ">>",
     }
 }
 
@@ -191,7 +200,9 @@ fn render_instruction(instruction: &Instruction) -> String {
             format!("_{dst} = const {};", f64::from_bits(*bits))
         }
         Instruction::ConstBool { dst, value } => format!("_{dst} = const {value};"),
-        Instruction::StringNew { dst, value } => format!("_{dst} = const {value:?};"),
+        Instruction::StringNew { dst, value } => {
+            format!("_{dst} = const \"{}\";", crate::mir::escape_bytes(value))
+        }
         Instruction::Assign { dst, src } => format!("_{dst} = _{src};"),
         Instruction::AddressOf { dst, src } => format!("_{dst} = &_{src};"),
         Instruction::Binary {

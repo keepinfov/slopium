@@ -1,0 +1,14 @@
+; A shift by the width or more traps rather than answering (`D-106`). It has to:
+; x86-64 masks the count to six bits and AArch64 reduces it modulo the width,
+; so without the check the two backends would quietly answer differently and
+; neither would fault.
+
+(take std:io println-i64)
+
+(fn amount () -> i64 64)
+
+(fn main () -> i32
+  (println-i64 (shl 1 (amount)))
+  0)
+
+(test "fixture compiles" true)

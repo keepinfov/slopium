@@ -98,7 +98,7 @@
           false
           (do
             (let bucket (get-ref slots (bucket-of (hash key) capacity)))
-            (> (index-of bucket same key) (- 0 1))))))))
+            (>= (index-of bucket same key) 0)))))))
 
 ; Removing a key that is not there is not an error: the map comes back as it
 ; was, and `contains` is how a caller asks first.
@@ -146,11 +146,11 @@
           (set index (+ index 1)))
         carried))))
 
-; Where in the table a hash belongs. There is no remainder operator, so the
-; remainder is written out, and a hash is free to be negative because nothing
-; says a hash function must not be.
+; Where in the table a hash belongs. `%` truncates toward zero, so a negative
+; hash gives a negative remainder, and a hash is free to be negative because
+; nothing says a hash function must not be.
 (fn bucket-of ((raw i64) (capacity i64)) -> i64
-  (let rest (- raw (* (/ raw capacity) capacity)))
+  (let rest (% raw capacity))
   (if (< rest 0)
     (+ rest capacity)
     rest))
@@ -164,7 +164,7 @@
   -> i64
   (let size (len bucket))
   (let mut at 0)
-  (let mut found (- 0 1))
+  (let mut found -1)
   (while (< at size)
     (if (match (get-ref bucket at)
         ((Entry :key held :value _) (same key held)))

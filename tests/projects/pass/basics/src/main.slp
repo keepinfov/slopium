@@ -26,16 +26,10 @@
   0)
 
 (test "integer and floating arithmetic"
-  (if (= (+ 20 22) 42)
-    (= (+ 1.5 2.5) 4.0)
-    false))
+  (and (= (+ 20 22) 42) (= (+ 1.5 2.5) 4.0)))
 
 (test "recursion and i32 context"
-  (if (= (factorial 6) 720)
-    (= (answer-i32) 42)
-    false))
+  (and (= (factorial 6) 720) (= (answer-i32) 42)))
 
 (test "comparison operators"
-  (if (> 3 2)
-    (< 1 2)
-    false))
+  (and (> 3 2) (< 1 2)))

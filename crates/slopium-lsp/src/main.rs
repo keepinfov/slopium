@@ -376,6 +376,7 @@ impl Server {
             "fn", "test", "struct", "enum", "let", "mut", "set", "if", "match", "do", "true",
             "false", "_", "unit", "bool", "i32", "i64", "f64", "String", "List", "Array", "Slice",
             "Fn", "lambda", "loop", "while", "break", "continue", "export", "take", "try", "as",
+            "and", "or",
         ];
         for token in &document.analysis.syntax.tokens {
             if token.kind == SyntaxKind::Atom && KEYWORDS.contains(&token.text.as_str()) {
@@ -460,7 +461,8 @@ impl Server {
         }
         for keyword in [
             "fn", "test", "struct", "enum", "export", "take", "let", "set", "if", "match", "do",
-            "loop", "while", "break", "continue", "try", "as", "Fn", "lambda", "&", "&mut",
+            "loop", "while", "break", "continue", "try", "as", "Fn", "lambda", "&", "&mut", "and",
+            "or",
         ] {
             if seen.insert(keyword.to_owned()) {
                 items.push(json!({ "label": keyword, "kind": 14 }));
@@ -1127,6 +1129,11 @@ fn scan_expr_occurrences(
             }
             scan_type_occurrences(workspace, modules, summary, file, result, expression.span);
             scan_expr_occurrences(workspace, modules, summary, file, body);
+        }
+        ExprKind::Logical { operands, .. } => {
+            for operand in operands {
+                scan_expr_occurrences(workspace, modules, summary, file, operand);
+            }
         }
         ExprKind::Unit
         | ExprKind::Bool(_)

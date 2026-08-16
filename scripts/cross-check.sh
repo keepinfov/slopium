@@ -165,6 +165,55 @@ cat >"$trap_dir/div-overflow.slp" <<'EOF'
   (println-i64 (divide -9223372036854775808 -1))
   0)
 EOF
+# `%` reaches both checks `/` does, and on AArch64 it reaches them through a
+# different instruction pair — `sdiv` and `msub` rather than `sdiv` alone.
+cat >"$trap_dir/rem-zero.slp" <<'EOF'
+(take std:io println-i64)
+(fn rest ((a i64) (b i64)) -> i64 (% a b))
+(fn main () -> i32
+  (println-i64 (rest 7 0))
+  0)
+EOF
+cat >"$trap_dir/rem-overflow.slp" <<'EOF'
+(take std:io println-i64)
+(fn rest ((a i64) (b i64)) -> i64 (% a b))
+(fn main () -> i32
+  (println-i64 (rest -9223372036854775808 -1))
+  0)
+EOF
+# The shift checks, and the reason they exist: x86-64 masks a count to six bits
+# in hardware and AArch64 reduces it modulo the width, so an unchecked shift by
+# 64 faults on neither machine and answers differently on each. The count comes
+# through a function so the constant folder cannot decide it early.
+cat >"$trap_dir/shift-wide.slp" <<'EOF'
+(take std:io println-i64)
+(fn amount () -> i64 64)
+(fn shift ((value i64) (count i64)) -> i64 (shl value count))
+(fn main () -> i32
+  (println-i64 (shift 1 (amount)))
+  0)
+EOF
+cat >"$trap_dir/shift-narrow.slp" <<'EOF'
+(fn amount () -> i32 32)
+(fn shift ((value i32) (count i32)) -> i32 (shr value count))
+(fn main () -> i32 (shift 1 (amount)))
+EOF
+cat >"$trap_dir/shift-negative.slp" <<'EOF'
+(take std:io println-i64)
+(fn amount () -> i64 -1)
+(fn shift ((value i64) (count i64)) -> i64 (shl value count))
+(fn main () -> i32
+  (println-i64 (shift 1 (amount)))
+  0)
+EOF
+# `(- x)` is `0 - x`, so the smallest integer has no negation and says so.
+cat >"$trap_dir/negate-min.slp" <<'EOF'
+(take std:io println-i64)
+(fn negate ((value i64)) -> i64 (- value))
+(fn main () -> i32
+  (println-i64 (negate -9223372036854775808))
+  0)
+EOF
 
 for profile in dev release; do
   for source in "$trap_dir"/*.slp; do

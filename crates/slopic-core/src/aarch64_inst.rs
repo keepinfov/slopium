@@ -76,10 +76,20 @@ impl Reg {
 pub enum Cond {
     Eq,
     Ne,
+    /// Unsigned higher or same. It reads a shift count against the operand
+    /// width — a negative count is an enormous unsigned number and trips the
+    /// same branch — and it is the "greater or equal" that `fcmp` leaves true
+    /// only when the comparison was ordered.
+    Hs,
+    /// Unsigned lower or same, which is `f64` "less or equal": `fcmp` sets the
+    /// carry on an unordered comparison, so this is false at a NaN.
+    Ls,
     Vs,
     Mi,
     Lt,
     Gt,
+    Ge,
+    Le,
 }
 
 impl Cond {
@@ -87,10 +97,14 @@ impl Cond {
         match self {
             Cond::Eq => 0,
             Cond::Ne => 1,
+            Cond::Hs => 2,
             Cond::Mi => 4,
             Cond::Vs => 6,
+            Cond::Ls => 9,
+            Cond::Ge => 10,
             Cond::Lt => 11,
             Cond::Gt => 12,
+            Cond::Le => 13,
         }
     }
 
@@ -108,10 +122,14 @@ impl fmt::Display for Cond {
         f.write_str(match self {
             Cond::Eq => "eq",
             Cond::Ne => "ne",
+            Cond::Hs => "hs",
+            Cond::Ls => "ls",
             Cond::Vs => "vs",
             Cond::Mi => "mi",
             Cond::Lt => "lt",
             Cond::Gt => "gt",
+            Cond::Ge => "ge",
+            Cond::Le => "le",
         })
     }
 }
@@ -127,6 +145,15 @@ pub enum Arith {
     Smulh,
     Smull,
     Sdiv,
+    And,
+    Orr,
+    Eor,
+    /// The variable-count shifts. AArch64 spells the register-count form with
+    /// a `v` and reduces the count modulo the width in hardware, which is a
+    /// different wrong answer from x86-64's masking — hence the explicit range
+    /// check the backend emits before either (`D-106`).
+    Lslv,
+    Asrv,
 }
 
 impl fmt::Display for Arith {
@@ -140,6 +167,11 @@ impl fmt::Display for Arith {
             Arith::Smulh => "smulh",
             Arith::Smull => "smull",
             Arith::Sdiv => "sdiv",
+            Arith::And => "and",
+            Arith::Orr => "orr",
+            Arith::Eor => "eor",
+            Arith::Lslv => "lsl",
+            Arith::Asrv => "asr",
         })
     }
 }
@@ -183,6 +215,17 @@ pub enum Inst {
         dst: Reg,
         lhs: Reg,
         rhs: Reg,
+    },
+    /// `msub Xd, Xn, Xm, Xa` — `Xa - Xn * Xm`.
+    ///
+    /// AArch64 has no remainder instruction, so `%` is a division followed by
+    /// this. It is the only four-register instruction the backend selects,
+    /// which is why it is its own variant rather than a member of [`Arith`].
+    Msub {
+        dst: Reg,
+        lhs: Reg,
+        rhs: Reg,
+        addend: Reg,
     },
     /// `add Xd, Xn, #imm` — and `sub`, which is the only other one used.
     ArithImm {
@@ -295,6 +338,12 @@ impl fmt::Display for Inst {
                 Ok(())
             }
             Inst::Arith { op, dst, lhs, rhs } => write!(f, "{op} {dst}, {lhs}, {rhs}"),
+            Inst::Msub {
+                dst,
+                lhs,
+                rhs,
+                addend,
+            } => write!(f, "msub {dst}, {lhs}, {rhs}, {addend}"),
             Inst::ArithImm { op, dst, src, imm } => write!(f, "{op} {dst}, {src}, #{imm}"),
             Inst::AddLow { dst, src, label } => write!(f, "add {dst}, {src}, :lo12:{label}"),
             Inst::Adrp { dst, label } => write!(f, "adrp {dst}, {label}"),
@@ -409,7 +458,51 @@ impl Instruction for Inst {
                         let base = if wide { 0x9ac0_0c00 } else { 0x1ac0_0c00 };
                         base | (m << 16) | (n << 5) | d
                     }
+                    // The shifted-register logical form with a shift of zero.
+                    // `Inst::Mov`'s wide encoding below is `orr Xd, xzr, Xm`
+                    // out of this same block, which is a free check that the
+                    // fields sit where this says they do.
+                    Arith::And | Arith::Orr | Arith::Eor => {
+                        let base: u32 = match (op, wide) {
+                            (Arith::And, true) => 0x8a00_0000,
+                            (Arith::And, false) => 0x0a00_0000,
+                            (Arith::Orr, true) => 0xaa00_0000,
+                            (Arith::Orr, false) => 0x2a00_0000,
+                            (Arith::Eor, true) => 0xca00_0000,
+                            _ => 0x4a00_0000,
+                        };
+                        base | (m << 16) | (n << 5) | d
+                    }
+                    Arith::Lslv | Arith::Asrv => {
+                        let base: u32 = match (op, wide) {
+                            (Arith::Lslv, true) => 0x9ac0_2000,
+                            (Arith::Lslv, false) => 0x1ac0_2000,
+                            (Arith::Asrv, true) => 0x9ac0_2800,
+                            _ => 0x1ac0_2800,
+                        };
+                        base | (m << 16) | (n << 5) | d
+                    }
                 }
+            }
+            // `msub Rd, Rn, Rm, Ra` — `Ra - Rn * Rm`, which is what turns a
+            // quotient back into a remainder. The only four-register shape the
+            // backend has, and therefore the encoding in this patch most worth
+            // holding against the platform assembler.
+            Inst::Msub {
+                dst,
+                lhs,
+                rhs,
+                addend,
+            } => {
+                let base = if dst.is_wide() {
+                    0x9b00_8000
+                } else {
+                    0x1b00_8000
+                };
+                base | (rhs.number()? << 16)
+                    | (addend.number()? << 10)
+                    | (lhs.number()? << 5)
+                    | dst.number()?
             }
             Inst::ArithImm { op, dst, src, imm } => {
                 if *imm > 0xfff {
@@ -464,7 +557,12 @@ impl Instruction for Inst {
                 if *imm > 0xfff {
                     return Err(format!("{imm} does not fit in a 12-bit immediate"));
                 }
-                0xb100_0000 | (imm << 10) | (lhs.number()? << 5) | 31
+                let base = if lhs.is_wide() {
+                    0xb100_0000
+                } else {
+                    0x3100_0000
+                };
+                base | (imm << 10) | (lhs.number()? << 5) | 31
             }
             Inst::Cset { dst, cond } => 0x9a9f_07e0 | (cond.inverted() << 12) | dst.number()?,
             Inst::Sxtw { dst, src } => 0x9340_7c00 | (src.number()? << 5) | dst.number()?,
@@ -512,10 +610,16 @@ impl Instruction for Inst {
             Inst::Cbz(register, target) | Inst::Cbnz(register, target) => {
                 let at = code.here();
                 code.relocate(at, FixupKind::CondBr19, target.clone(), 0);
-                let opcode = if matches!(self, Inst::Cbz(..)) {
-                    0xb400_0000
-                } else {
-                    0xb500_0000
+                // The width comes from the register, like every other
+                // instruction here. It used to be wired to the 64-bit form,
+                // which no program noticed until an `i32` remainder put a `w`
+                // register in front of a `cbz` and `object-check.sh` compared
+                // the two encodings.
+                let opcode = match (matches!(self, Inst::Cbz(..)), register.is_wide()) {
+                    (true, true) => 0xb400_0000,
+                    (true, false) => 0x3400_0000,
+                    (false, true) => 0xb500_0000,
+                    (false, false) => 0x3500_0000,
                 };
                 opcode | register.number()?
             }
@@ -734,6 +838,20 @@ mod tests {
                 },
                 0xb10004bf,
             ),
+            // The narrow forms of the two instructions that used to be wired to
+            // the 64-bit encoding whatever register they were handed. An `i32`
+            // remainder is what finally put a `w` register in front of both.
+            (
+                Inst::CmnImm {
+                    lhs: x("w5"),
+                    imm: 1,
+                },
+                0x310004bf,
+            ),
+            (Inst::Cbz(x("w2"), Target::Named(".Lt".into())), 0x34000002),
+            (Inst::Cbz(x("x2"), Target::Named(".Lt".into())), 0xb4000002),
+            (Inst::Cbnz(x("w2"), Target::Named(".Lt".into())), 0x35000002),
+            (Inst::Cbnz(x("x2"), Target::Named(".Lt".into())), 0xb5000002),
             (
                 Inst::Cset {
                     dst: x("x16"),
@@ -813,6 +931,142 @@ mod tests {
                     rhs: x("w2"),
                 },
                 0x1ac20c30,
+            ),
+            (
+                Inst::Arith {
+                    op: Arith::And,
+                    dst: x("x16"),
+                    lhs: x("x1"),
+                    rhs: x("x2"),
+                },
+                0x8a020030,
+            ),
+            (
+                Inst::Arith {
+                    op: Arith::Orr,
+                    dst: x("x16"),
+                    lhs: x("x1"),
+                    rhs: x("x2"),
+                },
+                0xaa020030,
+            ),
+            (
+                Inst::Arith {
+                    op: Arith::Eor,
+                    dst: x("x16"),
+                    lhs: x("x1"),
+                    rhs: x("x2"),
+                },
+                0xca020030,
+            ),
+            (
+                Inst::Arith {
+                    op: Arith::And,
+                    dst: x("w16"),
+                    lhs: x("w1"),
+                    rhs: x("w2"),
+                },
+                0x0a020030,
+            ),
+            (
+                Inst::Arith {
+                    op: Arith::Orr,
+                    dst: x("w16"),
+                    lhs: x("w1"),
+                    rhs: x("w2"),
+                },
+                0x2a020030,
+            ),
+            (
+                Inst::Arith {
+                    op: Arith::Eor,
+                    dst: x("w16"),
+                    lhs: x("w1"),
+                    rhs: x("w2"),
+                },
+                0x4a020030,
+            ),
+            (
+                Inst::Arith {
+                    op: Arith::Lslv,
+                    dst: x("x16"),
+                    lhs: x("x1"),
+                    rhs: x("x2"),
+                },
+                0x9ac22030,
+            ),
+            (
+                Inst::Arith {
+                    op: Arith::Asrv,
+                    dst: x("x16"),
+                    lhs: x("x1"),
+                    rhs: x("x2"),
+                },
+                0x9ac22830,
+            ),
+            (
+                Inst::Arith {
+                    op: Arith::Lslv,
+                    dst: x("w16"),
+                    lhs: x("w1"),
+                    rhs: x("w2"),
+                },
+                0x1ac22030,
+            ),
+            (
+                Inst::Arith {
+                    op: Arith::Asrv,
+                    dst: x("w16"),
+                    lhs: x("w1"),
+                    rhs: x("w2"),
+                },
+                0x1ac22830,
+            ),
+            (
+                Inst::Msub {
+                    dst: x("x16"),
+                    lhs: x("x16"),
+                    rhs: x("x2"),
+                    addend: x("x1"),
+                },
+                0x9b028610,
+            ),
+            (
+                Inst::Msub {
+                    dst: x("w16"),
+                    lhs: x("w16"),
+                    rhs: x("w2"),
+                    addend: x("w1"),
+                },
+                0x1b028610,
+            ),
+            (
+                Inst::Cset {
+                    dst: x("x16"),
+                    cond: Cond::Le,
+                },
+                0x9a9fc7f0,
+            ),
+            (
+                Inst::Cset {
+                    dst: x("x16"),
+                    cond: Cond::Ge,
+                },
+                0x9a9fb7f0,
+            ),
+            (
+                Inst::Cset {
+                    dst: x("x16"),
+                    cond: Cond::Ls,
+                },
+                0x9a9f87f0,
+            ),
+            (
+                Inst::Cset {
+                    dst: x("x16"),
+                    cond: Cond::Hs,
+                },
+                0x9a9f37f0,
             ),
             (
                 Inst::Load {

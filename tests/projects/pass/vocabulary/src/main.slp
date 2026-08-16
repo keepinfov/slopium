@@ -1,0 +1,172 @@
+; Every operator and every literal `D-106` adds, on both widths, so that
+; `object-check.sh` has one program holding every encoding the patch taught the
+; two backends and `cross-check.sh` has one holding every answer they must
+; agree about.
+;
+; The arithmetic is written as identities wherever it can be. A table of
+; expected values is a table that can be transcribed wrongly; `a = (a / b) * b
+; + (a % b)` cannot.
+
+(take std:io println println-i64)
+(take std:string from-i64 equals byte-at)
+(take std:float from-f64)
+
+; `%` truncates toward zero, which is what makes the identity hold in all four
+; sign quadrants rather than only the first.
+(fn division-identity ((a i64) (b i64)) -> bool
+  (= a (+ (* (/ a b) b) (% a b))))
+
+(fn narrow-remainder ((a i32) (b i32)) -> i32
+  (% a b))
+
+(fn shifted ((value i64) (amount i64)) -> i64
+  (shl value amount))
+
+(fn narrow-shifted ((value i32) (amount i32)) -> i32
+  (shl value amount))
+
+; `shr` is arithmetic while every integer is signed, so the sign comes down
+; with the bits.
+(fn arithmetic-shift ((value i64) (amount i64)) -> i64
+  (shr value amount))
+
+(fn masked ((value i64) (mask i64)) -> i64
+  (bit-and value mask))
+
+(fn narrow-masked ((value i32) (mask i32)) -> i32
+  (bit-or (bit-and value mask) (bit-xor value mask)))
+
+(fn complement ((value i64)) -> i64
+  (bit-not value))
+
+(fn negated ((value i64)) -> i64
+  (- value))
+
+(fn negated-float ((value f64)) -> f64
+  (- value))
+
+; Short-circuit is the property, and the way to test it is to put something
+; that would trap on the side that must not run.
+(fn guarded ((value i64)) -> bool
+  (and (!= value 0) (= (/ 100 value) 5)))
+
+(fn either ((value i64)) -> bool
+  (or (= value 0) (= (/ 100 value) 5)))
+
+(fn ordered ((a i64) (b i64)) -> bool
+  (and (<= a b) (>= b a)))
+
+(fn ordered-float ((a f64) (b f64)) -> bool
+  (and (<= a b) (>= b a)))
+
+; A NaN is neither less than, greater than, nor equal to anything, and it *is*
+; unequal to everything — including itself. `(not (= a b))` would have answered
+; the first of those wrongly, which is why `!=` is an operator.
+(fn unequal-float ((a f64) (b f64)) -> bool
+  (!= a b))
+
+(fn not-of ((value bool)) -> bool
+  (not value))
+
+(fn main () -> i32
+  (println-i64 (% 17 5))
+  (println-i64 (% -17 5))
+  (println-i64 (% 17 -5))
+  (println-i64 (% -17 -5))
+  (println-i64 (as i64 (narrow-remainder -17 5)))
+
+  (println-i64 (shifted 1 0))
+  (println-i64 (shifted 1 62))
+  ; The top bit leaves and nothing traps: a shift is a pattern, not a
+  ; magnitude.
+  (println-i64 (shifted 1 63))
+  (println-i64 (arithmetic-shift -1024 4))
+  (println-i64 (arithmetic-shift -1 63))
+  (println-i64 (as i64 (narrow-shifted 1 31)))
+
+  (println-i64 (masked 0xF0F0 0x0FF0))
+  (println-i64 (as i64 (narrow-masked 0xF0F0 0x0FF0)))
+  (println-i64 (complement 0))
+  (println-i64 (negated 42))
+  (println-i64 (bit-or 0b1010 0b0101))
+  (println-i64 1_000_000)
+  (println-i64 0xFFFF_FFFF_FFFF_FFFF)
+
+  (let text (from-i64 (negated 7)))
+  (println (& text))
+
+  ; A payload is bytes: a NUL in the middle, a byte above `\x7f`, and `len`
+  ; counting bytes rather than characters.
+  (let payload "A\x00B\xffC")
+  (println-i64 (len (& payload)))
+  (println (& payload))
+  0)
+
+(test "a remainder agrees with its division in every quadrant"
+  (and (division-identity 17 5)
+    (division-identity -17 5)
+    (division-identity 17 -5)
+    (division-identity -17 -5)))
+
+(test "a bit operation is its own inverse"
+  (and (= 42 (bit-xor (bit-xor 42 0x5A5A) 0x5A5A))
+    (= -1 (bit-not 0))
+    (= 0 (bit-and 0xFF00 0x00FF))
+    (= 0xFFFF (bit-or 0xFF00 0x00FF))))
+
+(test "a shift and a division agree where both are defined"
+  (and (= (shl 1 10) 1024)
+    (= (shr 1024 10) 1)
+    (= (shr -1024 10) -1)
+    (= (arithmetic-shift -1 63) -1)))
+
+(test "and and or stop at the operand that answers"
+  ; `(/ 100 0)` would trap, so reaching it is what a failure looks like.
+  (and (not (guarded 0)) (either 0) (guarded 20) (not (either 4))))
+
+(test "the new comparisons accept what their counterparts do"
+  (and (ordered 1 1)
+    (ordered -1 0)
+    (not (ordered 1 0))
+    (ordered-float 1.5 1.5)
+    (!= 1 2)
+    (not (!= 1 1))
+    (!= true false)))
+
+(test "a NaN is unequal to itself and ordered against nothing"
+  (let nan (/ 0.0 0.0))
+  (and (unequal-float nan nan)
+    (not (= nan nan))
+    (not (<= nan nan))
+    (not (>= nan nan))))
+
+; `0.0 - 0.0` is `+0.0` and `-(0.0)` is `-0.0`, so the constant a negation
+; subtracts from has to be the negative zero. Printing is the only thing that
+; can see the difference, which is what makes this a test and not a comment.
+(test "negating a float keeps the sign of a zero"
+  (let text (from-f64 (negated-float 0.0)))
+  (let expected "-0.0")
+  (equals (& text) (& expected)))
+
+(test "a literal reads the same in every base"
+  (and (= 255 0xFF)
+    (= 255 0b1111_1111)
+    (= 1000000 1_000_000)
+    (= -1 0xFFFF_FFFF_FFFF_FFFF)
+    (= 0x7FFF_FFFF_FFFF_FFFF (bit-not 0x8000_0000_0000_0000))))
+
+(test "a text literal holds any byte"
+  (let payload "\x00\x7f\x80\xff")
+  (and (= 4 (len (& payload)))
+    (= 0 (byte-at (& payload) 0))
+    (= 127 (byte-at (& payload) 1))
+    (= 128 (byte-at (& payload) 2))
+    (= 255 (byte-at (& payload) 3))))
+
+(test "a hexadecimal literal matches as a pattern"
+  (let answer
+    (match 0xFF
+      (0xFF 1)
+      (0b1010 2)
+      (_ 0)))
+  (= answer 1))

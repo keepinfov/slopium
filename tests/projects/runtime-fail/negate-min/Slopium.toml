@@ -1,0 +1,8 @@
+[package]
+name = "negate-min"
+version = "0.2.4"
+source = "src"
+entry = "src/main.slp"
+
+[dependencies]
+std = { toolchain = true }

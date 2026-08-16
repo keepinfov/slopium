@@ -5,13 +5,29 @@ pub enum TokenKind {
     LeftParen,
     RightParen,
     Atom(String),
-    String(String),
+    /// A text literal's *bytes*, not its characters.
+    ///
+    /// A Slopium `String` is a length and a byte buffer (`D-079`), and `\xNN`
+    /// writes one byte for any `NN` (`D-106`). A Rust `String` could not hold
+    /// the result — `\xFF` is not a character — so the value is bytes from here
+    /// all the way to the object file, where it always was.
+    String(Vec<u8>),
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Token {
     pub kind: TokenKind,
     pub span: Span,
+}
+
+/// Appends a source character as the bytes it is written in.
+///
+/// The source is UTF-8, so a character outside ASCII already *is* several
+/// bytes, and a text literal holding one keeps exactly those. That is what
+/// makes `(len "é")` answer 2 both before this patch and after it.
+fn push_char(value: &mut Vec<u8>, ch: char) {
+    let mut buffer = [0; 4];
+    value.extend_from_slice(ch.encode_utf8(&mut buffer).as_bytes());
 }
 
 pub fn lex(file: &str, source: &str) -> CompileResult<Vec<Token>> {
@@ -61,7 +77,7 @@ pub fn lex(file: &str, source: &str) -> CompileResult<Vec<Token>> {
             }
             '"' => {
                 column += 1;
-                let mut value = String::new();
+                let mut value: Vec<u8> = Vec::new();
                 let mut end = start + 1;
                 let mut terminated = false;
                 while let Some((idx, next)) = chars.next() {
@@ -77,11 +93,51 @@ pub fn lex(file: &str, source: &str) -> CompileResult<Vec<Token>> {
                                 end = esc_idx + escaped.len_utf8();
                                 column += 1;
                                 match escaped {
-                                    'n' => value.push('\n'),
-                                    'r' => value.push('\r'),
-                                    't' => value.push('\t'),
-                                    '"' => value.push('"'),
-                                    '\\' => value.push('\\'),
+                                    'n' => value.push(b'\n'),
+                                    'r' => value.push(b'\r'),
+                                    't' => value.push(b'\t'),
+                                    '"' => value.push(b'"'),
+                                    '\\' => value.push(b'\\'),
+                                    // A Slopium string may hold a NUL (`D-079`)
+                                    // and until now had no way to write one.
+                                    '0' => value.push(0),
+                                    // Exactly one byte, `\x00` through `\xFF`.
+                                    // Not a code point: a payload is bytes, and
+                                    // a `\xFF` that arrived as two of them
+                                    // would be a different string than the one
+                                    // written.
+                                    'x' => {
+                                        let mut digits = String::new();
+                                        for _ in 0..2 {
+                                            let Some((_, digit)) = chars.peek().copied() else {
+                                                break;
+                                            };
+                                            if !digit.is_ascii_hexdigit() {
+                                                break;
+                                            }
+                                            chars.next();
+                                            end += digit.len_utf8();
+                                            column += 1;
+                                            digits.push(digit);
+                                        }
+                                        match u8::from_str_radix(&digits, 16) {
+                                            Ok(byte) if digits.len() == 2 => value.push(byte),
+                                            _ => diagnostics.push(
+                                                Diagnostic::error(
+                                                    codes::UNKNOWN_ESCAPE,
+                                                    file,
+                                                    Span {
+                                                        start: esc_idx,
+                                                        end,
+                                                        line,
+                                                        column: column - 1,
+                                                    },
+                                                    "`\\x` takes exactly two hexadecimal digits",
+                                                )
+                                                .with_help("a byte is written `\\x00` to `\\xff`"),
+                                            ),
+                                        }
+                                    }
                                     other => {
                                         diagnostics.push(
                                             Diagnostic::error(
@@ -95,19 +151,19 @@ pub fn lex(file: &str, source: &str) -> CompileResult<Vec<Token>> {
                                                 },
                                                 format!("unknown string escape `\\{other}`"),
                                             )
-                                            .with_help("supported escapes are \\n, \\r, \\t, \\\", and \\\\"),
+                                            .with_help("supported escapes are \\n, \\r, \\t, \\0, \\xNN, \\\", and \\\\"),
                                         );
-                                        value.push(other);
+                                        push_char(&mut value, other);
                                     }
                                 }
                             }
                         }
                         '\n' => {
-                            value.push('\n');
+                            value.push(b'\n');
                             line += 1;
                             column = 1;
                         }
-                        other => value.push(other),
+                        other => push_char(&mut value, other),
                     }
                 }
                 if !terminated {
