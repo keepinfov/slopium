@@ -144,6 +144,11 @@ While you work:
 
   That form takes the paths you name and ignores the rest of the index. Never
   `git add -A`, `git add .`, or `git commit -a`.
+- A pathspec is not a shield, only a filter: `git commit -- <paths>` takes the
+  whole content of the files it names, edits from somebody else included. Read
+  `git diff -- <paths>` first and name only files whose diff is entirely yours.
+  A file two people are changing at once needs a word between them, not a
+  cleverer invocation of git.
 - Read `git diff --cached --name-only` as a command of its own, before you
   commit. A check whose output arrives in the same breath as the commit is not
   a check.
