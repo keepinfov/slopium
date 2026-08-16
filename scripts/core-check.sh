@@ -60,6 +60,10 @@ cat > "$work/program.slp" <<'SLP'
 
 (export answer)
 
+; The allocator a freestanding program supplies, reached as a raw address so
+; that the volatile accesses below have somewhere real to point (`D-067`).
+(extern "sl_rt_alloc" (rt-alloc (size u64)) -> (Ptr u8))
+
 ; An empty map takes its type from a function that says what it returns, which
 ; is the only place one can be written (`D-104`).
 (fn empty-table () -> (Map String i64)
@@ -77,6 +81,20 @@ cat > "$work/program.slp" <<'SLP'
   (if (and (= quotient (as u64 42)) (= shifted (as u64 63)))
     (as i64 quotient)
     0))
+
+; A volatile access is instructions and never a call (`D-067`), which is what
+; makes a raw pointer usable in a program with no operating system under it. A
+; byte, a half and a signed narrow read, because those are the ones that need a
+; `movzx` or an `ldrb` and could plausibly have reached for a helper.
+(fn pointer-answer () -> i64
+  (unsafe
+    (let cell (rt-alloc 8))
+    (volatile-write cell 0x2A)
+    (volatile-write (as (Ptr u16) (ptr-offset cell 2)) 0xFFFF)
+    (if (and (= (volatile-read cell) 0x2A)
+        (= (volatile-read (as (Ptr i8) (ptr-offset cell 2))) -1))
+      (as i64 (volatile-read cell))
+      0)))
 
 (fn answer () -> i64
   (let mut values (list 3 4))
@@ -101,7 +119,7 @@ cat > "$work/program.slp" <<'SLP'
                 (let key "two")
                 (match (lookup (& table) (& key))
                   ((Option:Some held)
-                    (if (and (= held 2) (= (narrow-answer) 42))
+                    (if (and (= held 2) (= (narrow-answer) 42) (= (pointer-answer) 42))
                       (do
                         ; And unsigned text, which is the one thing `D-107`
                         ; added to the library.

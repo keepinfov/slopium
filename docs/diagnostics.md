@@ -14,7 +14,8 @@ Code families are stable:
 - `SL00xx`: lexer and S-expression parser;
 - `SL01xx`: declaration and expression shape;
 - `SL02xx`: name resolution and types;
-- `SL03xx`: ownership and borrowing;
+- `SL03xx`: ownership and borrowing, and `SL0301` for a raw-pointer operation
+  written outside an `unsafe` block;
 - `SL04xx`: pattern matching and entry/test rules;
 - `SL05xx`: target and ABI backend;
 - `SL06xx`: compiler I/O and external toolchain;

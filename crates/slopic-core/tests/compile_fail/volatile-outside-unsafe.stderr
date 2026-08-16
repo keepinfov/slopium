@@ -1,0 +1,5 @@
+volatile-outside-unsafe.slp:2:3: error[SL0301]: `volatile-write` outside an `unsafe` block
+  |
+ 2 |   (volatile-write port 1))
+  |   ^^^^^^^^^^^^^^^^^^^^^^^
+  = help: write it inside `(unsafe ...)`: the compiler cannot prove a raw address points at anything, and the word is where a reader is told so

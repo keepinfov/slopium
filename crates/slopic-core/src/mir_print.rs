@@ -248,6 +248,12 @@ fn render_instruction(instruction: &Instruction) -> String {
             format!("_{dst} = &payload(_{base}, {index});")
         }
         Instruction::Free { local } => format!("free(_{local});"),
+        Instruction::VolatileLoad { dst, addr, ty } => {
+            format!("_{dst} = volatile *({ty} *)_{addr};")
+        }
+        Instruction::VolatileStore { addr, src, ty } => {
+            format!("volatile *({ty} *)_{addr} = _{src};")
+        }
     }
 }
 

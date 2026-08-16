@@ -1,0 +1,4 @@
+(fn poke ((port (Ptr u8))) -> unit
+  (unsafe (volatile-write port (as i64 1))))
+
+(fn main () -> i32 0)

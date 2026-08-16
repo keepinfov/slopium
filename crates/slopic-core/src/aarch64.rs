@@ -20,10 +20,10 @@ use crate::cfg::Cfg;
 use crate::codegen::{align_to, regime, Backend, CodegenOptions, TargetSpec, AARCH64_LINUX_GNU};
 use crate::diagnostic::{codes, CompileResult, Diagnostic, Span};
 use crate::lowering::{
-    address_taken, call_symbol, call_words, clone_function, drop_function, enum_clone_size,
-    enum_clone_symbol, enum_drop_symbol, enum_size, extern_declaration, function_symbol,
-    is_pointer_like, struct_clone_symbol, struct_drop_symbol, struct_size, trap_usage, Argument,
-    ExternClass, ExternWord, Step, Tail, TrapUsage,
+    access_size, address_taken, call_symbol, call_words, clone_function, drop_function,
+    enum_clone_size, enum_clone_symbol, enum_drop_symbol, enum_size, extern_declaration,
+    function_symbol, is_pointer_like, struct_clone_symbol, struct_drop_symbol, struct_size,
+    trap_usage, AccessSize, Argument, ExternClass, ExternWord, Step, Tail, TrapUsage,
 };
 use crate::mir::{BasicBlock, BinaryOp, Instruction, LocalId, MirFunction, MirModule, Terminator};
 use crate::regalloc::{allocate, Allocation, Location};
@@ -430,6 +430,7 @@ impl<'a> Generator<'a> {
                 dst: target,
                 base: SP,
                 offset: Some(offset as u32),
+                size: AccessSize::Double,
             });
         } else {
             self.address_of_slot(target, offset);
@@ -437,6 +438,7 @@ impl<'a> Generator<'a> {
                 dst: target,
                 base: target,
                 offset: None,
+                size: AccessSize::Double,
             });
         }
     }
@@ -447,6 +449,7 @@ impl<'a> Generator<'a> {
                 src: source,
                 base: SP,
                 offset: Some(offset as u32),
+                size: AccessSize::Double,
             });
         } else {
             // `x17` is scratch and no store's source, so borrowing it here
@@ -456,6 +459,7 @@ impl<'a> Generator<'a> {
                 src: source,
                 base: X17,
                 offset: None,
+                size: AccessSize::Double,
             });
         }
     }
@@ -638,6 +642,7 @@ impl<'a> Generator<'a> {
                         dst: X16,
                         base: X29,
                         offset: Some((16 + stack * 8) as u32),
+                        size: AccessSize::Double,
                     });
                     self.write(*local, X16);
                     stack += 1;
@@ -662,6 +667,7 @@ impl<'a> Generator<'a> {
                         dst: X16,
                         base: X29,
                         offset: Some((16 + stack * 8) as u32),
+                        size: AccessSize::Double,
                     });
                     stack += 1;
                 } else {
@@ -843,6 +849,7 @@ impl<'a> Generator<'a> {
                         src: source,
                         base: X0,
                         offset: Some((index * 8) as u32),
+                        size: AccessSize::Double,
                     });
                 }
                 self.write(*dst, RESULT);
@@ -853,6 +860,7 @@ impl<'a> Generator<'a> {
                     dst: X16,
                     base,
                     offset: Some((index * 8) as u32),
+                    size: AccessSize::Double,
                 });
                 self.write(*dst, X16);
             }
@@ -867,6 +875,7 @@ impl<'a> Generator<'a> {
                     src: X16,
                     base: X0,
                     offset: None,
+                    size: AccessSize::Double,
                 });
                 for (index, field) in fields.iter().enumerate() {
                     let source = self.read(*field, 1);
@@ -874,6 +883,7 @@ impl<'a> Generator<'a> {
                         src: source,
                         base: X0,
                         offset: Some(((index + 1) * 8) as u32),
+                        size: AccessSize::Double,
                     });
                 }
                 self.write(*dst, RESULT);
@@ -884,6 +894,7 @@ impl<'a> Generator<'a> {
                     dst: X16,
                     base,
                     offset: None,
+                    size: AccessSize::Double,
                 });
                 self.write(*dst, X16);
             }
@@ -893,6 +904,7 @@ impl<'a> Generator<'a> {
                     dst: X16,
                     base,
                     offset: Some(((index + 1) * 8) as u32),
+                    size: AccessSize::Double,
                 });
                 self.write(*dst, X16);
             }
@@ -911,8 +923,44 @@ impl<'a> Generator<'a> {
                     dst: X16,
                     base,
                     offset: None,
+                    size: AccessSize::Double,
                 });
                 self.write(*dst, X16);
+            }
+            Instruction::VolatileLoad { dst, addr, ty } => {
+                let size = access_size(ty).expect("a volatile access has a machine width");
+                let base = self.read(*addr, 1);
+                // The narrow loads all write a `W`, which zeroes the upper half
+                // — so an unsigned type is canonical the moment it lands and
+                // only a signed one needs anything after.
+                self.inst(Inst::Load {
+                    dst: if size.is_wide() { X16 } else { W16 },
+                    base,
+                    offset: None,
+                    size,
+                });
+                self.canonicalize_loaded(ty);
+                self.write(*dst, X16);
+            }
+            Instruction::VolatileStore { addr, src, ty } => {
+                let size = access_size(ty).expect("a volatile access has a machine width");
+                let value = self.read(*src, 1);
+                let base = self.read(*addr, 2);
+                if value != X16 {
+                    self.inst(Inst::Mov {
+                        dst: X16,
+                        src: value,
+                    });
+                }
+                // The value is canonical by invariant, so `strb` and `strh`
+                // truncate and check nothing: truncating is what storing
+                // through a narrow pointer means.
+                self.inst(Inst::Store {
+                    src: if size.is_wide() { X16 } else { W16 },
+                    base,
+                    offset: None,
+                    size,
+                });
             }
             Instruction::Free { local } => {
                 let source = self.read(*local, 1);
@@ -1090,6 +1138,33 @@ impl<'a> Generator<'a> {
         };
         let dst = if kind.signed { X16 } else { W16 };
         self.inst(Inst::Extend { op, dst, src: W16 });
+    }
+
+    /// Puts a freshly loaded value in `x16` into the shape the rest of the
+    /// compiler assumes it has (`D-067`).
+    ///
+    /// The twin of the x86-64 helper of the same name, and the same two rules:
+    /// only a *signed* narrow type needs extending, because the load already
+    /// zero-extended; and a `bool` is narrowed to 0 or 1, because a device byte
+    /// of `0x02` would read as true through `cbnz` and false through `=`, and
+    /// two answers to one question is a miscompile.
+    fn canonicalize_loaded(&mut self, ty: &Type) {
+        if let Some(kind) = ty.int_kind() {
+            if kind.signed && !kind.is_full_width() {
+                self.canonicalize(kind);
+            }
+            return;
+        }
+        if ty == &Type::Bool {
+            self.inst(Inst::Cmp {
+                lhs: X16,
+                rhs: Reg("xzr"),
+            });
+            self.inst(Inst::Cset {
+                dst: X16,
+                cond: Cond::Ne,
+            });
+        }
     }
 
     /// Canonicalises `x16` and traps if that changed it.
@@ -1361,6 +1436,7 @@ impl<'a> Generator<'a> {
                     dst: RESULT,
                     base: RESULT,
                     offset: None,
+                    size: AccessSize::Double,
                 }),
                 Step::WrapOption { some_tag, none_tag } => {
                     self.inst(Inst::Cbz(RESULT, Target::Forward(1)));
@@ -1371,12 +1447,14 @@ impl<'a> Generator<'a> {
                         src: X16,
                         base: X0,
                         offset: None,
+                        size: AccessSize::Double,
                     });
                     let payload = self.read(dst, 1);
                     self.inst(Inst::Store {
                         src: payload,
                         base: X0,
                         offset: Some(8),
+                        size: AccessSize::Double,
                     });
                     self.inst(Inst::B(Target::Forward(2)));
                     self.asm.push(Item::Numeric(1));
@@ -1387,6 +1465,7 @@ impl<'a> Generator<'a> {
                         src: X16,
                         base: X0,
                         offset: None,
+                        size: AccessSize::Double,
                     });
                     self.asm.push(Item::Numeric(2));
                 }
@@ -1452,6 +1531,7 @@ impl<'a> Generator<'a> {
                                 dst: register,
                                 base: source,
                                 offset: Some(offset as u32),
+                                size: AccessSize::Double,
                             });
                         }
                     }
@@ -1463,6 +1543,7 @@ impl<'a> Generator<'a> {
                         src: source,
                         base: SP,
                         offset: Some((stack * 8) as u32),
+                        size: AccessSize::Double,
                     });
                     stack += 1;
                 }
@@ -1497,6 +1578,7 @@ impl<'a> Generator<'a> {
                     dst: wide,
                     base: source,
                     offset: Some(offset as u32),
+                    size: AccessSize::Double,
                 });
                 wide
             }
@@ -1637,6 +1719,7 @@ impl<'a> Generator<'a> {
                 dst: X0,
                 base: X16,
                 offset: Some((index * 8) as u32),
+                size: AccessSize::Double,
             });
             if let Some(clone) = clone_function(self.module, ty) {
                 self.inst(Inst::Bl(clone));
@@ -1646,6 +1729,7 @@ impl<'a> Generator<'a> {
                 src: X0,
                 base: X16,
                 offset: Some((index * 8) as u32),
+                size: AccessSize::Double,
             });
         }
         self.load(X0, 8);
@@ -1665,11 +1749,13 @@ impl<'a> Generator<'a> {
             dst: X17,
             base: X16,
             offset: None,
+            size: AccessSize::Double,
         });
         self.inst(Inst::Store {
             src: X17,
             base: X0,
             offset: None,
+            size: AccessSize::Double,
         });
         for variant in variants {
             self.materialize(X16, variant.tag as u64);
@@ -1691,6 +1777,7 @@ impl<'a> Generator<'a> {
                     dst: X0,
                     base: X16,
                     offset: Some(((index + 1) * 8) as u32),
+                    size: AccessSize::Double,
                 });
                 if let Some(clone) = clone_function(self.module, ty) {
                     self.inst(Inst::Bl(clone));
@@ -1700,6 +1787,7 @@ impl<'a> Generator<'a> {
                     src: X0,
                     base: X16,
                     offset: Some(((index + 1) * 8) as u32),
+                    size: AccessSize::Double,
                 });
             }
             self.inst(Inst::B(Target::Named(format!(".L{symbol}_clone_return"))));
@@ -1724,6 +1812,7 @@ impl<'a> Generator<'a> {
                     dst: X0,
                     base: X16,
                     offset: Some((index * 8) as u32),
+                    size: AccessSize::Double,
                 });
                 self.inst(Inst::Bl(drop));
             }
@@ -1743,6 +1832,7 @@ impl<'a> Generator<'a> {
             dst: X17,
             base: X0,
             offset: None,
+            size: AccessSize::Double,
         });
         for variant in variants {
             self.materialize(X16, variant.tag as u64);
@@ -1763,6 +1853,7 @@ impl<'a> Generator<'a> {
                         dst: X0,
                         base: X16,
                         offset: Some(((index + 1) * 8) as u32),
+                        size: AccessSize::Double,
                     });
                     self.inst(Inst::Bl(drop));
                 }
@@ -1808,6 +1899,10 @@ fn calls_something(module: &MirModule, function: &MirFunction) -> bool {
             | Instruction::Load { .. }
             | Instruction::EnumTag { .. }
             | Instruction::EnumFieldLoad { .. }
+            // A volatile access reaches memory and never a function, so a leaf
+            // holding one is still a leaf.
+            | Instruction::VolatileLoad { .. }
+            | Instruction::VolatileStore { .. }
             | Instruction::EnumFieldAddr { .. } => false,
         })
 }

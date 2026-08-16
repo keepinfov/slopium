@@ -84,6 +84,9 @@ local static_items = {
   { label = "bit-not", kind = kinds.Function, detail = "bitwise complement" },
   { label = "shl", kind = kinds.Function, detail = "left shift" },
   { label = "shr", kind = kinds.Function, detail = "right shift, arithmetic" },
+  { label = "volatile-read", kind = kinds.Function, detail = "volatile-read((Ptr T)) -> T" },
+  { label = "volatile-write", kind = kinds.Function, detail = "volatile-write((Ptr T) T) -> unit" },
+  { label = "ptr-offset", kind = kinds.Function, detail = "ptr-offset((Ptr T) u64) -> (Ptr T)" },
 }
 
 local function add(items, seen, label, kind, detail)

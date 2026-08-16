@@ -64,6 +64,13 @@ programs=(
   # ever been emitted, and the canonicalising tail that follows every narrow
   # operation is a shape neither backend had assembled at all.
   "tests/projects/pass/integer-axis/src/main.slp"
+  # The narrow memory a raw pointer reaches through (`D-067`), which is the
+  # only sub-word load or store this compiler emits: `movzx` from a byte and a
+  # half and the `0x66`-prefixed store on x86-64, and `ldrb`, `ldrh`, `strb`,
+  # `strh` and the four-byte pair on AArch64. Ten encodings neither backend
+  # had, and the ones most worth holding against `as` — a width that is one
+  # size wrong does not fault, it writes over the register next door.
+  "tests/projects/pass/raw-pointers/src/main.slp"
   "examples/fibonacci.slp"
   "examples/lists.slp"
   "examples/match.slp"

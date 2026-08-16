@@ -595,6 +595,18 @@ pub const BUILTINS: &[(&str, &str)] = &[
         "left shift; traps on an amount the type has no room for",
     ),
     ("shr", "right shift, arithmetic on a signed type"),
+    (
+        "volatile-read",
+        "volatile-read((Ptr T)) -> T; inside `unsafe`",
+    ),
+    (
+        "volatile-write",
+        "volatile-write((Ptr T) T) -> unit; inside `unsafe`",
+    ),
+    (
+        "ptr-offset",
+        "ptr-offset((Ptr T) u64) -> (Ptr T), scaled by T; inside `unsafe`",
+    ),
 ];
 
 #[cfg(test)]

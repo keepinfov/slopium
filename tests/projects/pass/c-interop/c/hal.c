@@ -47,3 +47,15 @@ int64_t hal_slice_sum(const int64_t *values, int64_t len) {
 
 SlString *hal_greeting(void) { return sl_rt_string_new("hello from C", 12); }
 
+/* A raw pointer is C's `T *`, which is the one spelling in this vocabulary
+ * that needs no agreeing about (`D-067`). It crosses in both directions: out
+ * as the address of a buffer, and back in as something to read. */
+static uint8_t HAL_BUFFER[8];
+
+uint8_t *hal_buffer(void) {
+    memset(HAL_BUFFER, 0, sizeof HAL_BUFFER);
+    return HAL_BUFFER;
+}
+
+int64_t hal_peek(const uint8_t *at) { return (int64_t)*at; }
+

@@ -28,6 +28,7 @@ impl fmt::Display for Reg {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Width {
     Byte,
+    Word,
     Dword,
     Qword,
     Xmm,
@@ -41,7 +42,17 @@ const DWORD: [&str; 16] = [
     "eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi", "r8d", "r9d", "r10d", "r11d", "r12d",
     "r13d", "r14d", "r15d",
 ];
+/// Four names, and deliberately no more (`D-113`). Numbers 0 to 3 mean
+/// `al`/`cl`/`dl`/`bl` whether or not a REX prefix is present; it is 4 to 7
+/// that change meaning between `ah`–`bh` and `spl`–`dil`. Keeping the table at
+/// four is what leaves that question closed, and the only byte store this
+/// compiler emits goes through `cl`.
 const BYTE: [&str; 4] = ["al", "cl", "dl", "bl"];
+/// The 16-bit names, needed because `mov WORD PTR [rax], cx` cannot be spelled
+/// without one and `object-check.sh` compares this text against the platform
+/// assembler. Unlike the byte registers these carry no REX aliasing question at
+/// all, so the table costs nothing but the lookup.
+const WORD: [&str; 4] = ["ax", "cx", "dx", "bx"];
 
 impl Reg {
     pub fn number(self) -> Result<u8, String> {
@@ -62,6 +73,9 @@ impl Reg {
         if let Some(index) = BYTE.iter().position(|name| *name == self.0) {
             return Ok((index as u8, Width::Byte));
         }
+        if let Some(index) = WORD.iter().position(|name| *name == self.0) {
+            return Ok((index as u8, Width::Word));
+        }
         if let Some(digits) = self.0.strip_prefix("xmm") {
             if let Ok(number) = digits.parse::<u8>() {
                 if number < 16 {
@@ -78,6 +92,12 @@ impl Reg {
 pub enum Size {
     Qword,
     Dword,
+    /// The two narrow sizes exist for raw pointers and nothing else
+    /// (`D-067`). Every other memory this compiler touches — a frame slot, a
+    /// struct field, an enum payload — is a machine word, because a device
+    /// register is the only thing whose width the program did not choose.
+    Word,
+    Byte,
 }
 
 impl fmt::Display for Size {
@@ -85,6 +105,8 @@ impl fmt::Display for Size {
         f.write_str(match self {
             Size::Qword => "QWORD PTR",
             Size::Dword => "DWORD PTR",
+            Size::Word => "WORD PTR",
+            Size::Byte => "BYTE PTR",
         })
     }
 }
@@ -144,9 +166,16 @@ impl Operand {
     fn width(&self) -> Result<Width, String> {
         match self {
             Operand::Reg(register) => register.width(),
+            // Spelled out rather than defaulted: a size that fell through to
+            // `Qword` here would encode a narrow access as a wide one, which
+            // does not fault — it reads or writes the bytes next to the one
+            // that was asked for. `None` is `lea`, whose operand is an address
+            // and whose width is the register's.
             Operand::Mem(memory) => Ok(match memory.size {
+                Some(Size::Byte) => Width::Byte,
+                Some(Size::Word) => Width::Word,
                 Some(Size::Dword) => Width::Dword,
-                _ => Width::Qword,
+                Some(Size::Qword) | None => Width::Qword,
             }),
             _ => Ok(Width::Qword),
         }
@@ -362,6 +391,14 @@ pub enum Inst {
     Test(Operand, Operand),
     /// `movzx r64, r8`.
     Movzx(Reg, Reg),
+    /// `movzx r64, BYTE PTR [m]` and `movzx r64, WORD PTR [m]` — the two
+    /// narrow zero-extending loads (`D-067`).
+    ///
+    /// Its own variant rather than a widened `Movzx`, because the register
+    /// form's source is always a byte register and this one's width comes from
+    /// the memory operand. The four- and eight-byte loads need nothing here: a
+    /// `mov` into a 32-bit register already zeroes the upper half.
+    MovzxMem(Reg, Mem),
     /// `movsxd r64, r32`.
     Movsxd(Reg, Reg),
     /// `movq` between a general register and an SSE register, either way.
@@ -414,6 +451,7 @@ impl fmt::Display for Inst {
             Inst::Imul(dst, src) => write!(f, "imul {dst}, {src}"),
             Inst::Test(lhs, rhs) => write!(f, "test {lhs}, {rhs}"),
             Inst::Movzx(dst, src) => write!(f, "movzx {dst}, {src}"),
+            Inst::MovzxMem(dst, src) => write!(f, "movzx {dst}, {src}"),
             Inst::Movsxd(dst, src) => write!(f, "movsxd {dst}, {src}"),
             Inst::Movq(dst, src) => write!(f, "movq {dst}, {src}"),
             Inst::Push(operand) => write!(f, "push {operand}"),
@@ -438,6 +476,32 @@ impl fmt::Display for Inst {
             Inst::Sse(op, dst, src) => write!(f, "{op} {dst}, {src}"),
         }
     }
+}
+
+/// The width a register-and-memory `mov` acts at, refusing a disagreement.
+///
+/// The register and the `PTR` size are written independently, so they can
+/// disagree, and a disagreement is the one mistake this feature can make that
+/// does not fault: the wrong width writes over the register next to the one
+/// that was asked for. It fails to encode instead, which is the same doctrine
+/// `Reg::number` follows for a name that is not a register.
+///
+/// `None` is `lea` and the frame slots written before sizes were tracked; both
+/// mean the register decides.
+fn access_width(register: Width, memory: &Mem) -> Result<Width, String> {
+    let declared = match memory.size {
+        Some(Size::Byte) => Width::Byte,
+        Some(Size::Word) => Width::Word,
+        Some(Size::Dword) => Width::Dword,
+        Some(Size::Qword) => Width::Qword,
+        None => return Ok(register),
+    };
+    if declared != register {
+        return Err(format!(
+            "a `{declared:?}` memory operand does not match a `{register:?}` register"
+        ));
+    }
+    Ok(declared)
 }
 
 /// The state of one instruction's encoding.
@@ -594,17 +658,31 @@ impl Instruction for Inst {
                     encoding.registers(s, d);
                 }
                 (Operand::Reg(dst), Operand::Mem(memory)) => {
-                    if dst.width()? == Width::Qword {
-                        encoding.wide();
+                    let width = access_width(dst.width()?, memory)?;
+                    match width {
+                        Width::Qword => encoding.wide(),
+                        Width::Word => encoding.prefix = Some(0x66),
+                        _ => {}
                     }
-                    encoding.opcode.push(0x8b);
+                    // `8a` is the byte form; every other width reads with `8b`.
+                    // A 32-bit read zeroes the upper half of the destination,
+                    // which is what makes `mov r32, DWORD PTR [r]` the
+                    // zero-extending four-byte load with no extra instruction.
+                    encoding
+                        .opcode
+                        .push(if width == Width::Byte { 0x8a } else { 0x8b });
                     encoding.memory(dst.number()?, memory)?;
                 }
                 (Operand::Mem(memory), Operand::Reg(src)) => {
-                    if src.width()? == Width::Qword {
-                        encoding.wide();
+                    let width = access_width(src.width()?, memory)?;
+                    match width {
+                        Width::Qword => encoding.wide(),
+                        Width::Word => encoding.prefix = Some(0x66),
+                        _ => {}
                     }
-                    encoding.opcode.push(0x89);
+                    encoding
+                        .opcode
+                        .push(if width == Width::Byte { 0x88 } else { 0x89 });
                     encoding.memory(src.number()?, memory)?;
                 }
                 (Operand::Reg(dst), Operand::Bits(bits)) => {
@@ -647,8 +725,19 @@ impl Instruction for Inst {
                     }
                 }
                 (Operand::Mem(memory), Operand::Imm(value)) => {
-                    if memory.size != Some(Size::Dword) {
-                        encoding.wide();
+                    // Spelled out because it used to be `!= Some(Dword)`, which
+                    // was correct only while `Dword` and `Qword` were the two
+                    // sizes there were: the moment `Byte` existed, a byte store
+                    // took REX.W and wrote eight bytes. Nothing emitted one yet,
+                    // so this was a trap rather than a bug — and the narrow
+                    // immediate forms are refused rather than guessed, because
+                    // nothing needs them and `0xc7` is not their opcode.
+                    match memory.size {
+                        Some(Size::Qword) | None => encoding.wide(),
+                        Some(Size::Dword) => {}
+                        Some(size) => {
+                            return Err(format!("no `mov {size}, imm` is emitted"));
+                        }
                     }
                     let narrow = i32::try_from(*value)
                         .map_err(|_| format!("{value} does not fit in a stored immediate"))?;
@@ -731,6 +820,21 @@ impl Instruction for Inst {
                 }
                 encoding.opcode.extend_from_slice(&[0x0f, 0xb6]);
                 encoding.registers(dst.number()?, src.number()?);
+            }
+            Inst::MovzxMem(dst, src) => {
+                if dst.width()? == Width::Qword {
+                    encoding.wide();
+                }
+                let opcode = match src.size {
+                    Some(Size::Byte) => 0xb6,
+                    Some(Size::Word) => 0xb7,
+                    // Refused rather than guessed: `movzx` from four or eight
+                    // bytes is not an instruction, and the caller that wanted
+                    // one wanted a plain `mov`.
+                    other => return Err(format!("`movzx` cannot read {other:?}")),
+                };
+                encoding.opcode.extend_from_slice(&[0x0f, opcode]);
+                encoding.memory(dst.number()?, src)?;
             }
             Inst::Movsxd(dst, src) => {
                 encoding.wide();
@@ -1006,6 +1110,91 @@ mod tests {
             (Inst::Imul(r("r12"), reg("r13")), &[0x4d, 0x0f, 0xaf, 0xe5]),
             (Inst::Movzx(r("rax"), r("al")), &[0x48, 0x0f, 0xb6, 0xc0]),
             (Inst::Movzx(r("r12"), r("al")), &[0x4c, 0x0f, 0xb6, 0xe0]),
+            // The narrow memory a raw pointer reaches through (`D-067`). The
+            // byte store takes no REX at all, which is the whole reason the
+            // byte-register table can stay at four names: number 1 is `cl`
+            // with the prefix and without it.
+            (
+                Inst::MovzxMem(
+                    r("rax"),
+                    Mem {
+                        size: Some(Size::Byte),
+                        base: r("rcx"),
+                        disp: None,
+                    },
+                ),
+                &[0x48, 0x0f, 0xb6, 0x01],
+            ),
+            (
+                Inst::MovzxMem(
+                    r("rax"),
+                    Mem {
+                        size: Some(Size::Word),
+                        base: r("rcx"),
+                        disp: None,
+                    },
+                ),
+                &[0x48, 0x0f, 0xb7, 0x01],
+            ),
+            (
+                Inst::Mov(
+                    Operand::Mem(Mem {
+                        size: Some(Size::Byte),
+                        base: r("rax"),
+                        disp: None,
+                    }),
+                    reg("cl"),
+                ),
+                &[0x88, 0x08],
+            ),
+            // A REX.B for the base leaves the register field alone, so this is
+            // still `cl` and never `spl`.
+            (
+                Inst::Mov(
+                    Operand::Mem(Mem {
+                        size: Some(Size::Byte),
+                        base: r("r10"),
+                        disp: None,
+                    }),
+                    reg("cl"),
+                ),
+                &[0x41, 0x88, 0x0a],
+            ),
+            (
+                Inst::Mov(
+                    Operand::Mem(Mem {
+                        size: Some(Size::Word),
+                        base: r("rax"),
+                        disp: None,
+                    }),
+                    reg("cx"),
+                ),
+                &[0x66, 0x89, 0x08],
+            ),
+            (
+                Inst::Mov(
+                    Operand::Mem(Mem {
+                        size: Some(Size::Dword),
+                        base: r("rax"),
+                        disp: None,
+                    }),
+                    reg("ecx"),
+                ),
+                &[0x89, 0x08],
+            ),
+            // The four-byte load needs no `movzx`: writing a 32-bit register
+            // already clears the upper half.
+            (
+                Inst::Mov(
+                    reg("eax"),
+                    Operand::Mem(Mem {
+                        size: Some(Size::Dword),
+                        base: r("rcx"),
+                        disp: None,
+                    }),
+                ),
+                &[0x8b, 0x01],
+            ),
             (Inst::Movsxd(r("rax"), r("eax")), &[0x48, 0x63, 0xc0]),
             (
                 Inst::Movq(r("xmm0"), r("rax")),

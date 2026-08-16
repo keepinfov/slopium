@@ -44,6 +44,11 @@ pub fn optimize(file: &str, module: &mut MirModule) -> CompileResult<()> {
     inline::run(module);
     check_after(file, module, "inlining")?;
 
+    // The baseline is taken *after* inlining, deliberately: inlining a callee
+    // at two call sites duplicates the volatile accesses in it, and both calls
+    // really do reach the device (`D-114`).
+    let mut volatile = volatile_counts(module);
+
     for round in 0..MAX_ROUNDS {
         let mut changed = false;
 
@@ -51,16 +56,23 @@ pub fn optimize(file: &str, module: &mut MirModule) -> CompileResult<()> {
             changed |= propagate_constants(function);
         }
         check_after(file, module, "constant propagation")?;
+        check_volatile(&volatile, module, "constant propagation", Bound::Exact);
 
         for function in functions_mut(module) {
             changed |= simplify_cfg(function);
         }
         check_after(file, module, "CFG simplification")?;
+        // Only this pass may legitimately lose one: `remove_unreachable_blocks`
+        // deletes a block that a folded branch made unreachable, and a volatile
+        // access in it was never going to happen.
+        check_volatile(&volatile, module, "CFG simplification", Bound::AtMost);
+        volatile = volatile_counts(module);
 
         for function in functions_mut(module) {
             changed |= eliminate_dead_code(function);
         }
         check_after(file, module, "dead code elimination")?;
+        check_volatile(&volatile, module, "dead code elimination", Bound::Exact);
 
         if !changed {
             break;
@@ -75,6 +87,48 @@ pub fn optimize(file: &str, module: &mut MirModule) -> CompileResult<()> {
 
 fn check_after(file: &str, module: &MirModule, pass: &str) -> CompileResult<()> {
     verify::check(file, module, pass)
+}
+
+/// What a pass is allowed to do to a function's volatile count.
+#[derive(Clone, Copy)]
+enum Bound {
+    /// It may not change it at all.
+    Exact,
+    /// It may lose one only by deleting the block it was in.
+    AtMost,
+}
+
+/// Enforces that a pass neither invented nor lost a volatile access (`D-114`).
+///
+/// `D-067` asks for this in `verify.rs`, and it cannot go there: `verify.rs`
+/// is handed one module, and "nothing was eliminated" is a statement about two.
+/// So it lives beside the pass whose work it is checking, which is the only
+/// place that has both numbers.
+///
+/// A `debug_assert!` rather than a diagnostic, matching how the rest of this
+/// file states its invariants: a failure here is a compiler bug and not a
+/// program's, and `verify::check` is already the channel for the shape errors a
+/// release build still reports.
+fn check_volatile(before: &[usize], module: &MirModule, pass: &str, bound: Bound) {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let after = volatile_counts(module);
+    debug_assert_eq!(
+        before.len(),
+        after.len(),
+        "{pass} changed how many functions there are"
+    );
+    for (index, (before, after)) in before.iter().zip(&after).enumerate() {
+        let ok = match bound {
+            Bound::Exact => before == after,
+            Bound::AtMost => after <= before,
+        };
+        debug_assert!(
+            ok,
+            "{pass} changed the volatile accesses of function {index} from {before} to {after}"
+        );
+    }
 }
 
 fn functions_mut(module: &mut MirModule) -> impl Iterator<Item = &mut MirFunction> {
@@ -241,10 +295,29 @@ fn apply(instruction: &Instruction, state: &mut State) {
             };
             set(state, *dst, folded)
         }
-        other => {
-            if let Some(dst) = defs(other) {
-                set(state, dst, Value::Varying)
-            }
+        // Spelled out rather than left to a catch-all, so that the next
+        // instruction added to the language has to be classified here instead
+        // of inheriting an answer. The one that made this worth doing is
+        // `VolatileLoad`: its result is `Varying` because a device decides it,
+        // and a catch-all gave the right answer only for as long as `cfg::defs`
+        // reported the destination — a silent coupling between two files, whose
+        // failure mode is a device register folded to a constant (`D-067`).
+        Instruction::VolatileLoad { dst, .. } => set(state, *dst, Value::Varying),
+        Instruction::StringNew { dst, .. }
+        | Instruction::AddressOf { dst, .. }
+        | Instruction::Call { dst, .. }
+        | Instruction::FnAddr { dst, .. }
+        | Instruction::CallValue { dst, .. }
+        | Instruction::StructNew { dst, .. }
+        | Instruction::FieldLoad { dst, .. }
+        | Instruction::Load { dst, .. }
+        | Instruction::FieldAddr { dst, .. }
+        | Instruction::EnumNew { dst, .. }
+        | Instruction::EnumTag { dst, .. }
+        | Instruction::EnumFieldLoad { dst, .. }
+        | Instruction::EnumFieldAddr { dst, .. } => set(state, *dst, Value::Varying),
+        // Define nothing, so there is nothing to say about the state.
+        Instruction::Drop { .. } | Instruction::Free { .. } | Instruction::VolatileStore { .. } => {
         }
     }
 }
@@ -554,8 +627,53 @@ fn is_pure(instruction: &Instruction) -> bool {
         | Instruction::Call { .. }
         | Instruction::CallValue { .. }
         | Instruction::Drop { .. }
+        // A volatile access is the one memory operation whose *happening* is
+        // the point. A read with an unused result is how a device register is
+        // cleared, and a write is observable by definition, so neither is ever
+        // dead (`D-067`). This one answer is what stops elimination; nothing
+        // else in this file has to know about them.
+        | Instruction::VolatileLoad { .. }
+        | Instruction::VolatileStore { .. }
         | Instruction::Free { .. } => false,
     }
+}
+
+/// How many volatile accesses a function performs.
+///
+/// The measure `optimize` compares across each pass to enforce the half of
+/// `D-067` that is a property of a *pair* of modules rather than of one, and
+/// so cannot live in `verify.rs` at all (`D-114`).
+fn volatile_count(function: &MirFunction) -> usize {
+    function
+        .blocks
+        .iter()
+        .flat_map(|block| block.instructions())
+        .filter(|instruction| {
+            matches!(
+                instruction,
+                Instruction::VolatileLoad { .. } | Instruction::VolatileStore { .. }
+            )
+        })
+        .count()
+}
+
+/// The volatile counts of every function, in iteration order.
+///
+/// Empty in a release build, where the comparison that consumes it is compiled
+/// out — the same shape `verify::check` already has, and for the same reason:
+/// this is the compiler checking itself, not the program.
+fn volatile_counts(module: &MirModule) -> Vec<usize> {
+    if !cfg!(debug_assertions) {
+        return Vec::new();
+    }
+    functions(module).map(volatile_count).collect()
+}
+
+fn functions(module: &MirModule) -> impl Iterator<Item = &MirFunction> {
+    module
+        .functions
+        .iter()
+        .chain(module.tests.iter().map(|test| &test.function))
 }
 
 // -------------------------------------------------------------------- CFG

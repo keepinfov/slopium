@@ -1,0 +1,94 @@
+; A raw pointer, and a volatile access at every width (`D-067`). The buffer
+; stands in for a block of memory-mapped registers; it comes from the runtime
+; allocator because a raw address has to come from somewhere, and that is the
+; one place a program can get a real one without leaving the language.
+;
+; The load and the store of a given width are checked against *each other* as
+; little as possible: a wide write is read back one byte at a time, so a store
+; that used the wrong width or the wrong byte order is caught by the byte path
+; rather than by its own mirror image. What checks the encodings themselves is
+; `object-check.sh`, which holds every instruction below against `as`.
+
+(take std:io println-bool println-i64)
+
+(extern "sl_rt_alloc" (rt-alloc (size u64)) -> (Ptr u8))
+
+; A driver is a mask over a register, which is the sentence v0.8 exists to make
+; writable: `bit-or` is v0.8.0's, `u8` is v0.8.1's, and reaching the register at
+; all is this patch's.
+(fn set-bits ((port (Ptr u8)) (mask u8)) -> unit
+  (unsafe
+    (volatile-write port (bit-or (volatile-read port) mask))))
+
+(fn main () -> i32
+  (unsafe
+    (let base (rt-alloc 16))
+
+    ; One byte, then the byte after it — the device-shaped pattern.
+    (volatile-write base 0xA5)
+    (volatile-write (ptr-offset base 1) 0x5A)
+    (println-i64 (as i64 (volatile-read base)))
+    (println-i64 (as i64 (volatile-read (ptr-offset base 1))))
+
+    ; A read-modify-write through a mask, the shape a driver is made of.
+    (set-bits base 0x0A)
+    (println-i64 (as i64 (volatile-read base)))
+
+    ; The same byte through a signed pointer: `0xAF` has its top bit set, so a
+    ; sign-extending read of it is negative where a zero-extending one is not.
+    (println-i64 (as i64 (volatile-read (as (Ptr i8) base))))
+
+    ; Four bytes at once, read back one at a time. This is the width witness:
+    ; little-endian, so the low byte of `0xDEADBEEF` lands first.
+    (let words (as (Ptr u32) base))
+    (volatile-write words 0xDEADBEEF)
+    (println-i64 (as i64 (volatile-read base)))
+    (println-i64 (as i64 (volatile-read (ptr-offset base 1))))
+    (println-i64 (as i64 (volatile-read (ptr-offset base 2))))
+    (println-i64 (as i64 (volatile-read (ptr-offset base 3))))
+    (println-i64 (as i64 (volatile-read words)))
+
+    ; And as two halves, which is the access a VGA cell is.
+    (let cells (as (Ptr u16) base))
+    (println-i64 (as i64 (volatile-read cells)))
+    (println-i64 (as i64 (volatile-read (ptr-offset cells 1))))
+
+    ; Eight bytes, the width that needs no extension at all.
+    (let wide (as (Ptr u64) base))
+    (volatile-write wide 0x0102030405060708)
+    (println-bool (= (volatile-read wide) 0x0102030405060708))
+    (println-i64 (as i64 (volatile-read base)))
+
+    ; A pointer is an address, and converts to one in both directions.
+    (println-bool (= (as u64 (ptr-offset base 4)) (+ (as u64 base) 4)))
+
+    ; And it narrows like any other integer, because it counts as the `u64` it
+    ; is: `(as u8 p)` truncates to the low byte rather than carrying the whole
+    ; address into a type that has no room for it. The address is not printable
+    ; — it differs every run — so what is asserted is that the two spellings of
+    ; the same truncation agree, and that both agree with the mask.
+    (println-bool (= (as u8 base) (as u8 (as u64 base))))
+    (println-bool (= (as i64 (as u8 base)) (bit-and (as i64 base) 0xFF)))
+    (println-bool (= (as i64 (as u32 base)) (bit-and (as i64 base) 0xFFFFFFFF))))
+  0)
+
+(test "a wide store is what the narrow loads read back"
+  (unsafe
+    (let base (rt-alloc 8))
+    (volatile-write (as (Ptr u16) base) 0x0F41)
+    (and (= (volatile-read base) 0x41)
+      (= (volatile-read (ptr-offset base 1)) 0x0F))))
+
+(test "a pointer narrows to the low bytes of its address"
+  ; The regression this exists for: a pointer answers `None` when asked for an
+  ; integer width, so a narrowing conversion out of one took the path that has
+  ; nothing to do, and left a `u8` holding a whole 64-bit address.
+  (unsafe
+    (let base (rt-alloc 8))
+    (and (= (as u8 base) (as u8 (as u64 base)))
+      (= (as i64 (as u8 base)) (bit-and (as i64 base) 0xFF)))))
+
+(test "`unsafe` does not turn off the overflow check"
+  ; `D-031` calls the checks untouchable and `D-067` does not touch them. The
+  ; addition below is inside `unsafe` and still inside its type.
+  (unsafe (= (+ 2147483646 1) 2147483647)))

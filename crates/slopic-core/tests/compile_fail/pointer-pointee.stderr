@@ -1,0 +1,4 @@
+pointer-pointee.slp:1:11: error[SL0200]: a raw pointer cannot point at `String`
+  |
+ 1 | (fn hold ((text (Ptr String))) -> unit ())
+  |           ^^^^^^^^^^^^^^^^^^^

@@ -801,3 +801,44 @@ fn c_caller_agrees_with_slopium_stack_parameter_layout() {
     assert!(Command::new(&executable).status().unwrap().success());
     fs::remove_dir_all(directory).unwrap();
 }
+
+/// A raw pointer reaches memory at every width, and reads back what it wrote
+/// (`D-067`).
+///
+/// The buffer comes from the runtime's own allocator, which is already linked,
+/// so this needs no C of its own. What it really checks is the narrow loads and
+/// stores neither backend had before: a byte and a half are the only memory
+/// this compiler touches that is not a machine word.
+#[test]
+fn a_raw_pointer_reads_back_what_it_wrote_at_every_width() {
+    let (directory, executable) = native_program(
+        r#"
+        (extern "sl_rt_alloc" (rt-alloc (size u64)) -> (Ptr u8))
+        (fn main () -> i32
+          (unsafe
+            (let bytes (rt-alloc 64))
+            (volatile-write bytes 0xAB)
+            (volatile-write (ptr-offset bytes 1) 0xCD)
+            (println-i64 (as i64 (volatile-read bytes)))
+            (println-i64 (as i64 (volatile-read (ptr-offset bytes 1))))
+            (let signed (as (Ptr i8) bytes))
+            (println-i64 (as i64 (volatile-read signed)))
+            (let halves (as (Ptr u16) bytes))
+            (volatile-write halves 0x1234)
+            (println-i64 (as i64 (volatile-read halves)))
+            (let words (as (Ptr u32) bytes))
+            (volatile-write words 0xDEADBEEF)
+            (println-i64 (as i64 (volatile-read words))))
+          0)
+        "#,
+    );
+    let output = Command::new(executable).output().unwrap();
+    assert!(output.status.success());
+    // `0xAB` has its top bit set, so a sign-extending read of that one byte is
+    // -85 where a zero-extending one is 171. Both are here, from the same byte.
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "171\n205\n-85\n4660\n3735928559\n"
+    );
+    fs::remove_dir_all(directory).unwrap();
+}

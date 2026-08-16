@@ -49,9 +49,19 @@ command-line protocol is internal and versioned.
    borrow: a borrow of a pointer-shaped value is that pointer and a borrow of
    anything else is the address of a slot, so the two field instructions are
    each garbage in the other's place, and getting it wrong reads an integer as
-   a pointer rather than failing (`D-099`, `D-100`). It reports `SL0700`
-   internal errors rather than panicking, and runs in debug builds or under
-   `SLOPIUM_VERIFY_MIR=1`.
+   a pointer rather than failing (`D-099`, `D-100`). So is every volatile
+   access, whose width has to agree with what the pointer points at and with
+   the local the value came from or went to: a width one size wrong does not
+   fault, it reads or writes the bytes of the neighbouring device register
+   (`D-067`). It reports `SL0700` internal errors rather than panicking, and
+   runs in debug builds or under `SLOPIUM_VERIFY_MIR=1`.
+
+   What the verifier deliberately does *not* check is that a volatile access
+   was neither eliminated nor duplicated, because that is a statement about a
+   module before and after a pass and the verifier is handed one module. The
+   optimizer compares the counts itself, pass by pass, and `is_pure` is what
+   stops dead-code elimination from removing an access whose result nothing
+   reads (`D-114`).
 10. Backward liveness dataflow yields live intervals over a linear block order,
     and a linear-scan allocator places every local in a register or a frame
     slot. Allocation runs in both profiles: it is part of code generation
@@ -125,6 +135,18 @@ emit, so there is no node for the two of them to disagree about. What the
 invariant costs is one canonicalisation per narrow parameter in the prologue —
 a Slopium caller always places a canonical word, but C leaves the upper half of
 a narrow argument register undefined.
+
+Memory is a machine word everywhere too — a frame slot, a struct field, an enum
+payload, a list element — with exactly one exception. A volatile access through
+a raw pointer reads or writes one, two, four or eight bytes, because a device
+register has a width the program did not choose (`D-067`). That is where the
+only sub-word encodings in either backend live: `movzx` from a byte and a half
+and the `0x66`-prefixed store on x86-64, `ldrb`/`ldrh`/`strb`/`strh` and the
+four-byte pair on AArch64. A narrow load zero-extends, which is already an
+unsigned type's canonical word, so only a signed one is extended afterwards and
+the two paths share the canonicalisation the conversions use. A `(List u8)` is
+still one word per element; packing it is a performance decision with a
+measurement in front of it, not part of having the type.
 
 The differences that remain are the machine ones. x86-64 lets most instructions
 name a frame slot, so its backend decides per instruction whether an operand is

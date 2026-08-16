@@ -438,5 +438,20 @@ fn remap_instruction(instruction: &Instruction, map: &impl Fn(LocalId) -> LocalI
             index: *index,
         },
         Instruction::Free { local } => Instruction::Free { local: m(*local) },
+        // Locals are renumbered and nothing else is. A volatile access carries
+        // no identity to renumber, which is exactly why `D-114` does not try to
+        // track one: inlining a callee at two call sites duplicates its
+        // accesses, and that is correct — both calls really do reach the
+        // device.
+        Instruction::VolatileLoad { dst, addr, ty } => Instruction::VolatileLoad {
+            dst: m(*dst),
+            addr: m(*addr),
+            ty: ty.clone(),
+        },
+        Instruction::VolatileStore { addr, src, ty } => Instruction::VolatileStore {
+            addr: m(*addr),
+            src: m(*src),
+            ty: ty.clone(),
+        },
     }
 }

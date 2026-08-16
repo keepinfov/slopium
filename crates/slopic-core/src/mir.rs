@@ -250,6 +250,39 @@ pub enum Instruction {
     Free {
         local: LocalId,
     },
+    /// `dst = *(ty *) addr`, one volatile access of `ty`'s width (`D-067`).
+    ///
+    /// The narrowest memory this compiler touches. Everything else it loads is
+    /// a machine word — a struct field, an enum payload, a borrow read — and
+    /// this is the only place a byte or a half is read, because a device
+    /// register is the only thing that has a width the program did not choose.
+    ///
+    /// The result is canonical in its word like any other integer (`D-113`),
+    /// which for an unsigned type the zero-extending load already achieves.
+    ///
+    /// Neither backend may fold two of these, drop one whose result is unused,
+    /// or move one past another. `opt::is_pure` says the first two and
+    /// `opt::volatile_count` checks them; see `D-114` for why the third is
+    /// where it is rather than in `verify.rs`.
+    VolatileLoad {
+        dst: LocalId,
+        addr: LocalId,
+        ty: Type,
+    },
+    /// `*(ty *) addr = src`, one volatile access of `ty`'s width (`D-067`).
+    ///
+    /// The first MIR instruction that writes to memory at all: every other
+    /// store in this compiler is baked into `StructNew` and `EnumNew` inside
+    /// the backends, or happens behind a runtime call.
+    ///
+    /// The value is canonical by invariant, so a narrow store truncates and
+    /// does not check — truncating is what storing through a narrow pointer
+    /// means.
+    VolatileStore {
+        addr: LocalId,
+        src: LocalId,
+        ty: Type,
+    },
 }
 
 /// Writes a literal's bytes as an escaped string rather than a list of
@@ -1021,7 +1054,10 @@ impl Builder {
             TExprKind::Convert { value } => {
                 let source = self.expr(value)?;
                 let target = expr.ty.clone();
-                let word = match (target.int_kind(), source.ty.int_kind()) {
+                // `conversion_kind` rather than `int_kind`, so that a pointer
+                // counts as the `u64` it is. A narrowing out of one truncates
+                // like any other (`D-067`).
+                let word = match (target.conversion_kind(), source.ty.conversion_kind()) {
                     (Some(to), Some(from)) if !to.accepts(from) => {
                         Some(self.canonicalize(source.local, to))
                     }
@@ -1114,6 +1150,59 @@ impl Builder {
                         lhs,
                         rhs,
                         ty,
+                    });
+                } else if callee == "volatile-read" {
+                    self.emit(Instruction::VolatileLoad {
+                        dst,
+                        addr: lowered[0],
+                        ty: expr.ty.clone(),
+                    });
+                } else if callee == "volatile-write" {
+                    self.emit(Instruction::VolatileStore {
+                        addr: lowered[0],
+                        src: lowered[1],
+                        ty: arg_types[1].clone(),
+                    });
+                } else if callee == "ptr-offset" {
+                    // No new instruction: an offset is a multiply and an add on
+                    // `Binary` shapes both backends already emit, which is the
+                    // call `D-112` made for the unary operators and `D-113`
+                    // made for conversions, made a third time. The arithmetic
+                    // is `u64` because an address is, and it traps on overflow
+                    // like any other (`D-031`).
+                    let element = match &arg_types[0] {
+                        Type::Ptr(pointee) => crate::lowering::access_size(pointee)
+                            .map(|size| i64::from(size.bytes()))
+                            .unwrap_or(1),
+                        _ => 1,
+                    };
+                    // A pointer to a byte needs no scaling, and emitting the
+                    // multiply anyway would put an overflow check that can
+                    // never fire in front of every `u8` offset.
+                    let scaled = if element == 1 {
+                        lowered[1]
+                    } else {
+                        let size = self.temp(Type::U64);
+                        self.emit(Instruction::ConstInt {
+                            dst: size,
+                            value: element,
+                        });
+                        let scaled = self.temp(Type::U64);
+                        self.emit(Instruction::Binary {
+                            dst: scaled,
+                            op: BinaryOp::Mul,
+                            lhs: lowered[1],
+                            rhs: size,
+                            ty: Type::U64,
+                        });
+                        scaled
+                    };
+                    self.emit(Instruction::Binary {
+                        dst,
+                        op: BinaryOp::Add,
+                        lhs: lowered[0],
+                        rhs: scaled,
+                        ty: Type::U64,
                     });
                 } else if callee == "clone" && arg_types.first().is_some_and(reads_through_borrow) {
                     // The dereference (`D-100`). A borrow of a pointer-shaped

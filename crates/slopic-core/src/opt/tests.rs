@@ -390,3 +390,180 @@ fn the_shipped_fixture_corpus_still_optimizes_cleanly() {
     }
     assert!(checked > 0, "no fixture lowered; the corpus path is wrong");
 }
+
+// ------------------------------------------------------ volatile (`D-067`)
+
+/// Every volatile test writes through a pointer the runtime allocator gave it,
+/// because a raw pointer has to come from somewhere and `sl_rt_alloc` is
+/// already linked into every program.
+const POINTER_PRELUDE: &str = r#"
+    (extern "sl_rt_alloc" (rt-alloc (size u64)) -> (Ptr u8))
+"#;
+
+fn volatile_accesses(function: &crate::mir::MirFunction) -> usize {
+    instructions(function)
+        .iter()
+        .filter(|instruction| {
+            matches!(
+                instruction,
+                Instruction::VolatileLoad { .. } | Instruction::VolatileStore { .. }
+            )
+        })
+        .count()
+}
+
+/// The `is_pure` test. A read whose result nothing uses is how a device
+/// register is cleared, so it is not dead however unused it looks.
+#[test]
+fn a_volatile_load_survives_with_its_result_unused() {
+    let source = format!(
+        "{POINTER_PRELUDE}
+        (fn probe () -> i64
+          (unsafe
+            (let port (rt-alloc 8))
+            (let ignored (volatile-read port)))
+          5)
+        (fn main () -> i32 0)"
+    );
+    let module = release(&source);
+    assert_eq!(
+        volatile_accesses(function(&module, "probe")),
+        1,
+        "an unused volatile read is still an access: {:#?}",
+        instructions(function(&module, "probe"))
+    );
+}
+
+#[test]
+fn a_volatile_store_survives() {
+    let source = format!(
+        "{POINTER_PRELUDE}
+        (fn probe () -> i64
+          (unsafe
+            (let port (rt-alloc 8))
+            (volatile-write port 1))
+          5)
+        (fn main () -> i32 0)"
+    );
+    let module = release(&source);
+    assert_eq!(volatile_accesses(function(&module, "probe")), 1);
+}
+
+/// A tripwire for a future common-subexpression pass. Nothing merges these
+/// today; the point is that the day something does, this fails rather than a
+/// driver silently reading one word where it asked for two.
+#[test]
+fn two_volatile_loads_of_one_address_are_both_kept() {
+    let source = format!(
+        "{POINTER_PRELUDE}
+        (fn probe () -> i64
+          (unsafe
+            (let port (rt-alloc 8))
+            (let first (volatile-read port))
+            (let second (volatile-read port))
+            (as i64 (+ first second))))
+        (fn main () -> i32 0)"
+    );
+    let module = release(&source);
+    assert_eq!(volatile_accesses(function(&module, "probe")), 2);
+}
+
+/// The `cfg::defs` test, and the one most worth having: a device decides what
+/// a volatile read answers, so a constant written through the pointer a moment
+/// earlier must not be propagated into the read of it.
+#[test]
+fn a_volatile_load_is_never_folded_to_what_was_written() {
+    let source = format!(
+        "{POINTER_PRELUDE}
+        (fn probe () -> i64
+          (unsafe
+            (let port (as (Ptr i64) (rt-alloc 8)))
+            (volatile-write port 7)
+            (+ (volatile-read port) 1)))
+        (fn main () -> i32 0)"
+    );
+    let module = release(&source);
+    let probe = function(&module, "probe");
+    assert_eq!(volatile_accesses(probe), 2);
+    assert!(
+        instructions(probe)
+            .iter()
+            .any(|instruction| matches!(instruction, Instruction::Binary { .. })),
+        "the addition must survive rather than folding to 8: {:#?}",
+        instructions(probe)
+    );
+}
+
+/// The `cfg::uses` test: the arithmetic that computed the address is not dead.
+#[test]
+fn the_address_of_a_volatile_access_is_not_dead() {
+    let source = format!(
+        "{POINTER_PRELUDE}
+        (fn probe () -> i64
+          (unsafe
+            (let base (rt-alloc 64))
+            (volatile-write (ptr-offset base 3) 9))
+          5)
+        (fn main () -> i32 0)"
+    );
+    let module = release(&source);
+    let probe = function(&module, "probe");
+    assert_eq!(volatile_accesses(probe), 1);
+    assert!(
+        instructions(probe)
+            .iter()
+            .any(|instruction| matches!(instruction, Instruction::Binary { .. })),
+        "the offset arithmetic must survive: {:#?}",
+        instructions(probe)
+    );
+}
+
+/// Optimizing must not change how many times the device is touched, which is
+/// the property `opt::check_volatile` asserts pass by pass (`D-114`).
+#[test]
+fn optimization_does_not_change_the_volatile_count() {
+    let source = format!(
+        "{POINTER_PRELUDE}
+        (fn probe () -> i64
+          (unsafe
+            (let port (rt-alloc 64))
+            (volatile-write port 1)
+            (volatile-write (ptr-offset port 1) 2)
+            (as i64 (volatile-read port))))
+        (fn main () -> i32 0)"
+    );
+    assert_eq!(
+        volatile_accesses(function(&debug(&source), "probe")),
+        volatile_accesses(function(&release(&source), "probe")),
+    );
+}
+
+/// Two calls to a function holding one access make two accesses, and that is
+/// correct rather than a bug: both calls really do reach the device. It is
+/// also why `D-114` counts accesses instead of giving each one an identity —
+/// an identity would have to be duplicated here, and then it would identify
+/// nothing.
+#[test]
+fn inlining_a_volatile_access_duplicates_it_once_per_call() {
+    let source = format!(
+        "{POINTER_PRELUDE}
+        (fn poke ((port (Ptr u8))) -> unit
+          (unsafe (volatile-write port 1)))
+        (fn probe () -> i64
+          (unsafe
+            (let port (rt-alloc 8))
+            (poke port)
+            (poke port))
+          5)
+        (fn main () -> i32 0)"
+    );
+    let module = release(&source);
+    let probe = function(&module, "probe");
+    let inlined = volatile_accesses(probe);
+    let calls_poke = calls(probe, "poke");
+    assert!(
+        (inlined == 2 && !calls_poke) || (inlined == 0 && calls_poke),
+        "either both copies were inlined or neither was: {inlined} accesses, \
+         calls_poke = {calls_poke}"
+    );
+}

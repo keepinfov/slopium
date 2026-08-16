@@ -1,0 +1,4 @@
+(fn probe ((n i64)) -> unit
+  (unsafe (volatile-read n)))
+
+(fn main () -> i32 0)

@@ -11,6 +11,13 @@ pub mod codes {
     pub const INVALID_SYNTAX: &str = "SL0100";
     pub const NAME_OR_TYPE: &str = "SL0200";
     pub const OWNERSHIP: &str = "SL0300";
+    /// A raw-pointer operation written outside an `unsafe` block (`D-067`).
+    ///
+    /// Its own code rather than `OWNERSHIP`'s, because it is the one refusal
+    /// in the family a reader is most likely to look up: everything else in
+    /// `SL03xx` is the borrow checker explaining a program that is wrong, and
+    /// this one is the compiler asking for a word.
+    pub const UNSAFE_REQUIRED: &str = "SL0301";
     pub const MATCH: &str = "SL0400";
     pub const ENTRY_POINT: &str = "SL0401";
     pub const MODULE: &str = "SL0450";
@@ -33,6 +40,10 @@ pub mod codes {
         (INVALID_SYNTAX, "invalid declaration or expression syntax"),
         (NAME_OR_TYPE, "name resolution or type error"),
         (OWNERSHIP, "ownership or borrowing error"),
+        (
+            UNSAFE_REQUIRED,
+            "raw-pointer operation outside an `unsafe` block",
+        ),
         (MATCH, "pattern matching error"),
         (ENTRY_POINT, "invalid program entry point"),
         (MODULE, "module resolution error"),

@@ -269,6 +269,11 @@ pub fn reference_is_slice(ty: &Type) -> bool {
 
 /// A value that is represented by a pointer, so borrowing it copies the pointer
 /// rather than taking the address of the slot holding it.
+///
+/// `Type::Ptr` is deliberately absent (`D-067`). A raw pointer's word is a
+/// value that happens to be an address, the way an integer's word is a value,
+/// so `(& p)` takes the address of the slot holding it. Listing it here would
+/// make a borrow of a pointer alias whatever the pointer points at.
 pub fn is_pointer_like(ty: &Type) -> bool {
     matches!(
         ty,
@@ -279,6 +284,86 @@ pub fn is_pointer_like(ty: &Type) -> bool {
             | Type::Named(_)
             | Type::Fn { .. }
     )
+}
+
+/// The width of one machine access, for the narrow loads and stores a raw
+/// pointer reaches memory through (`D-067`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AccessSize {
+    Byte,
+    Half,
+    Word,
+    Double,
+}
+
+impl AccessSize {
+    pub fn bytes(self) -> u32 {
+        match self {
+            AccessSize::Byte => 1,
+            AccessSize::Half => 2,
+            AccessSize::Word => 4,
+            AccessSize::Double => 8,
+        }
+    }
+
+    /// AArch64's name for a load of this width, and the opcode beside it.
+    ///
+    /// The mnemonic and the encoding are returned by two functions over one
+    /// table so they cannot drift apart: printing `ldrb` while assembling
+    /// `ldr` is exactly the bug this width was added to fix.
+    pub fn load_mnemonic(self) -> &'static str {
+        match self {
+            AccessSize::Byte => "ldrb",
+            AccessSize::Half => "ldrh",
+            AccessSize::Word | AccessSize::Double => "ldr",
+        }
+    }
+
+    pub fn store_mnemonic(self) -> &'static str {
+        match self {
+            AccessSize::Byte => "strb",
+            AccessSize::Half => "strh",
+            AccessSize::Word | AccessSize::Double => "str",
+        }
+    }
+
+    /// Whether the transfer register is an `X` rather than a `W`.
+    ///
+    /// Only the eight-byte access uses the wide register; `ldrb`, `ldrh` and
+    /// the four-byte `ldr` all write a `W`, which zeroes the top half and is
+    /// what makes every narrow load zero-extending.
+    pub fn is_wide(self) -> bool {
+        matches!(self, AccessSize::Double)
+    }
+}
+
+/// How many bytes a volatile access to this type touches, or `None` for a type
+/// no pointer may point at.
+///
+/// Both backends and the verifier ask *this* function rather than deciding for
+/// themselves. Two encoders that each answer "how wide is a `bool`" separately
+/// are two encoders that will eventually disagree, which is the drift `D-025`
+/// exists to prevent — and a disagreement here does not crash, it writes over
+/// the neighbouring device register.
+pub fn access_size(ty: &Type) -> Option<AccessSize> {
+    if let Some(kind) = ty.int_kind() {
+        return Some(match kind.bits {
+            8 => AccessSize::Byte,
+            16 => AccessSize::Half,
+            32 => AccessSize::Word,
+            _ => AccessSize::Double,
+        });
+    }
+    match ty {
+        // A `bool` is one byte because that is what a device register holding
+        // a flag is. Making it a word would read three bytes that are not the
+        // program's.
+        Type::Bool => Some(AccessSize::Byte),
+        // A double is an ordinary 64-bit value everywhere but the two ABI
+        // boundaries, so a volatile `f64` is the plain eight-byte access.
+        Type::F64 => Some(AccessSize::Double),
+        _ => None,
+    }
 }
 
 /// Which panic trampolines the trapping arithmetic in a set of functions can

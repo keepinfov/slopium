@@ -1,0 +1,4 @@
+volatile-not-a-pointer.slp:2:26: error[SL0200]: `volatile-read` expects a raw pointer, found `i64`
+  |
+ 2 |   (unsafe (volatile-read n)))
+  |                          ^

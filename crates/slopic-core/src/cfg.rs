@@ -45,8 +45,18 @@ pub fn defs(instruction: &Instruction) -> Option<LocalId> {
         | Instruction::EnumNew { dst, .. }
         | Instruction::EnumTag { dst, .. }
         | Instruction::EnumFieldLoad { dst, .. }
-        | Instruction::EnumFieldAddr { dst, .. } => Some(*dst),
-        Instruction::Drop { .. } | Instruction::Free { .. } => None,
+        | Instruction::EnumFieldAddr { dst, .. }
+        // Saying so is what stops a device register from being constant-folded.
+        // Constant propagation's catch-all sets whatever an instruction defines
+        // to `Varying`, so a `VolatileLoad` that reported nothing here would
+        // leave its destination holding whatever an earlier definition put
+        // there, and the next read of it would fold to that. `is_pure` does not
+        // cover this: the instruction would survive and its result would still
+        // be wrong (`D-067`).
+        | Instruction::VolatileLoad { dst, .. } => Some(*dst),
+        Instruction::Drop { .. }
+        | Instruction::Free { .. }
+        | Instruction::VolatileStore { .. } => None,
     }
 }
 
@@ -85,6 +95,14 @@ pub fn uses(instruction: &Instruction, out: &mut Vec<LocalId>) {
         | Instruction::EnumFieldLoad { base, .. }
         | Instruction::EnumFieldAddr { base, .. } => out.push(*base),
         Instruction::Drop { local, .. } | Instruction::Free { local } => out.push(*local),
+        // The address is a read, so the arithmetic that computed it is not
+        // dead and the allocator does not hand its register to something else
+        // across the access.
+        Instruction::VolatileLoad { addr, .. } => out.push(*addr),
+        Instruction::VolatileStore { addr, src, .. } => {
+            out.push(*addr);
+            out.push(*src);
+        }
     }
 }
 

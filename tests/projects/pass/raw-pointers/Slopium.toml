@@ -1,0 +1,19 @@
+[package]
+name = "raw-pointers"
+version = "0.2.4"
+source = "src"
+entry = "src/main.slp"
+
+[dependencies]
+std = { toolchain = true }
+
+[build]
+target = "x86_64-unknown-linux-gnu"
+
+[profile.dev]
+opt-level = 0
+debug = true
+
+[profile.release]
+opt-level = 1
+debug = false

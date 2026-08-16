@@ -478,6 +478,14 @@ struct Analyzer<'a> {
     validate_entry_point: bool,
     current_return_type: Option<Type>,
     loop_depth: usize,
+    /// How many `unsafe` blocks enclose the expression being typed (`D-067`).
+    ///
+    /// A raw-pointer operation is refused at zero. It is a depth rather than a
+    /// flag because the blocks nest, and it is reset to zero — not decremented
+    /// — while a `lambda` body is typed: the body is a separate function that
+    /// can be called from anywhere, so the permission its `lambda` was written
+    /// inside of does not travel into it.
+    unsafe_depth: usize,
     diagnostics: Vec<Diagnostic>,
     next_binding: BindingId,
     /// Where each binding was consumed, so a loop can point at the move that
@@ -623,6 +631,7 @@ impl<'a> Analyzer<'a> {
             validate_entry_point,
             current_return_type: None,
             loop_depth: 0,
+            unsafe_depth: 0,
             diagnostics: Vec::new(),
             next_binding: 0,
             move_sites: HashMap::new(),
@@ -965,6 +974,18 @@ impl<'a> Analyzer<'a> {
                 }
                 self.validate_type(result, span);
             }
+            // The pointee is refused here rather than at the access, so a
+            // program that writes `(Ptr String)` is told about the type it
+            // wrote instead of about the read it tried to do with it
+            // (`D-067`). A type parameter is not scalar either, so `(Ptr T)`
+            // in a generic is refused too: allowing it later is additive,
+            // and monomorphizing one into a `(Ptr String)` is not.
+            Type::Ptr(inner) => {
+                self.validate_type(inner, span);
+                if !inner.is_scalar() {
+                    self.error(span, format!("a raw pointer cannot point at `{inner}`"));
+                }
+            }
             _ => {}
         }
     }
@@ -977,6 +998,7 @@ impl<'a> Analyzer<'a> {
                 length: *length,
             },
             Type::Slice(inner) => Type::Slice(Box::new(self.normalize_type(inner, span))),
+            Type::Ptr(inner) => Type::Ptr(Box::new(self.normalize_type(inner, span))),
             Type::Ref { mutable, inner } => Type::Ref {
                 mutable: *mutable,
                 inner: Box::new(self.normalize_type(inner, span)),
@@ -1256,6 +1278,16 @@ impl<'a> Analyzer<'a> {
             }
             ExprKind::Set { name, value } => self.set(expr, name, value),
             ExprKind::Do(expressions) => self.do_expr(expr, expressions, expected),
+            // `unsafe` leaves nothing behind in the typed IR. The permission is
+            // spent here, at the point the operations inside it are checked, so
+            // the block is a `do` by the time anything downstream sees it and
+            // neither MIR nor either backend learns the word (`D-067`).
+            ExprKind::Unsafe(expressions) => {
+                self.unsafe_depth += 1;
+                let typed = self.do_expr(expr, expressions, expected);
+                self.unsafe_depth -= 1;
+                typed
+            }
             ExprKind::If {
                 condition,
                 then_expr,
@@ -2399,6 +2431,9 @@ impl<'a> Analyzer<'a> {
         ) {
             return self.list_operation(expr, callee, args);
         }
+        if matches!(callee, "volatile-read" | "volatile-write" | "ptr-offset") {
+            return self.pointer_operation(expr, callee, args);
+        }
         if self.structs.contains_key(callee) {
             return self.struct_init(expr, callee, args, expected);
         }
@@ -2520,6 +2555,12 @@ impl<'a> Analyzer<'a> {
         self.enclosing.push(std::mem::take(&mut self.env));
         let outer_pattern_borrow = self.pattern_borrow.take();
         let outer_return_type = self.current_return_type.take();
+        // The permission does not cross into the body (`D-067`). A `lambda`
+        // written inside an `unsafe` block is still a function value that can
+        // be called from anywhere, so its body has to ask for the permission
+        // itself — the same reason the environment is swapped rather than
+        // pushed.
+        let outer_unsafe_depth = std::mem::take(&mut self.unsafe_depth);
         self.env.push();
 
         let mut typed_captures = Vec::new();
@@ -2602,6 +2643,7 @@ impl<'a> Analyzer<'a> {
         self.env = self.enclosing.pop().unwrap_or_default();
         self.pattern_borrow = outer_pattern_borrow;
         self.current_return_type = outer_return_type;
+        self.unsafe_depth = outer_unsafe_depth;
 
         let ty = Type::Fn {
             params: typed_params.iter().map(|param| param.ty.clone()).collect(),
@@ -2835,12 +2877,30 @@ impl<'a> Analyzer<'a> {
         // written above 2^63 and `(as u8 300)` is refused rather than quietly
         // truncated. Only a literal: an expectation carried into anything else
         // would be a second, implicit conversion.
-        let expected = match (&value.kind, target.is_integer()) {
-            (ExprKind::Int(_), true) => Some(target.clone()),
+        let expected = match (&value.kind, &target) {
+            (ExprKind::Int(_), target) if target.is_integer() => Some(target.clone()),
+            // An address is written as a literal — `(as (Ptr u16) 0xB8000)` —
+            // and it is a `u64` that is being written, so the literal is
+            // checked against a `u64`'s range rather than an `i64`'s.
+            (ExprKind::Int(_), Type::Ptr(_)) => Some(Type::U64),
             _ => None,
         };
         let value = self.expr(value, expected.as_ref());
-        if !(value.ty.is_integer() && target.is_integer()) {
+        let crosses_pointer = matches!(target, Type::Ptr(_)) || matches!(value.ty, Type::Ptr(_));
+        // A pointer converts to and from any integer, and to another pointer.
+        // The address is a `u64` on both targets, so the arithmetic of the
+        // conversion is an integer's and nothing here is a second rule
+        // (`D-113`); what is new is only that one side may be an address.
+        let legal = if crosses_pointer {
+            let sides_are_words = |ty: &Type| ty.is_integer() || matches!(ty, Type::Ptr(_));
+            sides_are_words(&value.ty) && sides_are_words(&target)
+        } else {
+            value.ty.is_integer() && target.is_integer()
+        };
+        if crosses_pointer && legal {
+            self.require_unsafe(expr.span, "a conversion to or from a raw pointer");
+        }
+        if !legal {
             self.diagnostics.push(
                 Diagnostic::error(
                     codes::NAME_OR_TYPE,
@@ -3425,6 +3485,97 @@ impl<'a> Analyzer<'a> {
         )
     }
 
+    /// Types the three raw-pointer builtins (`D-067`).
+    ///
+    /// `(volatile-read p)` answers the pointee, `(volatile-write p v)` answers
+    /// `unit`, and `(ptr-offset p n)` answers another pointer `n` elements
+    /// along. All three ask for the permission, and all three refuse to say
+    /// anything else about a program that did not have a pointer to begin
+    /// with: the first diagnostic is about the type, not about the word.
+    fn pointer_operation(&mut self, expr: &Expr, callee: &str, args: &[Expr]) -> TExpr {
+        let expected_len = if callee == "volatile-read" { 1 } else { 2 };
+        if args.len() != expected_len {
+            self.error(
+                expr.span,
+                format!(
+                    "`{callee}` expects {expected_len} argument(s), found {}",
+                    args.len()
+                ),
+            );
+            return self.typed(expr, Type::Unit, TExprKind::Unit);
+        }
+        self.require_unsafe(expr.span, format!("`{callee}`"));
+        let pointer = self.expr(&args[0], None);
+        let Type::Ptr(pointee) = pointer.ty.clone() else {
+            self.error(
+                args[0].span,
+                format!("`{callee}` expects a raw pointer, found `{}`", pointer.ty),
+            );
+            return self.typed(expr, Type::Unit, TExprKind::Unit);
+        };
+        let pointee = pointee.as_ref().clone();
+        match callee {
+            "volatile-read" => self.typed(
+                expr,
+                pointee,
+                TExprKind::Call {
+                    callee: callee.into(),
+                    args: vec![pointer],
+                },
+            ),
+            "volatile-write" => {
+                // The value is typed against the pointee, so a `u8` register
+                // takes a `u8` and `D-090`'s "never implicit" is not weakened
+                // by the value happening to be a literal.
+                let before = self.diagnostics.len();
+                let value = self.expr(&args[1], Some(&pointee));
+                // Only when the expectation did not already say so: it reports
+                // the mismatch for everything that carries one, and two
+                // diagnostics about one wrong argument is one too many. This
+                // is the fallback for a value whose type nothing else checked.
+                if value.ty != pointee && self.diagnostics.len() == before {
+                    self.error(
+                        args[1].span,
+                        format!(
+                            "`volatile-write` through a `{}` expects a `{pointee}`, found `{}`",
+                            pointer.ty, value.ty
+                        ),
+                    );
+                }
+                self.typed(
+                    expr,
+                    Type::Unit,
+                    TExprKind::Call {
+                        callee: callee.into(),
+                        args: vec![pointer, value],
+                    },
+                )
+            }
+            _ => {
+                // The count is a `u64` because an address is: the arithmetic
+                // stays unsigned end to end, and it traps on overflow like any
+                // other (`D-031`). A program that wants to go backwards
+                // computes the base it wants.
+                let count = self.expr(&args[1], Some(&Type::U64));
+                if count.ty != Type::U64 {
+                    self.error(
+                        args[1].span,
+                        format!("`ptr-offset` expects a `u64` count, found `{}`", count.ty),
+                    );
+                }
+                let ty = pointer.ty.clone();
+                self.typed(
+                    expr,
+                    ty,
+                    TExprKind::Call {
+                        callee: callee.into(),
+                        args: vec![pointer, count],
+                    },
+                )
+            }
+        }
+    }
+
     fn list_operation(&mut self, expr: &Expr, callee: &str, args: &[Expr]) -> TExpr {
         let expected_len = match callee {
             "replace" => 3,
@@ -3974,6 +4125,32 @@ impl<'a> Analyzer<'a> {
         self.diagnostics
             .push(Diagnostic::error(code, self.file, span, message));
     }
+
+    /// Refuses a raw-pointer operation written outside `unsafe` (`D-067`).
+    ///
+    /// Every one of them asks — the volatile read and write, `ptr-offset`, and
+    /// a conversion to or from a pointer — so that auditing what a program can
+    /// do to memory it does not own is a search for one word. Letting the
+    /// address arithmetic out would be the cheaper rule and the wrong one to
+    /// pick first: loosening this after the freeze is additive, and tightening
+    /// it is not.
+    fn require_unsafe(&mut self, span: Span, what: impl std::fmt::Display) {
+        if self.unsafe_depth > 0 {
+            return;
+        }
+        self.diagnostics.push(
+            Diagnostic::error(
+                codes::UNSAFE_REQUIRED,
+                self.file,
+                span,
+                format!("{what} outside an `unsafe` block"),
+            )
+            .with_help(
+                "write it inside `(unsafe ...)`: the compiler cannot prove a raw \
+                 address points at anything, and the word is where a reader is told so",
+            ),
+        );
+    }
 }
 
 /// Whether `clone` would have nothing to do for this type.
@@ -4231,7 +4408,7 @@ fn collect_variable_names(expr: &Expr, output: &mut HashSet<String>) {
             }
             collect_variable_names(body, output);
         }
-        ExprKind::Do(expressions) => {
+        ExprKind::Do(expressions) | ExprKind::Unsafe(expressions) => {
             for expression in expressions {
                 collect_variable_names(expression, output);
             }
@@ -4310,10 +4487,11 @@ fn contains_parameter(ty: &Type, parameters: &HashSet<String>) -> bool {
 }
 
 const EXTERN_PARAMETER_HELP: &str =
-    "an `extern` parameter is an integer type, `f64`, `bool`, `(& String)` or `(& (Slice T))`";
+    "an `extern` parameter is an integer type, `f64`, `bool`, `(Ptr T)`, `(& String)` \
+     or `(& (Slice T))`";
 
 const EXTERN_RESULT_HELP: &str =
-    "an `extern` returns `unit`, an integer type, `f64`, `bool` or an owned `String`";
+    "an `extern` returns `unit`, an integer type, `f64`, `bool`, `(Ptr T)` or an owned `String`";
 
 /// Whether a parameter type is one the C boundary can carry (`D-065`).
 ///
@@ -4326,6 +4504,10 @@ fn extern_parameter_is_expressible(ty: &Type) -> bool {
     match ty {
         Type::F64 | Type::Bool => true,
         _ if ty.is_integer() => true,
+        // A `(Ptr T)` is C's `T *`, which is the one spelling in this table
+        // that needs no agreeing about (`D-067`). It is `Copy` and it borrows
+        // nothing, so it crosses under the same rule as the scalars above.
+        Type::Ptr(_) => true,
         // A borrow is the only way a non-scalar crosses: an `extern` may not
         // take ownership, because the drop glue would then run where the
         // compiler cannot see it.
@@ -4344,7 +4526,11 @@ fn extern_parameter_is_expressible(ty: &Type) -> bool {
 /// A returned `String` is owned by the caller, so C must have allocated it
 /// through `sl_rt_string_new`. Everything else is a scalar or nothing.
 fn extern_result_is_expressible(ty: &Type) -> bool {
-    ty.is_integer() || matches!(ty, Type::Unit | Type::Bool | Type::F64 | Type::String)
+    ty.is_integer()
+        || matches!(
+            ty,
+            Type::Unit | Type::Bool | Type::F64 | Type::String | Type::Ptr(_)
+        )
 }
 
 fn contains_borrowed_type(ty: &Type) -> bool {
@@ -4359,6 +4545,11 @@ fn contains_borrowed_type(ty: &Type) -> bool {
         // legal field type for the same reason a `fn` taking a borrow is a
         // legal declaration.
         Type::Fn { .. } => false,
+        // A raw pointer holds no loan. Its pointee is a scalar, so there is
+        // nothing behind it whose lifetime a borrow could be tracking, which
+        // is the whole reason `D-067` restricted the pointee in the first
+        // place.
+        Type::Ptr(_) => false,
         Type::Unit
         | Type::Bool
         | Type::I8

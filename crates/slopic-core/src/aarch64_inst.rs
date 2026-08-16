@@ -10,6 +10,7 @@
 //! backend cannot ask for.
 
 use crate::asm::{Code, FixupKind, Instruction, Target};
+use crate::lowering::AccessSize;
 use std::fmt;
 
 /// A register, named the way the backend already names it.
@@ -336,19 +337,28 @@ pub enum Inst {
         dst: Reg,
         src: Reg,
     },
-    /// `ldr Xt, [Xn]` or `ldr Xt, [Xn, #offset]`.
+    /// `ldr Xt, [Xn]` or `ldrb Wt, [Xn, #offset]` — the unsigned-offset loads.
     ///
     /// `None` is not the same as `Some(0)`: they encode alike and print
     /// differently, and the printing is what the backend already wrote.
+    ///
+    /// `size` is a field rather than something read off `dst`, because the
+    /// register does not determine it: `ldrb`, `ldrh` and `ldr` at four bytes
+    /// all write a `W` register, and one `W` cannot mean three widths. It also
+    /// used to be worse than under-determined — the encoding was `ldr Xt`
+    /// whatever register it was handed, so a `W` destination printed one
+    /// instruction and assembled another (`D-067`).
     Load {
         dst: Reg,
         base: Reg,
         offset: Option<u32>,
+        size: AccessSize,
     },
     Store {
         src: Reg,
         base: Reg,
         offset: Option<u32>,
+        size: AccessSize,
     },
     /// `stp x29, x30, [sp, #-16]!` — the frame record going down.
     PushFrame,
@@ -414,14 +424,30 @@ impl fmt::Display for Inst {
             Inst::CmnImm { lhs, imm } => write!(f, "cmn {lhs}, #{imm}"),
             Inst::Cset { dst, cond } => write!(f, "cset {dst}, {cond}"),
             Inst::Sxtw { dst, src } => write!(f, "sxtw {dst}, {src}"),
-            Inst::Load { dst, base, offset } => match offset {
-                Some(offset) => write!(f, "ldr {dst}, [{base}, #{offset}]"),
-                None => write!(f, "ldr {dst}, [{base}]"),
-            },
-            Inst::Store { src, base, offset } => match offset {
-                Some(offset) => write!(f, "str {src}, [{base}, #{offset}]"),
-                None => write!(f, "str {src}, [{base}]"),
-            },
+            Inst::Load {
+                dst,
+                base,
+                offset,
+                size,
+            } => {
+                let op = size.load_mnemonic();
+                match offset {
+                    Some(offset) => write!(f, "{op} {dst}, [{base}, #{offset}]"),
+                    None => write!(f, "{op} {dst}, [{base}]"),
+                }
+            }
+            Inst::Store {
+                src,
+                base,
+                offset,
+                size,
+            } => {
+                let op = size.store_mnemonic();
+                match offset {
+                    Some(offset) => write!(f, "{op} {src}, [{base}, #{offset}]"),
+                    None => write!(f, "{op} {src}, [{base}]"),
+                }
+            }
             Inst::PushFrame => f.write_str("stp x29, x30, [sp, #-16]!"),
             Inst::PopFrame => f.write_str("ldp x29, x30, [sp], #16"),
             Inst::B(target) => write!(f, "b {target}"),
@@ -635,22 +661,55 @@ impl Instruction for Inst {
             Inst::Cset { dst, cond } => 0x9a9f_07e0 | (cond.inverted() << 12) | dst.number()?,
             Inst::Sxtw { dst, src } => 0x9340_7c00 | (src.number()? << 5) | dst.number()?,
             Inst::Extend { op, dst, src } => op.word() | (src.number()? << 5) | dst.number()?,
-            Inst::Load { dst, base, offset }
+            Inst::Load {
+                dst,
+                base,
+                offset,
+                size,
+            }
             | Inst::Store {
                 src: dst,
                 base,
                 offset,
+                size,
             } => {
+                // The transfer register has to agree with the width, because
+                // nothing else can catch a disagreement: an `ldrb` into an `X`
+                // is not an instruction, and silently encoding one as `ldr`
+                // reads seven bytes nobody asked for. Refusing is the same
+                // doctrine `Reg::number` follows for a name that is not a
+                // register.
+                if dst.is_wide() != size.is_wide() {
+                    return Err(format!(
+                        "`{}` is the wrong register for a {}-byte access",
+                        dst.0,
+                        size.bytes()
+                    ));
+                }
+                let bytes = size.bytes();
                 let offset = offset.unwrap_or(0);
-                if offset % 8 != 0 {
+                // The immediate is scaled by the access, so the alignment this
+                // demands is per-size rather than always eight. At eight bytes
+                // it is bit-for-bit what it was, which is why no frame access
+                // changed.
+                if offset % bytes != 0 {
                     return Err(format!("{offset} is not a multiple of the access size"));
                 }
-                let scaled = offset / 8;
+                let scaled = offset / bytes;
                 if scaled > 0xfff {
                     return Err(format!("{offset} is past the addressable frame"));
                 }
                 let load = matches!(self, Inst::Load { .. });
-                let opcode = if load { 0xf940_0000 } else { 0xf900_0000 };
+                let opcode = match (size, load) {
+                    (AccessSize::Byte, true) => 0x3940_0000,
+                    (AccessSize::Byte, false) => 0x3900_0000,
+                    (AccessSize::Half, true) => 0x7940_0000,
+                    (AccessSize::Half, false) => 0x7900_0000,
+                    (AccessSize::Word, true) => 0xb940_0000,
+                    (AccessSize::Word, false) => 0xb900_0000,
+                    (AccessSize::Double, true) => 0xf940_0000,
+                    (AccessSize::Double, false) => 0xf900_0000,
+                };
                 opcode | (scaled << 10) | (base.number()? << 5) | dst.number()?
             }
             // The frame record is the one pair access this compiler emits, and
@@ -1234,6 +1293,7 @@ mod tests {
                     dst: x("x16"),
                     base: x("sp"),
                     offset: Some(0),
+                    size: AccessSize::Double,
                 },
                 0xf94003f0,
             ),
@@ -1242,6 +1302,7 @@ mod tests {
                     dst: x("x0"),
                     base: x("sp"),
                     offset: Some(32760),
+                    size: AccessSize::Double,
                 },
                 0xf97fffe0,
             ),
@@ -1250,6 +1311,7 @@ mod tests {
                     dst: x("x17"),
                     base: x("x0"),
                     offset: None,
+                    size: AccessSize::Double,
                 },
                 0xf9400011,
             ),
@@ -1258,6 +1320,7 @@ mod tests {
                     dst: x("x0"),
                     base: x("x16"),
                     offset: Some(8),
+                    size: AccessSize::Double,
                 },
                 0xf9400600,
             ),
@@ -1266,6 +1329,7 @@ mod tests {
                     src: x("x16"),
                     base: x("sp"),
                     offset: Some(0),
+                    size: AccessSize::Double,
                 },
                 0xf90003f0,
             ),
@@ -1274,6 +1338,7 @@ mod tests {
                     src: x("x0"),
                     base: x("x16"),
                     offset: Some(24),
+                    size: AccessSize::Double,
                 },
                 0xf9000e00,
             ),
@@ -1282,8 +1347,87 @@ mod tests {
                     src: x("x17"),
                     base: x("x0"),
                     offset: None,
+                    size: AccessSize::Double,
                 },
                 0xf9000011,
+            ),
+            // The six narrow accesses a raw pointer reaches through (`D-067`).
+            // All of them write a `W`, which zeroes the upper half — that is
+            // what makes every one of them zero-extending, and why only a
+            // signed type needs anything done after the load.
+            (
+                Inst::Load {
+                    dst: x("w16"),
+                    base: x("x0"),
+                    offset: None,
+                    size: AccessSize::Byte,
+                },
+                0x39400010,
+            ),
+            (
+                Inst::Load {
+                    dst: x("w16"),
+                    base: x("x0"),
+                    offset: None,
+                    size: AccessSize::Half,
+                },
+                0x79400010,
+            ),
+            (
+                Inst::Load {
+                    dst: x("w16"),
+                    base: x("x0"),
+                    offset: None,
+                    size: AccessSize::Word,
+                },
+                0xb9400010,
+            ),
+            (
+                Inst::Store {
+                    src: x("w16"),
+                    base: x("x0"),
+                    offset: None,
+                    size: AccessSize::Byte,
+                },
+                0x39000010,
+            ),
+            (
+                Inst::Store {
+                    src: x("w16"),
+                    base: x("x0"),
+                    offset: None,
+                    size: AccessSize::Half,
+                },
+                0x79000010,
+            ),
+            (
+                Inst::Store {
+                    src: x("w16"),
+                    base: x("x0"),
+                    offset: None,
+                    size: AccessSize::Word,
+                },
+                0xb9000010,
+            ),
+            // The immediate is scaled by the access, so the same offset is a
+            // different field at each width.
+            (
+                Inst::Load {
+                    dst: x("w16"),
+                    base: x("x0"),
+                    offset: Some(3),
+                    size: AccessSize::Byte,
+                },
+                0x39400c10,
+            ),
+            (
+                Inst::Load {
+                    dst: x("w16"),
+                    base: x("x0"),
+                    offset: Some(4),
+                    size: AccessSize::Half,
+                },
+                0x79400810,
             ),
             (Inst::PushFrame, 0xa9bf7bfd),
             (Inst::PopFrame, 0xa8c17bfd),
@@ -1428,6 +1572,55 @@ mod tests {
         }
     }
 
+    /// The transfer register has to match the access width, and this is the
+    /// regression guard for what used to happen when it did not: the encoding
+    /// was `ldr x` whatever register it was handed, while the printed text said
+    /// what it was handed. A `W` in a byte access is right; a `W` in an
+    /// eight-byte one reads four bytes too few and used to assemble anyway.
+    #[test]
+    fn a_transfer_register_that_contradicts_the_width_fails_to_encode() {
+        let wrong = [
+            (x("x16"), AccessSize::Byte),
+            (x("x16"), AccessSize::Half),
+            (x("x16"), AccessSize::Word),
+            (x("w16"), AccessSize::Double),
+        ];
+        for (dst, size) in wrong {
+            let mut code = Code::default();
+            let load = Inst::Load {
+                dst,
+                base: x("x0"),
+                offset: None,
+                size,
+            };
+            assert!(
+                load.encode(&mut code).is_err(),
+                "`{dst}` was accepted for a {}-byte access",
+                size.bytes()
+            );
+        }
+        let right = [
+            (x("w16"), AccessSize::Byte),
+            (x("w16"), AccessSize::Half),
+            (x("w16"), AccessSize::Word),
+            (x("x16"), AccessSize::Double),
+        ];
+        for (dst, size) in right {
+            let mut code = Code::default();
+            let load = Inst::Load {
+                dst,
+                base: x("x0"),
+                offset: None,
+                size,
+            };
+            assert!(
+                load.encode(&mut code).is_ok(),
+                "`{dst}` was refused for a {}-byte access",
+                size.bytes()
+            );
+        }
+    }
+
     #[test]
     fn text_matches_what_the_backend_used_to_write() {
         let lines = [
@@ -1436,6 +1629,7 @@ mod tests {
                     dst: x("x16"),
                     base: x("sp"),
                     offset: Some(8),
+                    size: AccessSize::Double,
                 },
                 "ldr x16, [sp, #8]",
             ),
@@ -1444,6 +1638,7 @@ mod tests {
                     dst: x("x16"),
                     base: x("x0"),
                     offset: None,
+                    size: AccessSize::Double,
                 },
                 "ldr x16, [x0]",
             ),

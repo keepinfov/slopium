@@ -728,7 +728,7 @@ impl Resolver<'_> {
             ExprKind::Let { value, .. } | ExprKind::Set { value, .. } => {
                 self.rewrite_expr(value, diagnostics);
             }
-            ExprKind::Do(items) => {
+            ExprKind::Do(items) | ExprKind::Unsafe(items) => {
                 for item in items {
                     self.rewrite_expr(item, diagnostics);
                 }
@@ -999,7 +999,9 @@ fn collect_qualified_names<'a>(program: &'a Program, output: &mut Vec<&'a str>) 
         }
         match &expression.kind {
             ExprKind::Let { value, .. } | ExprKind::Set { value, .. } => expr(value, output),
-            ExprKind::Do(items) => items.iter().for_each(|item| expr(item, output)),
+            ExprKind::Do(items) | ExprKind::Unsafe(items) => {
+                items.iter().for_each(|item| expr(item, output))
+            }
             ExprKind::If {
                 condition,
                 then_expr,
@@ -1156,6 +1158,9 @@ fn is_builtin(name: &str) -> bool {
                 | "remove"
                 | "replace"
                 | "."
+                | "volatile-read"
+                | "volatile-write"
+                | "ptr-offset"
         )
 }
 
@@ -1186,7 +1191,9 @@ fn shift_program(program: &mut Program, base: usize) {
         shift_span(&mut expression.span, base);
         match &mut expression.kind {
             ExprKind::Let { value, .. } | ExprKind::Set { value, .. } => shift_expr(value, base),
-            ExprKind::Do(items) => items.iter_mut().for_each(|item| shift_expr(item, base)),
+            ExprKind::Do(items) | ExprKind::Unsafe(items) => {
+                items.iter_mut().for_each(|item| shift_expr(item, base))
+            }
             ExprKind::If {
                 condition,
                 then_expr,

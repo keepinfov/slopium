@@ -3,10 +3,10 @@ use crate::ast::{IntKind, Type};
 use crate::cfg::Cfg;
 use crate::diagnostic::{codes, CompileResult, Diagnostic, SourceMap, Span};
 use crate::lowering::{
-    address_taken, call_symbol, call_words, clone_function, drop_function, enum_clone_size,
-    enum_clone_symbol, enum_drop_symbol, enum_size, extern_declaration, function_symbol,
-    is_pointer_like, struct_clone_symbol, struct_drop_symbol, struct_size, trap_usage, Argument,
-    ExternClass, ExternWord, Step, Tail, TrapUsage,
+    access_size, address_taken, call_symbol, call_words, clone_function, drop_function,
+    enum_clone_size, enum_clone_symbol, enum_drop_symbol, enum_size, extern_declaration,
+    function_symbol, is_pointer_like, struct_clone_symbol, struct_drop_symbol, struct_size,
+    trap_usage, AccessSize, Argument, ExternClass, ExternWord, Step, Tail, TrapUsage,
 };
 use crate::mir::{BasicBlock, BinaryOp, Instruction, LocalId, MirFunction, MirModule, Terminator};
 use crate::regalloc::{allocate, Allocation, Location};
@@ -170,6 +170,20 @@ fn shift_trampoline() -> Target {
 /// A register as an operand, which is what most of them are.
 fn reg(name: &'static str) -> Operand {
     Operand::Reg(Reg(name))
+}
+
+/// The `PTR` size that spells one machine access of this width.
+///
+/// The widths themselves come from `lowering::access_size`, so both backends
+/// and the verifier agree about how wide a `bool` is; this only translates the
+/// answer into x86-64's spelling of it.
+fn memory_size(size: AccessSize) -> Size {
+    match size {
+        AccessSize::Byte => Size::Byte,
+        AccessSize::Half => Size::Word,
+        AccessSize::Word => Size::Dword,
+        AccessSize::Double => Size::Qword,
+    }
 }
 
 pub trait Backend {
@@ -656,6 +670,10 @@ impl<'a> Generator<'a> {
                 | Instruction::Load { .. }
                 | Instruction::EnumTag { .. }
                 | Instruction::EnumFieldLoad { .. }
+                // A volatile access reaches memory and never a function, so a
+                // leaf holding one is still a leaf.
+                | Instruction::VolatileLoad { .. }
+                | Instruction::VolatileStore { .. }
                 | Instruction::EnumFieldAddr { .. } => false,
             })
     }
@@ -1045,6 +1063,66 @@ impl<'a> Generator<'a> {
                     reg("rcx"),
                 ));
             }
+            // The address goes in `rcx` and the value in `rax`, which is the
+            // reverse of every other memory instruction here. `canonicalize_rax`
+            // is hardwired to `rax`, so the value has to land there and the
+            // address has to be somewhere else.
+            Instruction::VolatileLoad { dst, addr, ty } => {
+                let size = access_size(ty).expect("a volatile access has a machine width");
+                self.inst(Inst::Mov(
+                    reg("rcx"),
+                    operand(&self.alloc, self.registers, *addr),
+                ));
+                let at = Mem {
+                    size: Some(memory_size(size)),
+                    base: Reg("rcx"),
+                    disp: None,
+                };
+                match size {
+                    // `movzx` is the only way to read one or two bytes; four
+                    // and eight are a plain `mov`, and a 32-bit destination
+                    // zeroes the upper half by itself.
+                    AccessSize::Byte | AccessSize::Half => {
+                        self.inst(Inst::MovzxMem(Reg("rax"), at))
+                    }
+                    AccessSize::Word => self.inst(Inst::Mov(reg("eax"), Operand::Mem(at))),
+                    AccessSize::Double => self.inst(Inst::Mov(reg("rax"), Operand::Mem(at))),
+                }
+                self.canonicalize_loaded(ty);
+                self.inst(Inst::Mov(
+                    operand(&self.alloc, self.registers, *dst),
+                    reg("rax"),
+                ));
+            }
+            Instruction::VolatileStore { addr, src, ty } => {
+                let size = access_size(ty).expect("a volatile access has a machine width");
+                self.inst(Inst::Mov(
+                    reg("rcx"),
+                    operand(&self.alloc, self.registers, *src),
+                ));
+                self.inst(Inst::Mov(
+                    reg("rax"),
+                    operand(&self.alloc, self.registers, *addr),
+                ));
+                // The value is canonical by invariant, so a narrow store just
+                // truncates — which is what storing through a narrow pointer
+                // means. `cl` and `cx` are why the byte-register table stays at
+                // four names: number 1 is `cl` with or without a REX prefix.
+                let register = match size {
+                    AccessSize::Byte => "cl",
+                    AccessSize::Half => "cx",
+                    AccessSize::Word => "ecx",
+                    AccessSize::Double => "rcx",
+                };
+                self.inst(Inst::Mov(
+                    Operand::Mem(Mem {
+                        size: Some(memory_size(size)),
+                        base: Reg("rax"),
+                        disp: None,
+                    }),
+                    reg(register),
+                ));
+            }
             Instruction::EnumNew {
                 dst, tag, fields, ..
             } => {
@@ -1158,6 +1236,34 @@ impl<'a> Generator<'a> {
                 self.inst(Inst::ShiftImm(ShiftOp::Sar, Reg("rax"), count));
             }
             (_, false) => self.inst(Inst::Alu(AluOp::And, reg("rax"), Operand::Imm(kind.mask()))),
+        }
+    }
+
+    /// Puts a freshly loaded value in `rax` into the shape the rest of the
+    /// compiler assumes it has (`D-067`).
+    ///
+    /// For an integer that is `D-113`'s canonical word, and only a *signed*
+    /// narrow type needs anything done: the load already zero-extended, which
+    /// is exactly an unsigned type's canonicalisation, so the four unsigned
+    /// widths cost one instruction in total.
+    ///
+    /// For a `bool` it is something else, and it is not optional. MIR's
+    /// invariant is that a bool holds 0 or 1, and a device byte holding `0x02`
+    /// breaks it *asymmetrically*: `Terminator::Branch` tests for nonzero and
+    /// reads it as true, while `=` on a `bool` is an integer comparison and
+    /// reads it as false. Two answers to one question is a miscompile, so the
+    /// byte is narrowed to 0 or 1 here, where it enters the program.
+    fn canonicalize_loaded(&mut self, ty: &Type) {
+        if let Some(kind) = ty.int_kind() {
+            if kind.signed && !kind.is_full_width() {
+                self.canonicalize_rax(kind);
+            }
+            return;
+        }
+        if ty == &Type::Bool {
+            self.inst(Inst::Alu(AluOp::Cmp, reg("rax"), Operand::Imm(0)));
+            self.inst(Inst::Setcc(Cond::Ne, Reg("al")));
+            self.inst(Inst::Movzx(Reg("rax"), Reg("al")));
         }
     }
 

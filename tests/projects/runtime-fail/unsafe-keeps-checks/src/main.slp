@@ -1,0 +1,13 @@
+(take std:io println-i64)
+
+;; `unsafe` buys a raw pointer, not permission to skip a check (`D-067`).
+;; `D-031` calls the bounds and overflow checks untouchable, and the word
+;; does not touch them: the addition below traps inside an `unsafe` block
+;; exactly as it does outside one.
+
+(fn main () -> i32
+  (unsafe
+    (println-i64 (+ 9223372036854775807 1)))
+  0)
+
+(test "fixture compiles" true)

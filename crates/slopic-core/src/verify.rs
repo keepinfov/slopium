@@ -54,6 +54,7 @@ fn verify_module_after(file: &str, module: &MirModule, phase: Option<&str>) -> V
         verify_indirect_calls(file, function, phase, &mut errors);
         verify_returns(file, function, phase, &mut errors);
         verify_borrow_reads(file, function, phase, &mut errors);
+        verify_volatile_accesses(file, function, phase, &mut errors);
     }
     errors
 }
@@ -457,12 +458,88 @@ fn verify_borrow_reads(
     }
 }
 
+/// Checks that a volatile access agrees with the types around it (`D-067`).
+///
+/// This is the half of `D-067`'s invariant a single module *can* decide, and
+/// it is the half that prevents a miscompile rather than a missed optimization
+/// (`D-114`). The width in `ty` is what selects the machine access: an access
+/// one size too wide does not fault, it reads or writes the bytes of the
+/// neighbouring device register, which is the least debuggable outcome this
+/// feature can produce.
+///
+/// "Never eliminated, never reordered" is not here, and cannot be: those are
+/// statements about a module before and after a pass, and this function is
+/// handed one module. `opt::check_volatile` is where they live.
+fn verify_volatile_accesses(
+    file: &str,
+    function: &MirFunction,
+    phase: Option<&str>,
+    errors: &mut Vec<Diagnostic>,
+) {
+    let after = phase.map_or(String::new(), |phase| format!(" after {phase}"));
+    let mut report = |message: String| {
+        errors.push(Diagnostic::error(
+            codes::INTERNAL,
+            file,
+            function.span,
+            format!(
+                "internal compiler error: MIR verification failed{after} in `{}`: {message}; \
+                 this is a compiler bug",
+                function.name
+            ),
+        ));
+    };
+
+    let type_of = |local: usize| function.locals.get(local).map(|local| &local.ty);
+    for (index, block) in function.blocks.iter().enumerate() {
+        for (position, instruction) in block.instructions().enumerate() {
+            let where_ = format!("block {index} instruction {position}");
+            let (addr, ty, value, verb) = match instruction {
+                Instruction::VolatileLoad { dst, addr, ty } => (addr, ty, dst, "reads"),
+                Instruction::VolatileStore { addr, src, ty } => (addr, ty, src, "writes"),
+                _ => continue,
+            };
+            if crate::lowering::access_size(ty).is_none() {
+                report(format!(
+                    "{where_} {verb} `{ty:?}` through a pointer, which has no machine width"
+                ));
+                continue;
+            }
+            // Out-of-range locals are already reported by the operand check, so
+            // a missing type is not this pass's complaint.
+            let (Some(addr_ty), Some(value_ty)) = (type_of(*addr), type_of(*value)) else {
+                continue;
+            };
+            let Type::Ptr(pointee) = addr_ty else {
+                report(format!(
+                    "{where_} {verb} through _{addr}, which holds `{addr_ty:?}` rather than a raw \
+                     pointer"
+                ));
+                continue;
+            };
+            if pointee.as_ref() != ty {
+                report(format!(
+                    "{where_} {verb} `{ty:?}` through a pointer to `{pointee:?}`"
+                ));
+            }
+            if value_ty != ty {
+                report(format!(
+                    "{where_} {verb} `{ty:?}` from a local of `{value_ty:?}`"
+                ));
+            }
+        }
+    }
+}
+
 /// The argument types an extern call may carry: the `D-065` vocabulary, which
 /// is every type that is either `Copy` or already a borrow.
 fn crossable_argument(ty: &Type) -> bool {
     match ty {
         Type::F64 | Type::Bool => true,
         _ if ty.is_integer() => true,
+        // A raw pointer is `Copy` and borrows nothing, so it satisfies the
+        // rule this vocabulary is stated in (`D-067`).
+        Type::Ptr(_) => true,
         Type::Ref {
             mutable: false,
             inner,
@@ -1229,5 +1306,84 @@ mod tests {
         assert!(verify_module("test.slp", &bad)
             .iter()
             .any(|error| error.message.contains("non-numeric")),);
+    }
+
+    /// A function holding one volatile access, with every type stated
+    /// separately so that a test can disagree with exactly one of them.
+    fn volatile_probe(pointee: Type, access: Type, value: Type) -> MirFunction {
+        let mut function = probe(
+            vec![BasicBlock::synthetic(
+                vec![
+                    Instruction::ConstInt { dst: 0, value: 0 },
+                    Instruction::VolatileLoad {
+                        dst: 1,
+                        addr: 0,
+                        ty: access,
+                    },
+                ],
+                Terminator::Return(None),
+            )],
+            2,
+        );
+        // `probe` returns an `i64` and this one returns nothing, which the
+        // return check would otherwise report on its own.
+        function.return_type = Type::Unit;
+        function.locals[0].ty = Type::Ptr(Box::new(pointee));
+        function.locals[1].ty = value;
+        function
+    }
+
+    /// The check that stops a device register's neighbour from being read:
+    /// the width in the instruction has to be the width the pointer points at.
+    #[test]
+    fn a_volatile_access_must_agree_with_what_the_pointer_points_at() {
+        let good = module_with(volatile_probe(Type::U16, Type::U16, Type::U16));
+        assert!(
+            verify_module("test.slp", &good).is_empty(),
+            "{:?}",
+            verify_module("test.slp", &good)
+        );
+
+        let wrong_width = module_with(volatile_probe(Type::U8, Type::U16, Type::U16));
+        assert!(
+            verify_module("test.slp", &wrong_width)
+                .iter()
+                .any(|error| error.message.contains("through a pointer to")),
+            "a `u16` access through a `(Ptr u8)` was accepted"
+        );
+
+        let wrong_destination = module_with(volatile_probe(Type::U16, Type::U16, Type::I64));
+        assert!(
+            verify_module("test.slp", &wrong_destination)
+                .iter()
+                .any(|error| error.message.contains("from a local of")),
+            "a `u16` read into an `i64` local was accepted"
+        );
+    }
+
+    #[test]
+    fn a_volatile_access_must_carry_a_type_with_a_machine_width() {
+        let mir = module_with(volatile_probe(Type::U8, Type::String, Type::String));
+        assert!(
+            verify_module("test.slp", &mir)
+                .iter()
+                .any(|error| error.message.contains("no machine width")),
+            "a `String` volatile access was accepted"
+        );
+    }
+
+    #[test]
+    fn a_volatile_access_must_go_through_a_raw_pointer() {
+        let mut function = volatile_probe(Type::U8, Type::U8, Type::U8);
+        // The address is an ordinary integer rather than a pointer, which is
+        // what a lowering bug would produce.
+        function.locals[0].ty = Type::I64;
+        let mir = module_with(function);
+        assert!(
+            verify_module("test.slp", &mir)
+                .iter()
+                .any(|error| error.message.contains("rather than a raw pointer")),
+            "a volatile access through an `i64` was accepted"
+        );
     }
 }

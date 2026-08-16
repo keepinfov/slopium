@@ -48,6 +48,20 @@ pub enum Type {
         params: Vec<Type>,
         result: Box<Type>,
     },
+    /// A raw pointer to a scalar, written `(Ptr u16)` (`D-067`).
+    ///
+    /// The pointee is one of the eight integers, `bool` or `f64`, and that
+    /// restriction is the whole reason this type costs so little: nothing
+    /// owned can be reached through a pointer, so there is no aliasing rule
+    /// for `unsafe` to turn off. What it turns off is narrower and more
+    /// honest — memory reached this way is not proven to exist.
+    ///
+    /// A `Ptr` is a scalar like an integer: one machine word, `Copy`, no drop
+    /// and no clone. In particular it is deliberately *not*
+    /// `lowering::is_pointer_like`, which means "the word is the address of a
+    /// block the compiler manages". This word is a value that happens to be
+    /// an address, so `(& p)` takes the address of the slot holding it.
+    Ptr(Box<Type>),
 }
 
 /// The width and signedness of an integer type (`D-107`).
@@ -177,7 +191,21 @@ impl fmt::Display for IntLiteral {
 
 impl Type {
     pub fn is_copy(&self) -> bool {
-        matches!(self, Type::Unit | Type::Bool | Type::F64 | Type::Ref { .. }) || self.is_integer()
+        matches!(
+            self,
+            Type::Unit | Type::Bool | Type::F64 | Type::Ref { .. } | Type::Ptr(_)
+        ) || self.is_integer()
+    }
+
+    /// Whether this is a type a raw pointer may point at, and a volatile
+    /// access may carry (`D-067`).
+    ///
+    /// The eight integers, `bool` and `f64` — everything that is one machine
+    /// word and owns nothing. A `String` or a `List` behind a pointer would
+    /// be an ownership question, and refusing the type is how that question
+    /// is kept from arising at all.
+    pub fn is_scalar(&self) -> bool {
+        matches!(self, Type::Bool | Type::F64) || self.is_integer()
     }
 
     pub fn is_integer(&self) -> bool {
@@ -199,6 +227,26 @@ impl Type {
             _ => return None,
         };
         Some(IntKind { bits, signed })
+    }
+
+    /// The width and signedness a *conversion* treats this type as having.
+    ///
+    /// An integer's own, and `u64`'s for a raw pointer: an address is a 64-bit
+    /// unsigned quantity on both targets, so `(as u8 p)` is a narrowing and has
+    /// to truncate like any other (`D-067`, `D-113`).
+    ///
+    /// Asking `int_kind` here instead answers `None` for a pointer, which sends
+    /// the conversion down the "nothing to do" path and leaves a `u8` holding a
+    /// whole address — a value outside its own type, which every comparison and
+    /// every arithmetic operation downstream then reads at 64 bits.
+    pub fn conversion_kind(&self) -> Option<IntKind> {
+        match self {
+            Type::Ptr(_) => Some(IntKind {
+                bits: 64,
+                signed: false,
+            }),
+            _ => self.int_kind(),
+        }
     }
 
     /// What a borrow borrows, or the type itself when it is not one.
@@ -262,6 +310,7 @@ impl fmt::Display for Type {
                 }
                 write!(f, ") -> {result}")
             }
+            Type::Ptr(inner) => write!(f, "Ptr<{inner}>"),
         }
     }
 }
@@ -419,6 +468,17 @@ pub enum ExprKind {
         value: Box<Expr>,
     },
     Do(Vec<Expr>),
+    /// A block that permits raw-pointer operations (`D-067`).
+    ///
+    /// It is a `do` with a permission, not a second type system: the value and
+    /// type of the block are the last expression's, and nothing inside it is
+    /// checked differently except that a volatile access, a `ptr-offset` and a
+    /// conversion to or from a pointer are allowed to appear at all.
+    ///
+    /// What it does *not* turn off is bounds checks and overflow checks
+    /// (`D-031`). A program in an `unsafe` block still cannot index a list past
+    /// its end; it buys a pointer, not permission to skip a check.
+    Unsafe(Vec<Expr>),
     If {
         condition: Box<Expr>,
         then_expr: Box<Expr>,
@@ -970,6 +1030,14 @@ impl AstBuilder<'_> {
                 })
             }
             SExprKind::List(parts)
+                if parts.len() == 2 && matches!(atom(&parts[0]), Some("Ptr")) =>
+            {
+                // The pointee is checked in `sema`, not here: this is where a
+                // type is spelled, and `(Ptr String)` is a well-formed
+                // spelling of a type the language refuses.
+                Some(Type::Ptr(Box::new(self.ty(&parts[1])?)))
+            }
+            SExprKind::List(parts)
                 if parts.len() == 2 && matches!(atom(&parts[0]), Some("Slice")) =>
             {
                 Some(Type::Slice(Box::new(self.ty(&parts[1])?)))
@@ -1094,6 +1162,13 @@ impl AstBuilder<'_> {
                             body.push(self.expr(item)?);
                         }
                         ExprKind::Do(body)
+                    }
+                    "unsafe" => {
+                        let mut body = Vec::new();
+                        for item in &items[1..] {
+                            body.push(self.expr(item)?);
+                        }
+                        ExprKind::Unsafe(body)
                     }
                     "if" => {
                         if items.len() != 4 {

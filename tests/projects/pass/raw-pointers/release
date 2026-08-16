@@ -1,0 +1,5 @@
+Build and execute this fixture with the release MIR pass too: a volatile access
+must survive constant propagation, CFG simplification and dead code elimination
+untouched (`D-067`, `D-114`). This is the end-to-end half of that claim — the
+MIR-level half is in `opt/tests.rs`, and the two fail differently, which is why
+both are here.

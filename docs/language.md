@@ -571,6 +571,61 @@ instead. A package says what it depends on:
 std = { toolchain = true }
 ```
 
+## Raw pointers and volatile
+
+A device register is a byte, a half or a word at a fixed address, and reaching
+one is the only thing in the language the compiler cannot prove safe. So it is
+spelled out: `(Ptr T)` is a raw pointer, and every operation on one is written
+inside an `unsafe` block.
+
+```lisp
+(fn clear-screen ((vga (Ptr u16))) -> unit
+  (unsafe
+    (let mut cell 0)
+    (while (< cell 2000)
+      (volatile-write (ptr-offset vga cell) 0x0720)
+      (set cell (+ cell 1)))))
+```
+
+The pointee must be a scalar — one of the eight integers, `bool`, or `f64`.
+`(Ptr String)` and `(Ptr (List i64))` are refused at the type, which is what
+keeps ownership out of the question entirely: nothing owned can be reached
+through a pointer, so there is no aliasing rule to suspend.
+
+A pointer is a scalar itself: one machine word, `Copy`, dropped by nobody. It
+converts to and from any integer with `as`, in both directions, and to another
+pointer:
+
+| form | meaning |
+| --- | --- |
+| `(as (Ptr T) n)` | the address `n`, as a pointer to `T` |
+| `(as u64 p)` | the address in `p` |
+| `(as (Ptr U) p)` | the same address, read as a `U` |
+| `(ptr-offset p n)` | `n` elements past `p`, scaled by `T`'s width |
+| `(volatile-read p)` | the `T` at `p` |
+| `(volatile-write p v)` | store `v` at `p` |
+
+`ptr-offset` counts elements and not bytes, and its count is a `u64`, so the
+arithmetic is unsigned throughout; it traps on overflow like any other. To go
+backwards, compute the base you want.
+
+Two things `unsafe` does **not** do.
+
+It does not turn off the bounds and overflow checks. Indexing a list past its
+end still panics inside an `unsafe` block, and so does an addition that leaves
+its type. What the word buys is a pointer, not permission to skip a check.
+
+And it does not travel. A `lambda` written inside an `unsafe` block does not
+inherit the permission: its body is a function value that can be called from
+anywhere, so it asks for its own.
+
+What `unsafe` does say is that the compiler stopped proving one thing — that
+the address points at anything at all. Nothing checks that a `(Ptr u16)` is
+aligned, mapped, or yours. The optimizer will not fold two volatile reads into
+one, drop a read whose result is unused, or move one past another; but there is
+no memory barrier under any of this, so ordering against *other* accesses is
+the program's own business.
+
 ## Calling C
 
 An `extern` declaration names a C function and gives it a Slopium signature.
@@ -589,9 +644,13 @@ Slopium calls, and it is an ordinary module-level item — private by default,
 ```
 
 The type vocabulary is closed. A parameter is any integer type, `f64`, `bool`,
-`(& String)`, or `(& (Slice T))`. A return is `unit`, one of those scalars, or
-an owned `String`. Anything else is refused at the declaration, and an `extern`
-cannot be generic: there is nothing a type parameter could stand for.
+`(Ptr T)`, `(& String)`, or `(& (Slice T))`. A return is `unit`, one of those
+scalars, `(Ptr T)`, or an owned `String`. Anything else is refused at the
+declaration, and an `extern` cannot be generic: there is nothing a type
+parameter could stand for.
+
+A `(Ptr T)` is C's `T *`. Receiving one needs no `unsafe` — a pointer is an
+ordinary value until something reads through it.
 
 An `extern` borrows and never moves. A `(& String)` arrives as a
 NUL-terminated `const char *`; a `(& (Slice T))` arrives as two arguments, the

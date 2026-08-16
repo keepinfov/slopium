@@ -1,0 +1,4 @@
+(fn poke ((port (Ptr u8))) -> unit
+  (volatile-write port 1))
+
+(fn main () -> i32 0)

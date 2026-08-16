@@ -1,0 +1,4 @@
+volatile-write-width.slp:2:32: error[SL0200]: expected `u8`, found `i64`
+  |
+ 2 |   (unsafe (volatile-write port (as i64 1))))
+  |                                ^^^^^^^^^^

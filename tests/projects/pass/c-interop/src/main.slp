@@ -20,6 +20,10 @@
 
 (extern "hal_greeting" (hal-greeting) -> String)
 
+(extern "hal_buffer" (hal-buffer) -> (Ptr u8))
+
+(extern "hal_peek" (hal-peek (at (Ptr u8))) -> i64)
+
 (fn doubled ((value i32)) -> i32
   (hal-narrow value))
 
@@ -37,6 +41,12 @@
   (let greeting (hal-greeting))
   (println (& greeting))
   (println-bool (= (doubled 21) 42))
+  ; A pointer crosses out of C and back into it, and what Slopium wrote
+  ; through it is what C reads there. Receiving the address needs no
+  ; permission; using it does.
+  (let port (hal-buffer))
+  (unsafe (volatile-write port 0x2A))
+  (println-i64 (hal-peek port))
   0)
 
 (test "a narrow return is sign-extended before Slopium sees it"

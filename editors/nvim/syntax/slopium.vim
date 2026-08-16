@@ -33,6 +33,10 @@ syntax match slopiumVariableDefinition "[a-z_][A-Za-z0-9_-]*" contained
 syntax keyword slopiumAssignmentKeyword set nextgroup=slopiumVariable skipwhite
 syntax match slopiumVariable "[a-z_][A-Za-z0-9_-]*" contained
 syntax keyword slopiumControl do loop while break continue
+" `unsafe` is a block like `do`, and a permission rather than a second type
+" system. It gets its own group so that a reader scanning a file can find every
+" place the compiler stopped proving things.
+syntax keyword slopiumUnsafe unsafe
 syntax keyword slopiumConditional if match try and or
 " Anchored after `(` so the `:as` of an import alias stays a field.
 syntax match slopiumConversion "\%((\s*\)\@<=as\>"
@@ -43,9 +47,9 @@ syntax keyword slopiumModuleKeyword export take
 syntax match slopiumParameter "\v<[a-z_][A-Za-z0-9_-]*>\ze\s+(&mut|&)?(unit|bool|i8|i16|i32|i64|u8|u16|u32|u64|f64|String|[A-Z][A-Za-z0-9_-]*)\s*\)"
 
 syntax match slopiumOwnership "&mut\|&"
-syntax keyword slopiumBuiltin clone list array slice len push get get-ref pop remove replace not bit-and bit-or bit-xor bit-not shl shr
+syntax keyword slopiumBuiltin clone list array slice len push get get-ref pop remove replace not bit-and bit-or bit-xor bit-not shl shr volatile-read volatile-write ptr-offset
 syntax match slopiumOperator "\%((\s*\)\@<=\%([<>!]\=[=]\|[-+*/<>%]\)"
-syntax keyword slopiumType unit bool i8 i16 i32 i64 u8 u16 u32 u64 f64 String List Array Slice Fn
+syntax keyword slopiumType unit bool i8 i16 i32 i64 u8 u16 u32 u64 f64 String List Array Slice Fn Ptr
 syntax match slopiumEnumPath "\v<[A-Za-z_][A-Za-z0-9_-]*(:[A-Za-z_][A-Za-z0-9_-]*)+>"
 syntax match slopiumField "\v:[A-Za-z_][A-Za-z0-9_-]*"
 syntax match slopiumArrow "->"
@@ -69,6 +73,7 @@ highlight default link slopiumTypeName @type.definition
 highlight default link slopiumBindingKeyword @keyword
 highlight default link slopiumAssignmentKeyword @keyword
 highlight default link slopiumControl Conditional
+highlight default link slopiumUnsafe @keyword.exception
 highlight default link slopiumConditional @keyword.conditional
 highlight default link slopiumConversion @keyword.operator
 highlight default link slopiumModuleKeyword Include
