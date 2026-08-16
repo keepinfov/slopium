@@ -190,8 +190,9 @@ type(scope): imperative lowercase description
 - Types: `feat`, `fix`, `refactor`, `perf`, `test`, `docs`, `build`, `ci`,
   `chore`, `revert`.
 - Scopes in use: `slopium` (the language and the toolchain — the default for
-  compiler, manager, standard library, and runtime work), `manifest`, `docs`.
-  Ask before inventing a new one.
+  compiler, manager, standard library, and runtime work), `slopic` for work that
+  is the compiler's alone, `manifest`, and `docs`. Ask before inventing a new
+  one, and add it to `scripts/commit-check.sh` in the same commit.
 - English, imperative, lowercase after the colon, no trailing period.
 - Aim for 72 characters, hard limit 95.
 - Say what the language or the toolchain now does, not which files moved. The

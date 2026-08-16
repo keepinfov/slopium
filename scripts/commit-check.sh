@@ -20,7 +20,7 @@
 set -euo pipefail
 
 types="feat fix refactor perf test docs build ci chore revert"
-scopes="slopium manifest docs"
+scopes="slopium slopic manifest docs"
 needs_body="feat fix refactor perf test docs"
 subject_max=95
 body_wrap=80
