@@ -303,6 +303,7 @@ cc -g -fsanitize=address -fno-omit-frame-pointer \
     "$workspace_dir/runtime/slop_rt_hosted.c"
 printf '42\n' | ASAN_OPTIONS=detect_leaks="${SLOPIUM_ASAN_DETECT_LEAKS:-0}":halt_on_error=1 \
   "$check_dir/runtime-asan" argument >/dev/null
+echo "runtime-check: the library and its runtime under ASan ... ok"
 
 if command -v valgrind >/dev/null 2>&1; then
   cc -g -o "$check_dir/runtime-valgrind" \
@@ -311,6 +312,9 @@ if command -v valgrind >/dev/null 2>&1; then
   printf '42\n' | valgrind \
     --quiet --leak-check=full --show-leak-kinds=all --error-exitcode=99 \
     "$check_dir/runtime-valgrind" argument >/dev/null
+  echo "runtime-check: the same program under valgrind ... ok"
 else
   skip "valgrind not found; skipped"
 fi
+
+echo "runtime-check: all runtime checks passed"
