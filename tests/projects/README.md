@@ -62,10 +62,19 @@ supports at all.
 | Project | Covered surface |
 | --- | --- |
 | `bare` | `[build] target = "x86_64-unknown-none"` and `[build] linker-script`, an entry stub in `.s` and the four runtime hooks through `c-sources`, the core half of the runtime alone |
+| `kernel` | a multiboot stub that enters long mode, a VGA write through a volatile `(Ptr u16)` at `0xB8000` read back through the same pointer, and a UART driver written in Slopium over an `extern` pair of port instructions |
 
 Each one is asserted to build, to leave nothing undefined under `nm -u`, to have
 had its linker script applied — the fixture's script discards `.comment`, which
-every default link keeps — to exit with the status in `expected.status`, and to
-have `test` refused with a message rather than silently accepted. The fixture
-sets `strip = false`, because `nm -u` finding nothing is only a claim while there
-is a symbol table to look in.
+every default link keeps — and to have `test` refused with a message rather than
+silently accepted. Each sets `strip = false`, because `nm -u` finding nothing is
+only a claim while there is a symbol table to look in.
+
+A fixture carrying an `expected.status` is also run here and its status
+compared. `kernel` carries none, because it cannot be executed on the host at
+all: it is entered by a loader in 32-bit protected mode, and
+`scripts/kernel-check.sh` boots it under `qemu-system-x86_64` and compares what
+arrives on the serial port against `expected.serial`. The split is deliberate —
+the kernel is still built, linked and inspected on every run of this script,
+including on a machine with no emulator, so it cannot rot silently behind a
+skipped boot.

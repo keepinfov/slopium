@@ -1,0 +1,22 @@
+[package]
+name = "kernel"
+version = "0.8.5"
+source = "src"
+entry = "src/main.slp"
+# The boot stub, the port-I/O pair the Slopium driver is written over, and the
+# four runtime hooks. A kernel needs all three where `bare` needed two.
+c-sources = ["boot/start.s", "boot/hal.s", "boot/hooks.c"]
+
+[dependencies]
+core = { toolchain = true }
+
+[build]
+target = "x86_64-unknown-none"
+linker-script = "link/kernel.ld"
+
+[profile.dev]
+opt-level = 0
+debug = false
+# `nm -u` showing nothing is only a claim about undefined symbols while there is
+# a symbol table to look in, and `debug = false` would otherwise strip it.
+strip = false

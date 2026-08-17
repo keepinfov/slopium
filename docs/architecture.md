@@ -434,6 +434,27 @@ hand-written link and the shipped one have to agree about the flags and about
 the entry point. `tests/projects/freestanding` makes the same claim about a
 package, where the linker script and the entry stub come from a manifest.
 
+`scripts/kernel-check.sh` is where the environment stops being a set of flags
+and becomes a machine. It boots `tests/projects/freestanding/kernel` under
+`qemu-system-x86_64`: a multiboot stub enters in 32-bit protected mode, zeroes
+`.bss`, identity-maps the first 8 MiB, switches to long mode and calls
+`sl_fn_6d61696e`, and the Slopium above it writes the VGA text framebuffer
+through a volatile `(Ptr u16)` at `0xB8000`, **reads it back through the same
+pointer**, and sends what it found out of a serial port through a UART driver
+written in Slopium over an `extern` pair of port instructions. Port-mapped I/O
+is the one thing a raw pointer cannot express — it is a separate address space
+that no address names — so `in` and `out` cross the C boundary rather than
+becoming operators, which keeps `lowering.rs` target-neutral (`D-025`).
+
+The image QEMU is handed is a 32-bit re-wrap of the linked kernel, because
+QEMU's multiboot loader refuses a 64-bit one. `objcopy` rewrites the container
+and nothing else; the contents and the entry stay where the linker script put
+them, and every address fits because the whole image lives at 1 MiB — which is
+also what keeps the small code model the compiler emits correct, there being no
+`-mcmodel=kernel` to offer. Interrupts are never enabled and no IDT is ever
+loaded, which is what makes the red zone sound: only an asynchronous push could
+corrupt it.
+
 Generated hosted executables use a small C ABI `main(argc, argv)` wrapper.
 Language functions, including the user `main`, retain compiler-mangled symbols.
 Unrecoverable runtime errors print a normalized message and exit with status

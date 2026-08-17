@@ -355,6 +355,11 @@
           # link what it emits, and `qemu-aarch64` is how the result is run on
           # an x86-64 host. Neither is needed to build the compiler itself, so
           # they are in the dev shell only.
+          #
+          # The same `qemu` carries `qemu-system-x86_64`, which is a different
+          # claim rather than the same one twice: user-mode emulation runs a
+          # program on a kernel that already exists, and `kernel-check.sh` boots
+          # one that does not.
           crossCc = pkgs.pkgsCross.aarch64-multiplatform.stdenv.cc;
         in
         {
@@ -380,6 +385,7 @@
               echo "  cargo test --workspace"
               export SLOPIUM_CC_AARCH64_UNKNOWN_LINUX_GNU=${crossCc.targetPrefix}cc
               export SLOPIUM_QEMU_AARCH64=qemu-aarch64
+              export SLOPIUM_QEMU_SYSTEM_X86_64=qemu-system-x86_64
             '';
           };
         });

@@ -1,0 +1,93 @@
+; A kernel. It runs on a machine with no operating system under it, writes a
+; message into the VGA text framebuffer through a volatile `u16` pointer, reads
+; that framebuffer back, and sends what it actually found there out of a serial
+; port one `u8` at a time.
+;
+; Every word of that is a feature of a patch in this milestone and none of it is
+; new here: `0xB8000` is a hexadecimal literal (v0.8.0), `u8` and `u16` are the
+; integer axis (v0.8.1), the volatile access and `(Ptr T)` are v0.8.2, the
+; section its entry stub lives in is v0.8.3, and the link with no C library is
+; v0.8.4. What this file adds is the evidence that they add up to a driver.
+;
+; It reads the framebuffer back rather than trusting the write, because a test
+; that asserts what it just assumed is not a test.
+;
+; There is no module-level constant in the language yet, so every fixed address
+; below is a function returning a literal. That is the workaround the pre-freeze
+; inventory names, and leaving it visible here is deliberate.
+
+(take core:string byte-at)
+
+; Port-mapped I/O is not memory, so it crosses the C boundary rather than a
+; pointer. `boot/hal.s` is the two instructions on the other side.
+(extern "slop_outb" (outb (port u16) (value u8)) -> unit)
+(extern "slop_inb" (inb (port u16)) -> u8)
+
+(fn com1-data () -> u16 0x3F8)
+
+(fn com1-interrupt-enable () -> u16 0x3F9)
+
+(fn com1-fifo-control () -> u16 0x3FA)
+
+(fn com1-line-control () -> u16 0x3FB)
+
+(fn com1-modem-control () -> u16 0x3FC)
+
+(fn com1-line-status () -> u16 0x3FD)
+
+; 38400 baud, eight bits, no parity, one stop bit, FIFOs on, interrupts off.
+; This is an ordinary UART bring-up sequence and it is written in Slopium.
+(fn serial-init () -> unit
+  (outb (com1-interrupt-enable) 0x00)
+  (outb (com1-line-control) 0x80)
+  (outb (com1-data) 0x03)
+  (outb (com1-interrupt-enable) 0x00)
+  (outb (com1-line-control) 0x03)
+  (outb (com1-fifo-control) 0xC7)
+  (outb (com1-modem-control) 0x0B))
+
+(fn transmit-empty () -> bool
+  (!= (bit-and (inb (com1-line-status)) 0x20) 0x00))
+
+(fn serial-put ((byte u8)) -> unit
+  (while (not (transmit-empty))
+    (let spinning 0))
+  (outb (com1-data) byte))
+
+(fn vga-base () -> u64 0xB8000)
+
+; White on black, already in the high half of the cell, so a character is one
+; `bit-or` away from being one.
+(fn vga-attribute () -> u16 0x0F00)
+
+(fn vga-cell ((byte u8)) -> u16
+  (bit-or (vga-attribute) (as u16 byte)))
+
+; Taking an address out of an integer needs the word as much as reading through
+; it does: `SL0301` covers the conversion too, because that is where a number
+; stops being a number.
+(fn vga-write ((index u64) (byte u8)) -> unit
+  (unsafe
+    (let cells (as (Ptr u16) (vga-base)))
+    (volatile-write (ptr-offset cells index) (vga-cell byte))))
+
+(fn vga-read ((index u64)) -> u8
+  (unsafe
+    (let cells (as (Ptr u16) (vga-base)))
+    (let cell (volatile-read (ptr-offset cells index)))
+    (as u8 (bit-and cell 0x00FF))))
+
+(fn main () -> i64
+  (serial-init)
+  (let message "slopium boots")
+  (let size (len (& message)))
+  (let mut index 0)
+  (while (< index size)
+    (vga-write (as u64 index) (as u8 (byte-at (& message) index)))
+    (set index (+ index 1)))
+  (set index 0)
+  (while (< index size)
+    (serial-put (vga-read (as u64 index)))
+    (set index (+ index 1)))
+  (serial-put 0x0A)
+  0x10)

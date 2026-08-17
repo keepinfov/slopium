@@ -633,8 +633,9 @@ done < <(
 #
 # These cannot live in `pass/`. There is no `std:io` in a freestanding program
 # and so nothing to compare stdout against — the answer leaves through the exit
-# status, the way `core-check.sh` argues it must — and `run` and `test` are not
-# things this shape supports at all.
+# status, the way `core-check.sh` argues it must, or through a serial port when
+# there is no host to exit to — and `run` and `test` are not things this shape
+# supports at all.
 # ---------------------------------------------------------------------------
 
 freestanding_target="x86_64-unknown-none"
@@ -683,14 +684,22 @@ else
       exit 1
     fi
 
-    set +e
-    "$artifact"
-    status=$?
-    set -e
-    expected="$(cat "$project/expected.status")"
-    if [[ "$status" -ne "$expected" ]]; then
-      echo "project-tests: freestanding/$name exited $status instead of $expected" >&2
-      exit 1
+    # A freestanding program that the host can still execute says its answer in
+    # its exit status. A kernel cannot be executed here at all — it is entered
+    # by a loader in 32-bit protected mode, and `scripts/kernel-check.sh` boots
+    # it. Building and inspecting it here anyway is the point: the fixture stays
+    # linked, `nm -u` clean and layout-checked on every run, including on a
+    # machine with no emulator, rather than rotting behind a skip.
+    if [[ -f "$project/expected.status" ]]; then
+      set +e
+      "$artifact"
+      status=$?
+      set -e
+      expected="$(cat "$project/expected.status")"
+      if [[ "$status" -ne "$expected" ]]; then
+        echo "project-tests: freestanding/$name exited $status instead of $expected" >&2
+        exit 1
+      fi
     fi
 
     # A freestanding target has no harness, and saying so is the difference
