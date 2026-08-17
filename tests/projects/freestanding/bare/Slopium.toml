@@ -1,0 +1,23 @@
+[package]
+name = "bare"
+version = "0.8.4"
+source = "src"
+entry = "src/main.slp"
+# The entry stub and the four runtime hooks. `.s` is here on purpose: a package
+# has always been able to hand assembly to `cc`, and nothing asserted it.
+c-sources = ["boot/start.s", "boot/hooks.c"]
+
+[dependencies]
+core = { toolchain = true }
+
+[build]
+target = "x86_64-unknown-none"
+linker-script = "link/bare.ld"
+
+[profile.dev]
+opt-level = 0
+debug = false
+# The gate reads the symbol table: `nm -u` showing nothing is only a claim about
+# undefined symbols while there are symbols to show. Absent, `strip` would be on
+# here, because a build with `debug = false` is not a debug build.
+strip = false

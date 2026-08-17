@@ -76,7 +76,8 @@ pub enum Environment {
     Hosted,
     /// Neither. The program supplies `sl_rt_alloc`, `sl_rt_free`,
     /// `sl_rt_abort` and `sl_rt_panic` (`D-080`), starts itself, and has
-    /// `core` and nothing above it.
+    /// `core` and nothing above it. The link says so with `-nostdlib` and
+    /// `-nostartfiles`, and the entry point is the program's own.
     Freestanding,
 }
 
@@ -106,8 +107,9 @@ pub struct TargetSpec {
     pub object_format: &'static str,
     pub default_cc: &'static str,
     /// The environment this target implies when the command line does not
-    /// override it. Both targets are hosted today; a `-none` triple at v0.7 is
-    /// then a row in this table and not a new mechanism (`D-081`).
+    /// override it. `x86_64-unknown-none` is the row that made `D-081`'s
+    /// arrangement pay: adding a freestanding target was a table entry rather
+    /// than a new mechanism.
     pub environment: Environment,
 }
 
@@ -132,8 +134,25 @@ pub const AARCH64_LINUX_GNU: TargetSpec = TargetSpec {
     environment: Environment::Hosted,
 };
 
+/// The same architecture and object format as [`X86_64_LINUX_GNU`], with no C
+/// library under it: the program starts itself, supplies the four runtime hooks
+/// (`D-080`), and has `core` and nothing above it (`D-069`).
+///
+/// `default_cc` is the bare driver rather than a triple-prefixed one. A cross
+/// toolchain is named after the architecture it builds for and this row shares
+/// the host's, so the reasoning in [`AARCH64_LINUX_GNU`] does not apply — what
+/// differs here is the environment, and `-nostdlib` is how the link says so.
+pub const X86_64_NONE: TargetSpec = TargetSpec {
+    triple: "x86_64-unknown-none",
+    architecture: "x86_64",
+    abi: "System V AMD64",
+    object_format: "ELF",
+    default_cc: "cc",
+    environment: Environment::Freestanding,
+};
+
 /// Every target this compiler emits for.
-pub const TARGETS: &[TargetSpec] = &[X86_64_LINUX_GNU, AARCH64_LINUX_GNU];
+pub const TARGETS: &[TargetSpec] = &[X86_64_LINUX_GNU, AARCH64_LINUX_GNU, X86_64_NONE];
 
 /// The target chosen when nothing asks for one. It is the host, so building
 /// without a `--target` needs no cross toolchain.
@@ -144,7 +163,11 @@ pub const DEFAULT_TARGET: &str = X86_64_LINUX_GNU.triple;
 /// A separate list because `CompilerInfo` is serialized and a `const fn` cannot
 /// build one from the table; `every_target_is_listed_once` keeps the two in
 /// step.
-pub const TARGET_TRIPLES: &[&str] = &["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"];
+pub const TARGET_TRIPLES: &[&str] = &[
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-none",
+];
 
 /// Argument registers of the System V AMD64 calling convention, and their
 /// 32-bit views for the one place a zero is cheaper to write narrow.
@@ -192,7 +215,6 @@ fn memory_size(size: AccessSize) -> Size {
 }
 
 pub trait Backend {
-    fn target(&self) -> &'static TargetSpec;
     fn emit(
         &self,
         file: &str,
@@ -239,10 +261,6 @@ pub fn write_object<I: crate::asm::Instruction>(
 pub struct X86_64Backend;
 
 impl Backend for X86_64Backend {
-    fn target(&self) -> &'static TargetSpec {
-        &X86_64_LINUX_GNU
-    }
-
     fn emit(
         &self,
         file: &str,
@@ -265,13 +283,20 @@ impl Backend for X86_64Backend {
 
 /// The backend that emits for `triple`, or `None` when no backend claims it.
 pub fn backend_for(triple: &str) -> Option<Box<dyn Backend>> {
-    if triple == X86_64_LINUX_GNU.triple {
-        Some(Box::new(X86_64Backend))
-    } else if triple == AARCH64_LINUX_GNU.triple {
-        Some(Box::new(crate::aarch64::Aarch64Backend))
-    } else {
-        None
+    // The architecture selects the backend, not the triple. A freestanding
+    // target shares its code generation with the hosted target beside it and
+    // differs only in the environment, so a second `-none` row costs nothing
+    // here.
+    match target_spec(triple)?.architecture {
+        "x86_64" => Some(Box::new(X86_64Backend)),
+        "aarch64" => Some(Box::new(crate::aarch64::Aarch64Backend)),
+        _ => None,
     }
+}
+
+/// The row [`TARGETS`] holds for a triple, or `None` when nothing claims it.
+pub fn target_spec(triple: &str) -> Option<&'static TargetSpec> {
+    TARGETS.iter().find(|spec| spec.triple == triple)
 }
 
 #[derive(Clone, Debug)]

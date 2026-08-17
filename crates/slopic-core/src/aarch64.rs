@@ -17,7 +17,7 @@ use crate::aarch64_inst::{Arith, Cond, ExtendOp, FloatOp, Inst, Reg};
 use crate::asm::{Assembly, Item, Section, Target};
 use crate::ast::{IntKind, Type};
 use crate::cfg::Cfg;
-use crate::codegen::{align_to, regime, Backend, CodegenOptions, TargetSpec, AARCH64_LINUX_GNU};
+use crate::codegen::{align_to, regime, Backend, CodegenOptions};
 use crate::diagnostic::{codes, CompileResult, Diagnostic, Span};
 use crate::lowering::{
     access_size, address_taken, call_symbol, call_words, clone_function, drop_function,
@@ -157,10 +157,6 @@ const RESULT: Reg = X0;
 pub struct Aarch64Backend;
 
 impl Backend for Aarch64Backend {
-    fn target(&self) -> &'static TargetSpec {
-        &AARCH64_LINUX_GNU
-    }
-
     fn emit(
         &self,
         file: &str,
@@ -2030,7 +2026,7 @@ fn float_condition(op: BinaryOp) -> Cond {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codegen::{is_location, DEFAULT_TARGET};
+    use crate::codegen::{is_location, AARCH64_LINUX_GNU, DEFAULT_TARGET};
     use crate::{compile_to_assembly, CompileOptions};
 
     fn options() -> CompileOptions {

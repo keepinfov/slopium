@@ -422,6 +422,18 @@ impl DependencySpec {
 #[serde(deny_unknown_fields)]
 pub struct BuildSection {
     pub target: Option<String>,
+    /// The linker script the final image is laid out by, relative to the
+    /// package root and unable to leave it (`SL1101`).
+    ///
+    /// It lives here rather than beside `c-sources` in `[package]`, and the
+    /// difference is the point (`D-117`). A package's C is additive: every
+    /// dependency's is compiled and linked, and a longer list is a correct
+    /// answer. A linker script describes one whole image, so a list of them is
+    /// a conflict rather than an answer — and `[build]` is already the table
+    /// read from the root package alone, which is what makes a dependency's
+    /// script ignored by construction instead of by a rule.
+    #[serde(rename = "linker-script")]
+    pub linker_script: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -560,6 +572,8 @@ impl RawManifest {
         let config = load_local_config(&self.root)?;
         let c_sources = validate_c_sources(&package.c_sources)
             .map_err(|error| format!("`{}`: {error}", self.manifest_path.display()))?;
+        let linker_script = validate_linker_script(self.manifest.build.linker_script.as_deref())
+            .map_err(|error| format!("`{}`: {error}", self.manifest_path.display()))?;
         Ok(Project {
             root: self.root,
             manifest_path: self.manifest_path,
@@ -571,6 +585,7 @@ impl RawManifest {
             entry: package.entry,
             source: package.source,
             c_sources,
+            linker_script,
             dependencies,
         })
     }
@@ -608,6 +623,39 @@ fn validate_c_sources(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
     Ok(paths.to_vec())
 }
 
+/// Checks that `[build] linker-script` names a file inside the package.
+///
+/// The same three lexical checks as `validate_c_sources`, at the same time and
+/// for the same reason: a script the archive cannot carry is a package that
+/// links for its author alone. The code differs because the key does — a
+/// diagnostic that named `c-sources` while the author wrote `linker-script`
+/// would send them to the wrong line.
+fn validate_linker_script(path: Option<&Path>) -> Result<Option<PathBuf>, String> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let display = path.display();
+    if path.is_absolute() {
+        return Err(format!(
+            "SL1101: `linker-script` `{display}` is absolute; \
+             it must be relative to the package root"
+        ));
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
+    {
+        return Err(format!(
+            "SL1101: `linker-script` `{display}` leaves the package; \
+             a package may only link with its own files"
+        ));
+    }
+    if path.as_os_str().is_empty() {
+        return Err("SL1101: `linker-script` is an empty path".into());
+    }
+    Ok(Some(path.to_owned()))
+}
+
 /// A package: its manifest, where it was read from, and `[package]` normalized.
 #[derive(Clone, Debug)]
 pub struct Project {
@@ -623,6 +671,9 @@ pub struct Project {
     pub source: Option<PathBuf>,
     /// C files this package compiles and links, relative to [`Self::root`].
     pub c_sources: Vec<PathBuf>,
+    /// The linker script this package lays its image out with, relative to
+    /// [`Self::root`]. Read from the root package only, like `[build] target`.
+    pub linker_script: Option<PathBuf>,
     /// `[dependencies]` with workspace inheritance applied.
     pub dependencies: BTreeMap<String, DependencySpec>,
 }
@@ -810,6 +861,45 @@ mod tests {
         for escape in ["../elsewhere/hal.c", "/etc/hal.c"] {
             let error = validate_c_sources(&[PathBuf::from(escape)]).unwrap_err();
             assert!(error.starts_with("SL1100"), "{escape}: {error}");
+        }
+    }
+
+    #[test]
+    fn linker_script_is_read_and_kept_inside_the_package() {
+        let parsed = manifest(
+            r#"
+                [package]
+                name = "kernel"
+                version = "0.1.0"
+                entry = "src/main.slp"
+
+                [build]
+                target = "x86_64-unknown-none"
+                linker-script = "link/kernel.ld"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            parsed.build.linker_script,
+            Some(PathBuf::from("link/kernel.ld"))
+        );
+
+        // Absent is the ordinary case: a freestanding link without a script uses
+        // the default layout, so the key is a choice rather than a requirement.
+        let bare = manifest(
+            r#"
+                [package]
+                name = "kernel"
+                version = "0.1.0"
+                entry = "src/main.slp"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(bare.build.linker_script, None);
+
+        for escape in ["../elsewhere/kernel.ld", "/etc/kernel.ld"] {
+            let error = validate_linker_script(Some(Path::new(escape))).unwrap_err();
+            assert!(error.starts_with("SL1101"), "{escape}: {error}");
         }
     }
 

@@ -395,6 +395,19 @@ pub fn package_entries(project: &Project) -> Result<Vec<Entry>, String> {
             ));
         }
     }
+    // And the same for the linker script, where the consequence is worse than an
+    // undefined symbol: a link that quietly uses the default layout produces a
+    // binary that is wrong rather than one that fails to appear.
+    if let Some(script) = &project.linker_script {
+        let path = format!("{prefix}/{}", script.display());
+        if !entries.iter().any(|entry| entry.path == path) {
+            return Err(format!(
+                "`linker-script` names `{}`, which the package does not carry; \
+                 add it to `include`",
+                script.display()
+            ));
+        }
+    }
     entries.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(entries)
 }

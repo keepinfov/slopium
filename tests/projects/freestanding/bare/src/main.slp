@@ -1,0 +1,13 @@
+; A program with no C library under it. There is no `std:io` here and nothing
+; to print with, so the answer leaves through the exit status, which is what
+; `boot/start.s` does with what `main` returns.
+;
+; The arithmetic is deliberately v0.8's: a hexadecimal literal and a `bit-and`,
+; which is the vocabulary a driver is written in and did not exist before
+; v0.8.0.
+
+(fn masked ((value i64)) -> i64
+  (bit-and value 0xFF))
+
+(fn main () -> i64
+  (masked 1322))

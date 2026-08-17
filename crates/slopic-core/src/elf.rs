@@ -77,10 +77,14 @@ pub const AARCH64: Machine = Machine {
 };
 
 /// The machine for a target triple, or `None` when no backend claims it.
+///
+/// The machine is the architecture's and not the triple's: a freestanding
+/// target and the hosted one beside it write the same object header, because
+/// what differs between them is the environment.
 pub fn machine_for(triple: &str) -> Option<Machine> {
-    match triple {
-        "x86_64-unknown-linux-gnu" => Some(X86_64),
-        "aarch64-unknown-linux-gnu" => Some(AARCH64),
+    match crate::codegen::target_spec(triple)?.architecture {
+        "x86_64" => Some(X86_64),
+        "aarch64" => Some(AARCH64),
         _ => None,
     }
 }

@@ -628,4 +628,91 @@ done < <(
   find "$projects_dir/runtime-fail" -mindepth 1 -maxdepth 1 -type d -print0 | sort -z
 )
 
-echo "project-tests: $pass_count pass, $compile_fail_count compile-fail, $runtime_fail_count runtime-fail, $dependency_count dependency fixtures"
+# ---------------------------------------------------------------------------
+# Freestanding: the manager links a program with no C library under it.
+#
+# These cannot live in `pass/`. There is no `std:io` in a freestanding program
+# and so nothing to compare stdout against — the answer leaves through the exit
+# status, the way `core-check.sh` argues it must — and `run` and `test` are not
+# things this shape supports at all.
+# ---------------------------------------------------------------------------
+
+freestanding_target="x86_64-unknown-none"
+freestanding_count=0
+
+if ! command -v nm >/dev/null 2>&1 || ! command -v readelf >/dev/null 2>&1; then
+  skip "no nm/readelf; freestanding checks skipped"
+else
+  while IFS= read -r -d '' project; do
+    name="$(basename "$project")"
+    manifest="$project/Slopium.toml"
+    prefix="$result_dir/freestanding-$name"
+
+    run_manager_logged "freestanding/$name clean" "$prefix.clean.stdout" \
+      "$prefix.clean.stderr" "$manifest" clean
+    run_manager_logged "freestanding/$name fmt" "$prefix.fmt.stdout" \
+      "$prefix.fmt.stderr" "$manifest" fmt --check
+    run_manager_logged "freestanding/$name check" "$prefix.check.stdout" \
+      "$prefix.check.stderr" "$manifest" check
+    run_manager_logged "freestanding/$name build" "$prefix.build.stdout" \
+      "$prefix.build.stderr" "$manifest" build
+
+    artifact="$project/target/$freestanding_target/dev/$name"
+    if [[ ! -f "$artifact" ]]; then
+      echo "project-tests: freestanding/$name built no $artifact" >&2
+      exit 1
+    fi
+
+    # The claim `core-check.sh` makes about an object, made here about the
+    # linked program: it owes the world nothing. The fixture keeps its symbol
+    # table on purpose, so this is a statement about undefined symbols rather
+    # than about an empty table.
+    undefined="$(nm -u "$artifact")"
+    if [[ -n "$undefined" ]]; then
+      echo "project-tests: freestanding/$name left symbols undefined:" >&2
+      echo "$undefined" >&2
+      exit 1
+    fi
+
+    # That `-T` reached `cc`, observably: the fixture's script discards
+    # `.comment`, which every default link keeps. Without the flag the section
+    # is present and this fails, which is the point of asserting it rather than
+    # trusting the command line.
+    if readelf -S "$artifact" | grep -q '\.comment'; then
+      echo "project-tests: freestanding/$name kept .comment; the linker script did not apply" >&2
+      exit 1
+    fi
+
+    set +e
+    "$artifact"
+    status=$?
+    set -e
+    expected="$(cat "$project/expected.status")"
+    if [[ "$status" -ne "$expected" ]]; then
+      echo "project-tests: freestanding/$name exited $status instead of $expected" >&2
+      exit 1
+    fi
+
+    # A freestanding target has no harness, and saying so is the difference
+    # between a refusal and a binary that runs no test in silence.
+    if run_manager "$manifest" test >"$prefix.test.stdout" 2>"$prefix.test.stderr"; then
+      echo "project-tests: freestanding/$name accepted a test it cannot run" >&2
+      exit 1
+    fi
+    if ! grep -qF 'no test harness' "$prefix.test.stderr"; then
+      echo "project-tests: freestanding/$name refused a test without saying why" >&2
+      sed -n '1,40p' "$prefix.test.stderr" >&2
+      exit 1
+    fi
+
+    run_manager_logged "freestanding/$name clean" "$prefix.clean2.stdout" \
+      "$prefix.clean2.stderr" "$manifest" clean
+
+    echo "project-tests: freestanding/$name ... ok"
+    freestanding_count=$((freestanding_count + 1))
+  done < <(
+    find "$projects_dir/freestanding" -mindepth 1 -maxdepth 1 -type d -print0 | sort -z
+  )
+fi
+
+echo "project-tests: $pass_count pass, $compile_fail_count compile-fail, $runtime_fail_count runtime-fail, $freestanding_count freestanding, $dependency_count dependency fixtures"

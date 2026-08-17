@@ -675,3 +675,7 @@ c-sources = ["c/hal.c"]
 Those paths are relative to the package root and may not leave it. They are
 compiled with the same `cc` the link uses, ship in the package archive, and
 their contents are part of the build cache key, so editing one rebuilds.
+
+The path is checked and the extension is not, so a `.s` is handed to `cc` and
+assembled like anything else. That is how a freestanding program supplies the
+`_start` the compiler no longer emits for it.

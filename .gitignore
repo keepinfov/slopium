@@ -8,6 +8,10 @@
 /.notes/
 *.o
 *.s
+# `*.s` above is emitted assembly, which is build output wherever it appears. A
+# fixture's entry stub is the opposite: hand-written source that `c-sources`
+# hands to `cc`, and the freestanding fixture is nothing without it.
+!/tests/projects/**/*.s
 *.out
 nvim.log
 /tests/projects/**/Slopium.lock

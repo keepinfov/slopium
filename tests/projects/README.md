@@ -50,3 +50,22 @@ removed v0.1 syntax.
 `runtime-fail` projects compile successfully, then assert native exit status
 101 and the normalized runtime message for bounds, input, process API, and
 arithmetic failures.
+
+## Freestanding projects
+
+`freestanding` projects build for `x86_64-unknown-none`, where there is no C
+library, no `main(argc, argv)` wrapper and no `std`. They cannot be passing
+projects: a program with no `std:io` has nothing to print with, so the answer
+leaves through the exit status, and `run` and `test` are not shapes this target
+supports at all.
+
+| Project | Covered surface |
+| --- | --- |
+| `bare` | `[build] target = "x86_64-unknown-none"` and `[build] linker-script`, an entry stub in `.s` and the four runtime hooks through `c-sources`, the core half of the runtime alone |
+
+Each one is asserted to build, to leave nothing undefined under `nm -u`, to have
+had its linker script applied — the fixture's script discards `.comment`, which
+every default link keeps — to exit with the status in `expected.status`, and to
+have `test` refused with a message rather than silently accepted. The fixture
+sets `strip = false`, because `nm -u` finding nothing is only a claim while there
+is a symbol table to look in.

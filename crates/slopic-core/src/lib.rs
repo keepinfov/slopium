@@ -64,13 +64,20 @@ pub const FREESTANDING_FLAGS: &[&str] = &["-ffreestanding", "-fno-builtin", "-fn
 /// The environment a build runs in: what the command line asked for, or the
 /// target's default when it asked for nothing (`D-081`).
 pub fn request_environment(options: &CompileOptions) -> Environment {
-    options.environment.unwrap_or_else(|| {
-        codegen::TARGETS
-            .iter()
-            .find(|spec| spec.triple == options.target)
-            .map(|spec| spec.environment)
-            .unwrap_or_default()
-    })
+    options
+        .environment
+        .unwrap_or_else(|| environment_for(&options.target))
+}
+
+/// The environment a target implies, with no command line to override it.
+///
+/// `slopium` needs this: it decides which runtime units to materialize and how
+/// to link before it has a [`CompileOptions`] to ask about, and a second copy of
+/// the lookup is a second place for the answer to differ.
+pub fn environment_for(triple: &str) -> Environment {
+    codegen::target_spec(triple)
+        .map(|spec| spec.environment)
+        .unwrap_or_default()
 }
 
 /// The runtime units an environment links, in link order.
@@ -101,9 +108,10 @@ pub struct CompileOptions {
     /// The manager does, from the profile — see `slopium`'s `strip_symbols`.
     pub strip: bool,
     /// What the program can assume is under it. `None` takes the target's
-    /// default, which is what every target says today; `--freestanding` is the
-    /// override that makes the field load-bearing before a `-none` triple
-    /// exists (`D-081`).
+    /// default, which is how `x86_64-unknown-none` selects a freestanding
+    /// build; `--freestanding` is the override, and it is still the only way to
+    /// reach a freestanding AArch64 object, since no `-none` row claims that
+    /// architecture yet (`D-081`).
     pub environment: Option<Environment>,
 }
 
@@ -189,9 +197,12 @@ pub struct CompilerInfo {
 /// the runtime's error paths down to a bare exit, matching the message-less
 /// trampolines the compiler emits under the same option, so a `panic = "abort"`
 /// binary carries no error strings at all.
-pub fn cc_flags(strip: bool, panic_abort: bool) -> Vec<&'static str> {
-    let mut flags = cc_compile_flags();
+pub fn cc_flags(environment: Environment, strip: bool, panic_abort: bool) -> Vec<&'static str> {
+    let mut flags = cc_compile_flags(environment);
     flags.push("-Wl,--gc-sections");
+    if environment == Environment::Freestanding {
+        flags.extend_from_slice(FREESTANDING_LINK_FLAGS);
+    }
     if strip {
         flags.push("-Wl,--strip-all");
     }
@@ -201,14 +212,36 @@ pub fn cc_flags(strip: bool, panic_abort: bool) -> Vec<&'static str> {
     flags
 }
 
+/// What a freestanding link says that a hosted one does not.
+///
+/// `-nostdlib` drops the C library and the start-up files both; `-nostartfiles`
+/// is named beside it anyway, because the pair is what the link *means* and a
+/// reader should not have to know that one implies the other. `-static` and
+/// `-no-pie` are not tidiness: a toolchain that defaults to `-pie` emits a
+/// dynamic object asking for an interpreter, which is the one thing a program
+/// with no C library underneath it cannot be given (`core-check.sh` is where
+/// that was learned).
+///
+/// The entry point is not named here. With `-nostartfiles` the linker still
+/// looks for `_start`, which is the symbol the program's own stub defines, so
+/// `--gc-sections` keeps it as a root and no `-e` is needed.
+pub const FREESTANDING_LINK_FLAGS: &[&str] = &["-nostdlib", "-nostartfiles", "-static", "-no-pie"];
+
 /// The half of [`cc_flags`] that survives `cc -c`.
 ///
 /// A package's `c-sources` are compiled to objects of their own and handed to
 /// the same link, so they need the per-function sections `--gc-sections` prunes
 /// against — but not the `-Wl,` flags, which a compile-only invocation has no
-/// linker to pass on to (`D-075`).
-pub fn cc_compile_flags() -> Vec<&'static str> {
-    vec!["-ffunction-sections", "-fdata-sections"]
+/// linker to pass on to (`D-075`). The environment reaches here because those
+/// same `c-sources` hold a freestanding program's entry stub, and compiling it
+/// as a hosted translation unit is how a `memcpy` or a stack-protector call
+/// appears in the half that must not have one.
+pub fn cc_compile_flags(environment: Environment) -> Vec<&'static str> {
+    let mut flags = vec!["-ffunction-sections", "-fdata-sections"];
+    if environment == Environment::Freestanding {
+        flags.extend_from_slice(FREESTANDING_FLAGS);
+    }
+    flags
 }
 
 pub fn compiler_info() -> CompilerInfo {
@@ -921,10 +954,11 @@ fn native_artifact(
         // most programs call a handful. The shared flags put each function in
         // its own section and let the linker drop what nothing reaches, then
         // strip the symbol table when the caller asked for it.
-        command.args(cc_flags(request.options.strip, request.options.panic_abort));
-        if environment == Environment::Freestanding {
-            command.args(FREESTANDING_FLAGS);
-        }
+        command.args(cc_flags(
+            environment,
+            request.options.strip,
+            request.options.panic_abort,
+        ));
         command.arg(&input_path).args(runtimes);
     }
     let result = command.output().map_err(|error| {

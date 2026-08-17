@@ -1,7 +1,7 @@
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
 use serde::Deserialize;
-use slopic_core::codegen::{DEFAULT_TARGET, TARGETS};
+use slopic_core::codegen::{Environment, DEFAULT_TARGET, TARGETS};
 use slopic_core::syntax::{format_source, FormatOptions};
 use slopium_manifest::archive::{package_archive, ARCHIVE_EXTENSION};
 use slopium_manifest::lock::{Lockfile, LOCK_FILE};
@@ -800,6 +800,20 @@ fn build(
             available.join(", ")
         ));
     }
+    // The target says which environment this is, so the manager needs no
+    // manifest boolean and no `--freestanding` of its own (`D-081`).
+    let environment = slopic_core::environment_for(&target);
+    // A freestanding target has no test harness and cannot be given one: the
+    // `main` the compiler would generate calls `sl_rt_args_init` and
+    // `sl_rt_test_result`, and both are defined only in the hosted half of the
+    // runtime. Without this the harness is simply suppressed, and the binary
+    // that comes out runs no test and says nothing about it.
+    if test && environment == Environment::Freestanding {
+        return Err(format!(
+            "target `{target}` is freestanding, so it has no test harness; \
+             a test needs a hosted target"
+        ));
+    }
     let source = source_path(project)?;
     let source_root = project.source_root()?;
     let dependencies = session.dependencies(project)?;
@@ -823,7 +837,7 @@ fn build(
     let stamp = artifact.with_extension("slop-cache");
     let compiler = slopic_path()?;
     verify_compiler(&compiler, &target)?;
-    let runtimes = materialize_runtime(&out_dir)?;
+    let runtimes = materialize_runtime(&out_dir, environment)?;
     let cc = cc_for(project, &target, args.cc.clone());
     let cache_inputs = CacheInputs {
         project,
@@ -923,7 +937,7 @@ fn build(
             .arg(c_source)
             .arg("-o")
             .arg(&object)
-            .args(slopic_core::cc_compile_flags())
+            .args(slopic_core::cc_compile_flags(environment))
             .status()
             .map_err(|error| {
                 format!(
@@ -934,15 +948,30 @@ fn build(
         status_result(status, &format!("compile of `{}`", c_source.display()))?;
         objects.push(object);
     }
-    let status = Command::new(&cc)
-        .arg("-o")
+    let mut link = Command::new(&cc);
+    link.arg("-o")
         .arg(&artifact)
-        // The same size flags `slopic` uses for a single-file link, so a
-        // package binary and a standalone one are shrunk and stripped alike.
+        // The same size and environment flags `slopic` uses for a single-file
+        // link, so a package binary and a standalone one are shrunk, stripped
+        // and hosted or freestanding alike.
         .args(slopic_core::cc_flags(
+            environment,
             strip_symbols(profile, profile_name),
             panic_abort(profile),
-        ))
+        ));
+    // Only the root package's script is consulted, because `[build]` is the
+    // root's table (`D-117`). It is passed after the flags and before the
+    // objects, where a `cc` driver expects it.
+    if let Some(script) = linker_script_path(project) {
+        if !script.is_file() {
+            return Err(format!(
+                "`linker-script` names `{}`, which is not a file",
+                script.display()
+            ));
+        }
+        link.arg("-T").arg(&script);
+    }
+    let status = link
         .args(&objects)
         .args(&runtimes)
         .status()
@@ -1733,9 +1762,14 @@ fn slopic_path() -> Result<PathBuf, String> {
 /// could have alone, and a hosted half that supplies what libc is behind — so
 /// this returns the set rather than the file. Each is rewritten only when its
 /// bytes differ, because the timestamps feed the artifact cache.
-fn materialize_runtime(out_dir: &Path) -> Result<Vec<PathBuf>, String> {
+///
+/// Which half a build gets is the environment's to say, and the environment is
+/// the target's. A freestanding build materializes the core half alone, and
+/// because `cache_key` hashes the units it is handed rather than their names,
+/// the key changes when the set shrinks without being told to.
+fn materialize_runtime(out_dir: &Path, environment: Environment) -> Result<Vec<PathBuf>, String> {
     let mut paths = Vec::new();
-    for (name, bytes) in slopic_core::runtime_sources(slopic_core::codegen::Environment::Hosted) {
+    for (name, bytes) in slopic_core::runtime_sources(environment) {
         let path = out_dir.join(name);
         if fs::read(&path).ok().as_deref() != Some(bytes) {
             fs::write(&path, bytes)
@@ -1854,6 +1888,18 @@ fn c_source_paths(project: &Project) -> Vec<PathBuf> {
         .iter()
         .map(|path| project.root.join(path))
         .collect()
+}
+
+/// A package's `[build] linker-script`, resolved against its root.
+///
+/// Only the root's is ever asked for. A dependency's `[build]` is not consulted
+/// for `target` either, and for the same reason: it describes the program being
+/// built, and a dependency is not building it (`D-117`).
+fn linker_script_path(project: &Project) -> Option<PathBuf> {
+    project
+        .linker_script
+        .as_ref()
+        .map(|path| project.root.join(path))
 }
 
 /// The name `slopium vendor` gives the replacement source it writes.
@@ -2568,6 +2614,15 @@ fn cache_key(input: CacheInputs<'_>) -> Result<String, String> {
         hasher.write(
             &fs::read(&c_source)
                 .map_err(|error| format!("cannot hash `{}`: {error}", c_source.display()))?,
+        );
+    }
+    // And the linker script for the same reason: renaming it is a manifest edit
+    // the text above catches, and editing it is not.
+    if let Some(script) = linker_script_path(input.project) {
+        hasher.write(script.display().to_string().as_bytes());
+        hasher.write(
+            &fs::read(&script)
+                .map_err(|error| format!("cannot hash `{}`: {error}", script.display()))?,
         );
     }
     hasher.write(input.cc.as_bytes());

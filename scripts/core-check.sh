@@ -58,7 +58,9 @@ cat > "$work/program.slp" <<'SLP'
 (take core:float from-f64 to-f64)
 (take core:map Map new insert lookup)
 
-(export answer)
+; Named `main` and exported, because the link below is asked to validate an
+; entry point rather than to skip the question with `--library`.
+(export main)
 
 ; The allocator a freestanding program supplies, reached as a raw address so
 ; that the volatile accesses below have somewhere real to point (`D-067`).
@@ -96,7 +98,7 @@ cat > "$work/program.slp" <<'SLP'
       (as i64 (volatile-read cell))
       0)))
 
-(fn answer () -> i64
+(fn main () -> i64
   (let mut values (list 3 4))
   (push (&mut values) 35)
   (let total (+ (get (& values) 0) (+ (get (& values) 1) (get (& values) 2))))
@@ -135,10 +137,12 @@ cat > "$work/program.slp" <<'SLP'
     ((Option:None) 0)))
 SLP
 
-# `sl_fn_` + the hex of `program:answer`, which is how a module-qualified name
-# is mangled. Spelled out rather than computed, so a change to the mangling
-# fails here instead of silently linking something else.
-answer_symbol="sl_fn_$(printf 'program:answer' | od -An -tx1 | tr -d ' \n')"
+# `sl_fn_` + the hex of `main`. A program's entry keeps its bare name where any
+# other function is qualified by its module, so this is the name a freestanding
+# program's own `_start` has to call — there is no `main(argc, argv)` wrapper
+# standing in front of it. Spelled out rather than computed, so a change to the
+# mangling fails here instead of silently linking something else.
+answer_symbol="sl_fn_$(printf 'main' | od -An -tx1 | tr -d ' \n')"
 
 # The other half of a freestanding program: an allocator over a static arena, a
 # way to die, and an entry point. No libc, so the exit syscall is written out.
@@ -207,8 +211,10 @@ check_target() {
         return 0
     fi
 
+    # No `--library`: the entry point is validated, which is what makes the
+    # `main` this program defines the thing the stub below has to reach.
     "$slopic" "$work/program.slp" \
-        --target "$triple" --freestanding --library --emit obj \
+        --target "$triple" --freestanding --emit obj \
         -o "$out/program.o" || return 1
     $cc -c -O2 -ffreestanding -fno-builtin -fno-stack-protector -ffunction-sections -fdata-sections \
         -o "$out/slop_rt_core.o" "$root/runtime/slop_rt_core.c" || return 1
@@ -259,10 +265,54 @@ check_target() {
     echo "core-check: $triple ok"
 }
 
+# The same program again, linked by the compiler instead of by the two `cc`
+# lines above.
+#
+# Everything the stages above spell out — `-nostdlib`, `-static`, `-no-pie`, the
+# freestanding compile flags, which half of the runtime to take — is a decision
+# the toolchain now makes from the target alone, so this is the check that the
+# hand-written command line and the shipped one agree. It is what `slopium build`
+# does for a package, minus the manifest, and what v0.8.5's kernel is built with.
+#
+# `--freestanding` is absent on purpose: the environment comes from the `-none`
+# row (`D-081`). So is `--library`, which is what leaves the entry point to be
+# validated.
+check_through_the_compiler() {
+    local triple="$1" cc="$2" nm="$3"
+    local out="$work/$triple-via-slopic"
+    mkdir -p "$out"
+
+    if ! command -v "${cc%% *}" > /dev/null 2>&1; then
+        skip "skipping $triple; no $cc"
+        return 0
+    fi
+
+    "$slopic" "$work/program.slp" \
+        --target "$triple" --emit exe \
+        --runtime "$root/runtime/slop_rt_core.c" \
+        --runtime "$work/freestanding.c" \
+        --cc "$cc" \
+        -o "$out/program" || return 1
+
+    local left
+    left="$("$nm" -u "$out/program" || true)"
+    if [ -n "$left" ]; then
+        echo "core-check: $triple left symbols undefined after a compiler-driven link:" >&2
+        echo "$left" >&2
+        return 1
+    fi
+
+    "$out/program" || return 1
+    echo "core-check: $triple ok (linked by slopic)"
+}
+
 status=0
 check_target x86_64-unknown-linux-gnu "cc" "nm" "" || status=1
 check_target aarch64-unknown-linux-gnu \
     "aarch64-unknown-linux-gnu-cc" \
     "aarch64-unknown-linux-gnu-nm" \
     "qemu-aarch64" || status=1
+# Only x86-64 has a `-none` row: freestanding AArch64 waits until freestanding
+# x86-64 is proven, which is what this line does.
+check_through_the_compiler x86_64-unknown-none "cc" "nm" || status=1
 exit "$status"

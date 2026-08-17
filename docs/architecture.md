@@ -401,10 +401,24 @@ is end of input.
 
 Which units link is the environment's to say, and the environment is the
 target's default overridden by `slopic --freestanding` (`D-081`). It decides
-three things and no others: the runtime units, whether the `main(argc, argv)`
-wrapper is emitted at all, and whether a lone file's default library is `std`
-or `core`. Both targets are hosted today; the override is what exercises the
-freestanding half before a `-none` triple exists.
+four things and no others: the runtime units, whether the `main(argc, argv)`
+wrapper is emitted at all, whether a lone file's default library is `std` or
+`core`, and what the link says — `-nostdlib -nostartfiles -static -no-pie`
+beside the freestanding compile flags (`D-117` widens `D-081` by that fourth
+one). `x86_64-unknown-none` is the row that supplies it, so a freestanding build
+is a `--target` and not a mode; the override remains for the two hosted triples,
+which is how a freestanding AArch64 object is still checked before there is a
+freestanding AArch64 target.
+
+The layout is the program's. `[build] linker-script` names a script inside the
+package and the manager passes it as `-T`; without one the link takes the
+toolchain's default. The entry point is the program's too, because no wrapper is
+emitted: a freestanding program supplies `_start` — through `[package]
+c-sources`, which has always handed a `.s` to `cc` and now has a fixture saying
+so — and reaches its own entry by the name that entry links under. A program's
+`main` keeps its bare name where every other function is qualified by its
+module, so that name is `sl_fn_6d61696e`, and it is the seam a boot stub is
+written against.
 
 `scripts/core-check.sh` is the check that makes this real rather than
 aspirational. It builds a `core`-only program — one that sends its answer out
@@ -413,6 +427,12 @@ float libraries are covered too (`D-083`, `D-097`) — links it against
 `slop_rt_core.o` with `-nostdlib` and a supplied
 `_start`, requires `nm -u` to show nothing but the four hooks, and runs it. The runtime ABI freezes at v0.8,
 and freezing a half nothing had ever linked would be freezing a guess.
+
+It then links the same program a second time and lets the compiler write the
+command line, over `x86_64-unknown-none` and with no `--library`, so that the
+hand-written link and the shipped one have to agree about the flags and about
+the entry point. `tests/projects/freestanding` makes the same claim about a
+package, where the linker script and the entry stub come from a manifest.
 
 Generated hosted executables use a small C ABI `main(argc, argv)` wrapper.
 Language functions, including the user `main`, retain compiler-mangled symbols.

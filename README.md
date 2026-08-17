@@ -10,9 +10,11 @@ LLVM, виртуальная машина и интерпретатор не н�
 - `slopium` — менеджер проектов, профилей, кэша и тестов, аналог Cargo.
 - `slopium-lsp` — лёгкий language server поверх API компилятора.
 
-Поддерживаемые платформы: `x86_64-unknown-linux-gnu` и
-`aarch64-unknown-linux-gnu`. Компилятор сам генерирует assembly для выбранной
-архитектуры, после чего вызывает `cc` только как assembler и linker.
+Поддерживаемые платформы: `x86_64-unknown-linux-gnu`,
+`aarch64-unknown-linux-gnu` и `x86_64-unknown-none` — bare metal, без libc:
+программа сама себя стартует и сама поставляет четыре хука рантайма.
+Компилятор сам генерирует assembly для выбранной архитектуры, после чего
+вызывает `cc` только как assembler и linker.
 
 ## Самый быстрый запуск на NixOS/Nix
 
@@ -235,7 +237,8 @@ slopic examples/match.slp --emit exe --test -o /tmp/match-tests
 ```text
 --profile dev|release       release включает constant folding
 --debug                     DWARF line tables для отладки
---target <triple>           x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu
+--target <triple>           x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu,
+                            x86_64-unknown-none
 --cc <command>              assembler/linker driver
 --diagnostic-format json    JSON diagnostics для IDE/CI
 --source-root <directory>   собрать все .slp модули дерева
@@ -343,7 +346,7 @@ source = "src"
 entry = "src/main.slp"
 # exclude = ["benchmarks", "**/*.png"]   # что не попадёт в архив
 # include = ["src/**/*.slp"]             # или наоборот: только это
-# c-sources = ["c/hal.c"]                # C для объявлений `extern`
+# c-sources = ["c/hal.c", "boot/start.s"] # C и assembly, что линкуются рядом
 
 [dependencies]
 std = { toolchain = true }
@@ -356,6 +359,7 @@ std = { toolchain = true }
 
 [build]
 target = "x86_64-unknown-linux-gnu"
+# linker-script = "link/kernel.ld"        # раскладка образа, только у корня
 
 [profile.dev]
 opt-level = 0
@@ -675,6 +679,58 @@ slopic examples/fibonacci.slp --emit exe \
 
 Оба backend порождают одинаковое поведение: это проверяется
 `scripts/cross-check.sh` на всём корпусе, а не декларируется.
+
+### Bare metal: `x86_64-unknown-none`
+
+Цель без libc под ней. От хостовой она отличается только окружением, а не
+архитектурой: тот же backend, тот же ELF, но линковка идёт с
+`-nostdlib -nostartfiles -static -no-pie`, из рантайма берётся только половина
+`core`, и обёртки `main(argc, argv)` нет.
+
+Поэтому программа обязана поставить два своих куска. Первый — четыре хука,
+которых `slop_rt_core.c` не определяет: `sl_rt_alloc`, `sl_rt_free`,
+`sl_rt_abort`, `sl_rt_panic`. Второй — точку входа `_start`, потому что звать её
+теперь некому. И то и другое попадает в сборку через `[package] c-sources`,
+который отдаёт `cc` и `.c`, и `.s`:
+
+```toml
+[package]
+name = "bare"
+entry = "src/main.slp"
+c-sources = ["boot/start.s", "boot/hooks.c"]
+
+[dependencies]
+core = { toolchain = true }
+
+[build]
+target = "x86_64-unknown-none"
+linker-script = "link/bare.ld"
+```
+
+`_start` вызывает вход программы по тому имени, под которым он линкуется. `main`
+— единственная функция, сохраняющая имя без имени модуля, поэтому это всегда
+`sl_fn_6d61696e`:
+
+```asm
+	.globl _start
+_start:
+	call	sl_fn_6d61696e
+	movq	%rax, %rdi
+	movl	$60, %eax
+	syscall
+```
+
+`linker-script` необязателен: без него берётся стандартная раскладка. Путь
+обязан лежать внутри пакета (`SL1101`), читается только у корневого пакета — и
+попадает в кэш сборки по содержимому, так что правка скрипта вызывает
+перелинковку.
+
+Тестов у такой цели нет: harness — это сгенерированный `main`, который зовёт
+`sl_rt_args_init` и `sl_rt_test_result`, а они есть только в hosted-половине
+рантайма. `slopium test --target x86_64-unknown-none` поэтому отказывается, а не
+собирает бинарник, который ничего не запускает.
+
+Рабочий пример целиком — `tests/projects/freestanding/bare`.
 
 ### Объектные файлы
 

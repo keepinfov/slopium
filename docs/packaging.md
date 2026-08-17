@@ -57,6 +57,16 @@ root and may not leave it (`SL1100`), and the default walk therefore always
 carries them. An `include` that leaves one out is refused rather than published:
 a package missing its C fails at every consumer's link, not at its author's.
 
+`[build] linker-script` is carried the same way and refused the same way
+(`SL1101`), and it sits in `[build]` rather than beside `c-sources` because the
+two are not the same kind of thing (`D-117`). A package's C is additive: every
+dependency's is compiled and linked, and a longer list is a correct answer. A
+linker script describes one whole image, so a list of them would be a conflict —
+and `[build]` is already the table read from the root package alone, which is
+what makes a dependency's script ignored by construction rather than by a rule.
+A missing script is worse than a missing C file, because the link succeeds with
+the default layout instead of failing.
+
 `[package] exclude` adds to that list; `[package] include` replaces the whole
 question with an explicit answer. Giving both is an error — `include` already
 says what the package is. `Slopium.toml` is always packaged; an archive without
