@@ -19,12 +19,14 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
-/// The sections a backend can emit into.
+/// The kinds of section a backend can emit into.
 ///
-/// Deliberately closed. A backend that wants another one has to say so here,
-/// where the ELF writer can see it, rather than by naming a string.
+/// Deliberately closed. A backend that wants another kind has to say so here,
+/// where the ELF writer can see it, rather than by naming a string. What is
+/// *not* closed is how many sections of a kind an object has: a function owns
+/// the `.text` its code sits in, so the linker can drop it whole (`D-030`).
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum Section {
+pub enum SectionKind {
     Text,
     RoData,
     /// The empty marker that tells the linker this object does not want an
@@ -32,21 +34,86 @@ pub enum Section {
     GnuStack,
 }
 
-impl Section {
-    /// The directive that opens this section, as the assembler spells it.
-    fn directive(self) -> &'static str {
-        match self {
-            Section::Text => ".text",
-            Section::RoData => ".section .rodata",
-            Section::GnuStack => ".section .note.GNU-stack,\"\",@progbits",
-        }
+impl SectionKind {
+    /// Whether an instruction may be encoded into a section of this kind.
+    pub fn holds_code(self) -> bool {
+        matches!(self, SectionKind::Text)
     }
 
-    pub fn name(self) -> &'static str {
-        match self {
-            Section::Text => ".text",
-            Section::RoData => ".rodata",
-            Section::GnuStack => ".note.GNU-stack",
+    /// Whether raw bytes may be placed in a section of this kind.
+    pub fn holds_data(self) -> bool {
+        matches!(self, SectionKind::Text | SectionKind::RoData)
+    }
+}
+
+/// One section of the object, interned by [`Assembly`].
+///
+/// An index rather than a name, so that everything which records where
+/// something landed — a symbol, a label, a relocation — stays `Copy` and the
+/// name is written down exactly once.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct Section(u32);
+
+impl Section {
+    /// The `.text` an object has before any function claims one of its own.
+    pub const TEXT: Section = Section(0);
+    /// The one `.rodata`. Constants are shared, so there is nothing to split.
+    pub const RODATA: Section = Section(1);
+    pub const GNU_STACK: Section = Section(2);
+
+    fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// What a [`Section`] is: the kind, which decides everything the object writer
+/// needs to know, and the name, which is the kind's own unless a function owns
+/// it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SectionDef {
+    kind: SectionKind,
+    name: String,
+}
+
+impl SectionDef {
+    /// The three sections every object has, at the fixed indices the
+    /// associated constants on [`Section`] name.
+    fn base() -> Vec<SectionDef> {
+        vec![
+            SectionDef {
+                kind: SectionKind::Text,
+                name: ".text".to_owned(),
+            },
+            SectionDef {
+                kind: SectionKind::RoData,
+                name: ".rodata".to_owned(),
+            },
+            SectionDef {
+                kind: SectionKind::GnuStack,
+                name: ".note.GNU-stack".to_owned(),
+            },
+        ]
+    }
+
+    pub fn kind(&self) -> SectionKind {
+        self.kind
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The directive that opens this section, as the assembler spells it.
+    ///
+    /// A name the assembler does not already know needs its flags spelled out:
+    /// GAS infers nothing from `.text.sl_fn_…`, so it is given `"ax"` and
+    /// `@progbits` the way `-ffunction-sections` spells them for C.
+    fn directive(&self) -> String {
+        match self.kind {
+            SectionKind::Text if self.name == ".text" => ".text".to_owned(),
+            SectionKind::Text => format!(".section {},\"ax\",@progbits", self.name),
+            SectionKind::RoData => ".section .rodata".to_owned(),
+            SectionKind::GnuStack => ".section .note.GNU-stack,\"\",@progbits".to_owned(),
         }
     }
 }
@@ -114,7 +181,8 @@ impl FixupKind {
 /// A reference whose value is not known when the instruction is encoded.
 #[derive(Clone, Debug)]
 pub struct Fixup {
-    /// Offset within [`Section::Text`] of the field to patch.
+    /// Offset within the section this fixup was recorded in of the field to
+    /// patch.
     pub offset: u64,
     pub kind: FixupKind,
     pub target: Target,
@@ -123,11 +191,21 @@ pub struct Fixup {
 
 /// The buffer an instruction encodes itself into.
 ///
-/// Instructions only ever land in `.text`, so there is no section to choose.
+/// There is one per section, so an encoder never learns which section it is
+/// writing into and cannot get it wrong: the section is whichever buffer the
+/// layout pass handed it.
 #[derive(Debug, Default)]
 pub struct Code {
     bytes: Vec<u8>,
     fixups: Vec<Fixup>,
+    /// The `1:` labels written in this section, in the order they appear.
+    ///
+    /// Per section rather than per object, because "the next `1:` after this
+    /// reference" is an ordering claim inside one buffer. Against a global
+    /// list it would compare offsets from two sections that have no order
+    /// between them, quietly find a `1:` in some other function, and emit a
+    /// relocation to it.
+    forward: Vec<(u32, u64)>,
 }
 
 impl Code {
@@ -229,17 +307,44 @@ impl<I> Item<I> {
 #[derive(Debug)]
 pub struct Assembly<I> {
     items: Vec<Item<I>>,
+    sections: Vec<SectionDef>,
 }
 
 impl<I> Default for Assembly<I> {
     fn default() -> Self {
-        Self { items: Vec::new() }
+        Self {
+            items: Vec::new(),
+            sections: SectionDef::base(),
+        }
     }
 }
 
 impl<I: Instruction> Assembly<I> {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The section a function's own code goes in, registered on first ask and
+    /// handed back on every later one.
+    ///
+    /// This is the only way to obtain a section that is not one of the three
+    /// constants, and it takes a *symbol* rather than a name: the kind is
+    /// closed, the flags come from the kind, and `asm` composes the name. A
+    /// backend still cannot invent a section by spelling one.
+    pub fn text_for(&mut self, symbol: &str) -> Section {
+        let name = format!(".text.{symbol}");
+        if let Some(index) = self.sections.iter().position(|def| def.name == name) {
+            return Section(index as u32);
+        }
+        self.sections.push(SectionDef {
+            kind: SectionKind::Text,
+            name,
+        });
+        Section(self.sections.len() as u32 - 1)
+    }
+
+    fn def(&self, section: Section) -> &SectionDef {
+        &self.sections[section.index()]
     }
 
     pub fn push(&mut self, item: Item<I>) {
@@ -290,7 +395,7 @@ impl<I: Instruction> Assembly<I> {
         let mut text = String::new();
         for item in &self.items {
             match item {
-                Item::Section(section) => text.push_str(section.directive()),
+                Item::Section(section) => text.push_str(&self.def(*section).directive()),
                 Item::Label(label) => {
                     text.push_str(label);
                     text.push(':');
@@ -361,22 +466,73 @@ pub struct Definition {
     pub size: u64,
 }
 
+/// What one section of a laid-out object holds.
+#[derive(Debug, Default)]
+pub struct SectionData {
+    pub bytes: Vec<u8>,
+    /// References *into this section* the linker still has to fill in, which
+    /// is exactly what a `.rela.<name>` section means.
+    pub relocations: Vec<Relocation>,
+    fixups: Vec<Fixup>,
+    forward: Vec<(u32, u64)>,
+}
+
 /// A laid-out object: bytes, symbols, and the references left for the linker.
 #[derive(Debug, Default)]
 pub struct Object {
-    pub text: Vec<u8>,
-    pub rodata: Vec<u8>,
+    /// One entry per section, parallel to `sections` and indexed by
+    /// [`Section`].
+    data: Vec<SectionData>,
+    /// What each section is. Carried out of the [`Assembly`] that built it,
+    /// which is what "where the object writer can see it" now means: a
+    /// `Section` is an index, and this is the only table it indexes.
+    sections: Vec<SectionDef>,
     /// Global symbols, defined and undefined, in the order they were named.
     pub symbols: Vec<Symbol>,
-    /// References into `.text` the linker still has to fill in.
-    pub relocations: Vec<Relocation>,
     /// The symbols declared `@function`, which is every symbol these backends
     /// define, but the object writer should not have to assume that.
     pub functions: HashSet<String>,
     /// Where every label landed, kept for tests and diagnostics.
     labels: HashMap<String, (Section, u64)>,
-    fixups: Vec<Fixup>,
-    forward: Vec<(u32, u64)>,
+}
+
+impl Object {
+    /// Every section of this object, in the order they will be written.
+    pub fn sections(&self) -> impl Iterator<Item = (Section, &SectionDef)> {
+        self.sections
+            .iter()
+            .enumerate()
+            .map(|(index, def)| (Section(index as u32), def))
+    }
+
+    pub fn def(&self, section: Section) -> &SectionDef {
+        &self.sections[section.index()]
+    }
+
+    /// Where a section sits in the order they will be written, which is what
+    /// an object file numbers them by.
+    pub fn position(&self, section: Section) -> usize {
+        section.index()
+    }
+
+    pub fn bytes(&self, section: Section) -> &[u8] {
+        &self.data[section.index()].bytes
+    }
+
+    pub fn relocations(&self, section: Section) -> &[Relocation] {
+        &self.data[section.index()].relocations
+    }
+
+    pub fn relocations_mut(&mut self, section: Section) -> &mut Vec<Relocation> {
+        &mut self.data[section.index()].relocations
+    }
+
+    /// The bytes of the one `.text` an object has before functions claim
+    /// sections of their own. For tests, which is the only thing that still
+    /// assumes there is exactly one.
+    pub fn text(&self) -> &[u8] {
+        self.bytes(Section::TEXT)
+    }
 }
 
 /// A reference the linker has to fill in.
@@ -401,38 +557,54 @@ struct Layout {
     object: Object,
     section: Option<Section>,
     globals: Vec<String>,
-    open: HashMap<String, u64>,
+    /// The label a `.size` will close, and the section it was opened in. A
+    /// `.size` reached from a different section is not a subtraction anybody
+    /// meant, so the section is kept in order to refuse it.
+    open: HashMap<String, (Section, u64)>,
+    /// One buffer per section, parallel to the object's section table.
+    code: Vec<Code>,
 }
 
 impl Layout {
     fn run<I: Instruction>(mut self, assembly: &Assembly<I>) -> Result<Object, String> {
-        let mut code = Code::default();
+        self.object.sections = assembly.sections.clone();
+        self.code
+            .resize_with(self.object.sections.len(), Code::default);
         for item in assembly.items() {
             match item {
                 Item::Section(section) => self.section = Some(*section),
                 Item::Label(label) => {
-                    let (section, offset) = self.position(&code)?;
+                    let (section, offset) = self.position()?;
                     self.object.labels.insert(label.clone(), (section, offset));
-                    self.open.insert(label.clone(), offset);
+                    self.open.insert(label.clone(), (section, offset));
                 }
                 Item::Numeric(id) => {
-                    let (section, offset) = self.position(&code)?;
-                    if section != Section::Text {
-                        return Err(format!("numeric label {id} outside .text"));
+                    let (section, offset) = self.position()?;
+                    if !self.kind(section).holds_code() {
+                        return Err(format!(
+                            "numeric label {id} outside a section that holds code"
+                        ));
                     }
-                    self.object.forward.push((*id, offset));
+                    self.code[section.index()].forward.push((*id, offset));
                 }
                 Item::Global(name) => self.globals.push(name.clone()),
                 Item::Function(name) => {
                     self.object.functions.insert(name.clone());
                 }
                 Item::Size(name) => {
-                    let (section, end) = self.position(&code)?;
-                    let start = self
+                    let (section, end) = self.position()?;
+                    let (opened, start) = self
                         .open
                         .get(name)
                         .copied()
                         .ok_or_else(|| format!("`.size {name}` before `{name}:`"))?;
+                    if opened != section {
+                        return Err(format!(
+                            "`.size {name}` is in {}, but `{name}:` is in {}",
+                            self.object.def(section).name,
+                            self.object.def(opened).name
+                        ));
+                    }
                     self.object.symbols.push(Symbol {
                         name: name.clone(),
                         definition: Some(Definition {
@@ -442,26 +614,38 @@ impl Layout {
                         }),
                     });
                 }
-                Item::Bytes(bytes) => match self.section {
-                    Some(Section::RoData) => self.object.rodata.extend_from_slice(bytes),
-                    Some(Section::Text) => code.extend(bytes),
-                    _ => return Err("data emitted outside a section that holds any".into()),
-                },
+                // `position` has already refused a section that holds nothing,
+                // which is the whole of what this used to check for itself.
+                Item::Bytes(bytes) => {
+                    let (section, _) = self.position()?;
+                    self.code[section.index()].extend(bytes);
+                }
                 // Line tables are the assembler's to build from these, and the
                 // object writer does not build them (`D-028`).
                 Item::File { .. } | Item::Loc { .. } | Item::Syntax(_) => {}
                 Item::Instruction(instruction) => {
-                    if self.section != Some(Section::Text) {
-                        return Err("instruction outside .text".into());
+                    let section = self
+                        .section
+                        .ok_or_else(|| "instruction before the first section".to_string())?;
+                    if !self.kind(section).holds_code() {
+                        return Err("instruction outside a section that holds code".into());
                     }
                     instruction
-                        .encode(&mut code)
+                        .encode(&mut self.code[section.index()])
                         .map_err(|error| format!("cannot encode `{instruction}`: {error}"))?;
                 }
             }
         }
-        self.object.text = code.bytes;
-        self.object.fixups = code.fixups;
+        self.object.data = self
+            .code
+            .into_iter()
+            .map(|code| SectionData {
+                bytes: code.bytes,
+                relocations: Vec::new(),
+                fixups: code.fixups,
+                forward: code.forward,
+            })
+            .collect();
         // A `.globl` with no `.size` still has to reach the symbol table.
         for name in &self.globals {
             if self
@@ -489,13 +673,21 @@ impl Layout {
         Ok(self.object)
     }
 
-    fn position(&self, code: &Code) -> Result<(Section, u64), String> {
-        match self.section {
-            Some(Section::Text) => Ok((Section::Text, code.here())),
-            Some(Section::RoData) => Ok((Section::RoData, self.object.rodata.len() as u64)),
-            Some(Section::GnuStack) => Err("nothing can be placed in .note.GNU-stack".into()),
-            None => Err("nothing can be placed before the first section".into()),
+    fn kind(&self, section: Section) -> SectionKind {
+        self.object.def(section).kind
+    }
+
+    fn position(&self) -> Result<(Section, u64), String> {
+        let section = self
+            .section
+            .ok_or_else(|| "nothing can be placed before the first section".to_string())?;
+        if !self.kind(section).holds_data() {
+            return Err(format!(
+                "nothing can be placed in {}",
+                self.object.def(section).name
+            ));
         }
+        Ok((section, self.code[section.index()].here()))
     }
 }
 
@@ -507,56 +699,66 @@ impl Object {
 
     /// Turns fixups into either patched bytes or relocations.
     fn resolve(&mut self) -> Result<(), String> {
-        let fixups = std::mem::take(&mut self.fixups);
-        for fixup in fixups {
-            let place = match &fixup.target {
-                Target::Forward(id) => {
-                    let offset = self
-                        .forward
-                        .iter()
-                        .find(|(candidate, at)| candidate == id && *at > fixup.offset)
-                        .map(|(_, at)| *at)
-                        .ok_or_else(|| format!("no `{id}:` after the reference to `{id}f`"))?;
-                    Some((Section::Text, offset))
-                }
-                Target::Named(name) => self.labels.get(name).copied(),
-            };
-            match place {
-                // A displacement inside one section is arithmetic we can do.
-                Some((Section::Text, offset))
-                    if fixup.kind.resolvable_in_place() && is_local(&fixup.target) =>
-                {
-                    // The same arithmetic a linker would do: the target,
-                    // plus the addend that says where the field is measured
-                    // from, less the address of the field itself.
-                    let displacement = offset as i64 + fixup.addend - fixup.offset as i64;
-                    patch(&mut self.text, &fixup, displacement)?;
-                }
-                // A local label the linker has no name for is reached through
-                // the section it sits in, offset and all.
-                Some((section, offset)) if is_local(&fixup.target) => {
-                    self.relocations.push(Relocation {
-                        offset: fixup.offset,
-                        kind: fixup.kind,
-                        against: Against::Section(section),
-                        addend: fixup.addend + offset as i64,
-                    });
-                }
-                // Anything with a name of its own goes to the linker under it,
-                // whether or not this object also defines it: a global may be
-                // replaced at link time, and resolving it here would quietly
-                // rule that out.
-                _ => {
-                    let Target::Named(name) = &fixup.target else {
-                        return Err(format!("`{}` is not a defined label", fixup.target));
-                    };
-                    let index = self.symbol_index(name);
-                    self.relocations.push(Relocation {
-                        offset: fixup.offset,
-                        kind: fixup.kind,
-                        against: Against::Symbol(index),
-                        addend: fixup.addend,
-                    });
+        for index in 0..self.data.len() {
+            let here = Section(index as u32);
+            let fixups = std::mem::take(&mut self.data[index].fixups);
+            for fixup in fixups {
+                let place = match &fixup.target {
+                    Target::Forward(id) => {
+                        let offset = self.data[index]
+                            .forward
+                            .iter()
+                            .find(|(candidate, at)| candidate == id && *at > fixup.offset)
+                            .map(|(_, at)| *at)
+                            .ok_or_else(|| format!("no `{id}:` after the reference to `{id}f`"))?;
+                        Some((here, offset))
+                    }
+                    Target::Named(name) => self.labels.get(name).copied(),
+                };
+                match place {
+                    // A displacement inside one section is arithmetic we can
+                    // do. Between two sections it is not: they have no
+                    // addresses yet and no order, so the answer is the
+                    // linker's.
+                    Some((there, offset))
+                        if there == here
+                            && fixup.kind.resolvable_in_place()
+                            && is_local(&fixup.target) =>
+                    {
+                        // The same arithmetic a linker would do: the target,
+                        // plus the addend that says where the field is measured
+                        // from, less the address of the field itself.
+                        let displacement = offset as i64 + fixup.addend - fixup.offset as i64;
+                        let bytes = &mut self.data[index].bytes;
+                        patch(bytes, &fixup, displacement)?;
+                    }
+                    // A local label the linker has no name for is reached
+                    // through the section it sits in, offset and all.
+                    Some((there, offset)) if is_local(&fixup.target) => {
+                        self.data[index].relocations.push(Relocation {
+                            offset: fixup.offset,
+                            kind: fixup.kind,
+                            against: Against::Section(there),
+                            addend: fixup.addend + offset as i64,
+                        });
+                    }
+                    // Anything with a name of its own goes to the linker under
+                    // it, whether or not this object also defines it: a global
+                    // may be replaced at link time, and resolving it here would
+                    // quietly rule that out.
+                    _ => {
+                        let Target::Named(name) = &fixup.target else {
+                            return Err(format!("`{}` is not a defined label", fixup.target));
+                        };
+                        let name = name.clone();
+                        let symbol = self.symbol_index(&name);
+                        self.data[index].relocations.push(Relocation {
+                            offset: fixup.offset,
+                            kind: fixup.kind,
+                            against: Against::Symbol(symbol),
+                            addend: fixup.addend,
+                        });
+                    }
                 }
             }
         }
@@ -712,10 +914,10 @@ mod tests {
     fn text_is_rendered_the_way_the_assembler_reads_it() {
         let assembly = program(vec![
             Item::Syntax(".intel_syntax noprefix"),
-            Item::Section(Section::RoData),
+            Item::Section(Section::RODATA),
             Item::Label(".Lstr".into()),
             Item::Bytes(vec![104, 105, 0]),
-            Item::Section(Section::Text),
+            Item::Section(Section::TEXT),
             Item::Global("main".into()),
             Item::Function("main".into()),
             Item::Label("main".into()),
@@ -726,7 +928,7 @@ mod tests {
             },
             Item::Instruction(Toy::Copy(0, 1)),
             Item::Size("main".into()),
-            Item::Section(Section::GnuStack),
+            Item::Section(Section::GNU_STACK),
         ]);
         assert_eq!(
             assembly.to_text(),
@@ -750,7 +952,7 @@ mod tests {
     #[test]
     fn a_copy_that_undoes_the_one_before_it_is_deleted() {
         let mut assembly = program(vec![
-            Item::Section(Section::Text),
+            Item::Section(Section::TEXT),
             Item::Instruction(Toy::Copy(0, 1)),
             Item::Instruction(Toy::Copy(1, 0)),
         ]);
@@ -763,7 +965,7 @@ mod tests {
         // `D-024`: adding `.loc` may not change which instructions are
         // emitted, so the peephole has to look past one.
         let mut assembly = program(vec![
-            Item::Section(Section::Text),
+            Item::Section(Section::TEXT),
             Item::Instruction(Toy::Copy(0, 1)),
             Item::Loc {
                 file: 1,
@@ -784,7 +986,7 @@ mod tests {
     #[test]
     fn a_label_between_two_copies_blocks_the_rewrite() {
         let mut assembly = program(vec![
-            Item::Section(Section::Text),
+            Item::Section(Section::TEXT),
             Item::Instruction(Toy::Copy(0, 1)),
             Item::Label(".Lhere".into()),
             Item::Instruction(Toy::Copy(1, 0)),
@@ -801,29 +1003,29 @@ mod tests {
     #[test]
     fn a_branch_inside_the_section_needs_no_linker() {
         let assembly = program(vec![
-            Item::Section(Section::Text),
+            Item::Section(Section::TEXT),
             Item::Instruction(Toy::Jump(Target::Named(".Lend".into()))),
             Item::Instruction(Toy::Copy(0, 1)),
             Item::Label(".Lend".into()),
         ]);
         let object = assembly.finish().unwrap();
-        assert!(object.relocations.is_empty());
-        assert_eq!(object.label(".Lend"), Some((Section::Text, 8)));
-        let encoded = u32::from_le_bytes(object.text[0..4].try_into().unwrap());
+        assert!(object.relocations(Section::TEXT).is_empty());
+        assert_eq!(object.label(".Lend"), Some((Section::TEXT, 8)));
+        let encoded = u32::from_le_bytes(object.text()[0..4].try_into().unwrap());
         assert_eq!(encoded & 0x03ff_ffff, 2, "two words forward");
     }
 
     #[test]
     fn a_forward_numeric_label_is_the_next_one_and_not_an_earlier_one() {
         let assembly = program(vec![
-            Item::Section(Section::Text),
+            Item::Section(Section::TEXT),
             Item::Numeric(1),
             Item::Instruction(Toy::Jump(Target::Forward(1))),
             Item::Instruction(Toy::Copy(0, 1)),
             Item::Numeric(1),
         ]);
         let object = assembly.finish().unwrap();
-        let encoded = u32::from_le_bytes(object.text[0..4].try_into().unwrap());
+        let encoded = u32::from_le_bytes(object.text()[0..4].try_into().unwrap());
         assert_eq!(
             encoded & 0x03ff_ffff,
             2,
@@ -834,12 +1036,12 @@ mod tests {
     #[test]
     fn a_call_to_a_name_is_left_to_the_linker() {
         let assembly = program(vec![
-            Item::Section(Section::Text),
+            Item::Section(Section::TEXT),
             Item::Instruction(Toy::Call("sl_rt_alloc".into())),
         ]);
         let object = assembly.finish().unwrap();
-        assert_eq!(object.relocations.len(), 1);
-        let index = match object.relocations[0].against {
+        assert_eq!(object.relocations(Section::TEXT).len(), 1);
+        let index = match object.relocations(Section::TEXT)[0].against {
             Against::Symbol(index) => index,
             other => panic!("expected a symbol, got {other:?}"),
         };
@@ -852,7 +1054,7 @@ mod tests {
         // It may be replaced at link time. Resolving the call here would
         // quietly rule that out, and would differ from what `as` produces.
         let assembly = program(vec![
-            Item::Section(Section::Text),
+            Item::Section(Section::TEXT),
             Item::Global("helper".into()),
             Item::Label("helper".into()),
             Item::Instruction(Toy::Copy(0, 0)),
@@ -861,8 +1063,11 @@ mod tests {
             Item::Instruction(Toy::Call("helper".into())),
         ]);
         let object = assembly.finish().unwrap();
-        assert_eq!(object.relocations.len(), 1);
-        assert_eq!(object.relocations[0].against, Against::Symbol(0));
+        assert_eq!(object.relocations(Section::TEXT).len(), 1);
+        assert_eq!(
+            object.relocations(Section::TEXT)[0].against,
+            Against::Symbol(0)
+        );
         let helper = &object.symbols[0];
         assert_eq!(helper.definition.unwrap().size, 4);
     }
@@ -870,26 +1075,30 @@ mod tests {
     #[test]
     fn a_local_label_in_another_section_is_reached_through_that_section() {
         let assembly = program(vec![
-            Item::Section(Section::RoData),
+            Item::Section(Section::RODATA),
             Item::Bytes(vec![0; 8]),
             Item::Label(".Lstr".into()),
             Item::Bytes(vec![104, 105, 0]),
-            Item::Section(Section::Text),
+            Item::Section(Section::TEXT),
             Item::Instruction(Toy::Jump(Target::Named(".Lstr".into()))),
         ]);
         let object = assembly.finish().unwrap();
-        assert_eq!(object.relocations.len(), 1);
+        assert_eq!(object.relocations(Section::TEXT).len(), 1);
         assert_eq!(
-            object.relocations[0].against,
-            Against::Section(Section::RoData)
+            object.relocations(Section::TEXT)[0].against,
+            Against::Section(Section::RODATA)
         );
-        assert_eq!(object.relocations[0].addend, 8, "the label's own offset");
+        assert_eq!(
+            object.relocations(Section::TEXT)[0].addend,
+            8,
+            "the label's own offset"
+        );
     }
 
     #[test]
     fn a_size_directive_measures_from_its_own_label() {
         let assembly = program(vec![
-            Item::Section(Section::Text),
+            Item::Section(Section::TEXT),
             Item::Global("f".into()),
             Item::Label("f".into()),
             Item::Instruction(Toy::Copy(0, 1)),

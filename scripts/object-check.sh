@@ -84,9 +84,31 @@ fail() {
 }
 
 # Section contents as a hex dump, so a difference is reported as one.
+#
+# Deliberately not tolerant of a missing section: a section that is absent
+# dumps nothing, and comparing nothing against nothing is how this check would
+# pass without having looked at anything.
 section_hex() {
   local objdump="$1" object="$2" section="$3"
-  "$objdump" -s -j "$section" "$object" 2>/dev/null | tail -n +4 || true
+  "$objdump" -s -j "$section" "$object" | tail -n +4
+}
+
+# Every section that holds bytes, by name. A function owns the `.text` its code
+# sits in, so the set is per program and cannot be written down here.
+section_names() {
+  local readelf="$1" object="$2"
+  # The `[ 4]` index is stripped before the columns are read: it is one field
+  # when the number reaches two digits and two fields below that, which would
+  # otherwise shift every column depending on how many sections there are.
+  #
+  # Only sections that hold bytes, which is what the comparison is about: `as`
+  # emits an empty `.data` whatever it was given, and `.note.GNU-stack` is
+  # empty by design. A section non-empty on one side and absent on the other
+  # still differs, so nothing is hidden by this.
+  "$readelf" -SW "$object" \
+    | sed -e 's/^ *\[ *[0-9]\{1,\}\] *//' \
+    | awk '$1 ~ /^\./ && $2 == "PROGBITS" && $5 ~ /[1-9a-f]/ { print $1 }' \
+    | sort
 }
 
 # The instruction stream with every address and symbol reference removed, so
@@ -124,6 +146,17 @@ symbols() {
   fi
 }
 
+# Which section each defined symbol sits in, by name rather than by index —
+# the indices are each writer's own, the names are the claim. Without this a
+# function attached to the wrong section still compares equal, which is
+# precisely the property per-function sections add (`D-030`).
+symbol_sections() {
+  local objdump="$1" object="$2"
+  "$objdump" -t "$object" \
+    | awk '$NF ~ /^sl_/ { print $NF, $(NF-2) }' \
+    | sort
+}
+
 check_target() {
   local target="$1" objdump="$2" readelf="$3" assembler="$4" byte_exact="$5"
   local checked=0
@@ -141,8 +174,18 @@ check_target() {
         -o "$stem.ours.o" "$source" >/dev/null
       "$assembler" -o "$stem.gas.o" "$stem.s"
 
+      # The set of sections first: a section present in one object and absent
+      # from the other has to fail here, rather than have each of its contents
+      # compared against nothing.
+      if ! diff -u \
+        <(section_names "$readelf" "$stem.ours.o") \
+        <(section_names "$readelf" "$stem.gas.o") >"$stem.sections.diff"; then
+        head -40 "$stem.sections.diff" >&2
+        fail "$source ($target, $profile): the section set differs from the assembler"
+      fi
+
       if [ "$byte_exact" = "yes" ]; then
-        for section in .text .rodata; do
+        for section in $(section_names "$readelf" "$stem.ours.o"); do
           if ! diff -u \
             <(section_hex "$objdump" "$stem.ours.o" "$section") \
             <(section_hex "$objdump" "$stem.gas.o" "$section") >"$stem.$section.diff"; then
@@ -177,6 +220,13 @@ check_target() {
         <(symbols "$readelf" "$stem.gas.o" "$byte_exact") >"$stem.sym.diff"; then
         head -20 "$stem.sym.diff" >&2
         fail "$source ($target, $profile): the symbol table differs"
+      fi
+
+      if ! diff -u \
+        <(symbol_sections "$objdump" "$stem.ours.o") \
+        <(symbol_sections "$objdump" "$stem.gas.o") >"$stem.symsec.diff"; then
+        head -40 "$stem.symsec.diff" >&2
+        fail "$source ($target, $profile): a symbol sits in a different section"
       fi
 
       checked=$((checked + 1))

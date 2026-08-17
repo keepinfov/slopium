@@ -785,10 +785,10 @@ mod tests {
 
     fn encoding(instruction: Inst) -> u32 {
         let mut assembly: Assembly<Inst> = Assembly::new();
-        assembly.push(Item::Section(Section::Text));
+        assembly.push(Item::Section(Section::TEXT));
         assembly.push(Item::Instruction(instruction));
         let object = assembly.finish().unwrap();
-        u32::from_le_bytes(object.text[0..4].try_into().unwrap())
+        u32::from_le_bytes(object.text()[0..4].try_into().unwrap())
     }
 
     fn x(name: &'static str) -> Reg {
@@ -1513,7 +1513,7 @@ mod tests {
     #[test]
     fn a_branch_carries_its_condition_and_its_displacement_separately() {
         let mut assembly: Assembly<Inst> = Assembly::new();
-        assembly.push(Item::Section(Section::Text));
+        assembly.push(Item::Section(Section::TEXT));
         assembly.push(Item::Instruction(Inst::Bcond(
             Cond::Vs,
             Target::Named(".Lend".into()),
@@ -1522,20 +1522,20 @@ mod tests {
         assembly.push(Item::Label(".Lend".into()));
         let object = assembly.finish().unwrap();
         assert_eq!(
-            u32::from_le_bytes(object.text[0..4].try_into().unwrap()),
+            u32::from_le_bytes(object.text()[0..4].try_into().unwrap()),
             0x54000046,
             "two words forward, condition vs"
         );
-        assert!(object.relocations.is_empty());
+        assert!(object.relocations(Section::TEXT).is_empty());
     }
 
     #[test]
     fn an_address_is_two_instructions_and_two_relocations() {
         let mut assembly: Assembly<Inst> = Assembly::new();
-        assembly.push(Item::Section(Section::RoData));
+        assembly.push(Item::Section(Section::RODATA));
         assembly.push(Item::Label(".Lstr".into()));
         assembly.push(Item::Bytes(vec![104, 105, 0]));
-        assembly.push(Item::Section(Section::Text));
+        assembly.push(Item::Section(Section::TEXT));
         assembly.push(Item::Instruction(Inst::Adrp {
             dst: x("x0"),
             label: ".Lstr".into(),
@@ -1547,15 +1547,15 @@ mod tests {
         }));
         let object = assembly.finish().unwrap();
         assert_eq!(
-            u32::from_le_bytes(object.text[0..4].try_into().unwrap()),
+            u32::from_le_bytes(object.text()[0..4].try_into().unwrap()),
             0x90000000
         );
         assert_eq!(
-            u32::from_le_bytes(object.text[4..8].try_into().unwrap()),
+            u32::from_le_bytes(object.text()[4..8].try_into().unwrap()),
             0x91000000
         );
         let kinds: Vec<_> = object
-            .relocations
+            .relocations(Section::TEXT)
             .iter()
             .map(|relocation| relocation.kind)
             .collect();

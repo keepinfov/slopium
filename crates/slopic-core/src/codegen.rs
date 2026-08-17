@@ -154,17 +154,22 @@ const FLOAT_ARGUMENTS: [&str; 8] = [
     "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7",
 ];
 
-/// The trampolines the arithmetic checks branch to.
-fn overflow_trampoline() -> Target {
-    Target::Named(".Lsl_panic_overflow_trampoline".into())
+/// The trampolines the arithmetic checks branch to, named after the function
+/// that carries them.
+///
+/// One copy per function rather than one per program, because a conditional
+/// branch that leaves its own section stops being arithmetic this compiler can
+/// do and becomes a relocation the linker will not veneer (`D-116`).
+fn overflow_trampoline(symbol: &str) -> Target {
+    Target::Named(format!(".L{symbol}_panic_overflow_trampoline"))
 }
 
-fn div_zero_trampoline() -> Target {
-    Target::Named(".Lsl_panic_div_zero_trampoline".into())
+fn div_zero_trampoline(symbol: &str) -> Target {
+    Target::Named(format!(".L{symbol}_panic_div_zero_trampoline"))
 }
 
-fn shift_trampoline() -> Target {
-    Target::Named(".Lsl_panic_shift_trampoline".into())
+fn shift_trampoline(symbol: &str) -> Target {
+    Target::Named(format!(".L{symbol}_panic_shift_trampoline"))
 }
 
 /// A register as an operand, which is what most of them are.
@@ -365,6 +370,9 @@ struct Generator<'a> {
     /// Reset at every label, because a jump can arrive there from a row that
     /// says something else.
     last_location: Option<(usize, usize, usize)>,
+    /// The symbol of the function being emitted, which names both its section
+    /// and its panic trampolines.
+    symbol: String,
 }
 
 impl<'a> Generator<'a> {
@@ -380,6 +388,7 @@ impl<'a> Generator<'a> {
             alloc: Allocation::stack_only(0),
             registers: &CALLEE_SAVED,
             last_location: None,
+            symbol: String::new(),
         }
     }
 
@@ -387,7 +396,7 @@ impl<'a> Generator<'a> {
         self.collect_strings();
         self.asm.push(Item::Syntax(".intel_syntax noprefix"));
         self.file_table();
-        self.asm.push(Item::Section(Section::RoData));
+        self.asm.push(Item::Section(Section::RODATA));
         let traps = self.trap_usage();
         // Only the messages a check can actually reach: a program with no
         // division carries no "division by zero". `panic = "abort"` reaches
@@ -406,7 +415,7 @@ impl<'a> Generator<'a> {
         for (label, value) in self.strings.clone() {
             self.byte_string(&label, &value);
         }
-        self.asm.push(Item::Section(Section::Text));
+        self.asm.push(Item::Section(Section::TEXT));
 
         for function in self
             .module
@@ -431,6 +440,9 @@ impl<'a> Generator<'a> {
         // the source" as line 0, but GAS discards a `.loc` naming it, and
         // ending the line sequence early would mean giving the glue its own
         // section. Neither is worth it for code nobody wrote.
+        // Back to the shared `.text`: the glue is reached from wherever it is
+        // needed and has no function of its own to be dropped with.
+        self.asm.push(Item::Section(Section::TEXT));
         let structs = self.module.structs.clone();
         for structure in structs.iter().filter(|structure| structure.emit) {
             self.struct_clone_helper(&structure.name, &structure.fields);
@@ -446,8 +458,7 @@ impl<'a> Generator<'a> {
         } else if self.options.emit_entrypoint {
             self.program_entrypoint();
         }
-        self.runtime_panic_trampolines(traps);
-        self.asm.push(Item::Section(Section::GnuStack));
+        self.asm.push(Item::Section(Section::GNU_STACK));
 
         if self.diagnostics.is_empty() {
             self.asm.remove_redundant_copies();
@@ -571,6 +582,7 @@ impl<'a> Generator<'a> {
     fn function(&mut self, function: &MirFunction, is_test: bool) {
         let symbol = self.symbol(&function.name, is_test);
         let epilogue = format!(".L{}_epilogue", symbol);
+        self.symbol = symbol.clone();
 
         let cfg = Cfg::new(function);
         self.registers = if self.calls_something(function) {
@@ -597,6 +609,10 @@ impl<'a> Generator<'a> {
         let save_base = self.alloc.memory_slots();
         let frame_size = align_to((save_base + saved.len()) * 8, 16);
 
+        // A function owns the section its code sits in, so `--gc-sections`
+        // can drop the whole of one nothing calls (`D-030`).
+        let section = self.asm.text_for(&symbol);
+        self.asm.push(Item::Section(section));
         self.asm.push(Item::Global(symbol.to_owned()));
         self.asm.push(Item::Function(symbol.to_owned()));
         self.label(&symbol);
@@ -635,6 +651,9 @@ impl<'a> Generator<'a> {
         self.inst(Inst::Mov(reg("rsp"), reg("rbp")));
         self.inst(Inst::Pop(Reg("rbp")));
         self.inst(Inst::Ret);
+        // Inside the symbol rather than after it, so a backtrace that stops in
+        // a trampoline still names the function whose check reached it.
+        self.runtime_panic_trampolines(trap_usage(std::iter::once(function)));
         self.asm.push(Item::Size(symbol.to_owned()));
     }
 
@@ -1278,7 +1297,7 @@ impl<'a> Generator<'a> {
         self.inst(Inst::Mov(reg("rcx"), reg("rax")));
         self.canonicalize_rax(kind);
         self.inst(Inst::Alu(AluOp::Cmp, reg("rax"), reg("rcx")));
-        self.inst(Inst::Jcc(Cond::Ne, overflow_trampoline()));
+        self.inst(Inst::Jcc(Cond::Ne, overflow_trampoline(&self.symbol)));
     }
 
     /// Computes an addition, subtraction, multiplication or bit operation
@@ -1334,7 +1353,7 @@ impl<'a> Generator<'a> {
         // its sign bit, and an unsigned one carried out of the top.
         if !op.bitwise() {
             let flag = if kind.signed { Cond::O } else { Cond::B };
-            self.inst(Inst::Jcc(flag, overflow_trampoline()));
+            self.inst(Inst::Jcc(flag, overflow_trampoline(&self.symbol)));
         }
         true
     }
@@ -1405,13 +1424,13 @@ impl<'a> Generator<'a> {
             BinaryOp::Add => {
                 self.inst(Inst::Alu(AluOp::Add, accumulator.clone(), argument.clone()));
                 if kind.is_full_width() {
-                    self.inst(Inst::Jcc(carried, overflow_trampoline()));
+                    self.inst(Inst::Jcc(carried, overflow_trampoline(&self.symbol)));
                 }
             }
             BinaryOp::Sub => {
                 self.inst(Inst::Alu(AluOp::Sub, accumulator.clone(), argument.clone()));
                 if kind.is_full_width() {
-                    self.inst(Inst::Jcc(carried, overflow_trampoline()));
+                    self.inst(Inst::Jcc(carried, overflow_trampoline(&self.symbol)));
                 }
             }
             // A `u64` product needs the unsigned high half, which only `mul`
@@ -1425,7 +1444,7 @@ impl<'a> Generator<'a> {
                 } else {
                     self.inst(Inst::Imul(Reg("rax"), argument.clone()));
                 }
-                self.inst(Inst::Jcc(Cond::O, overflow_trampoline()));
+                self.inst(Inst::Jcc(Cond::O, overflow_trampoline(&self.symbol)));
             }
             // One sequence for both, because the machine computes both at once:
             // the divide leaves the quotient in the accumulator and the
@@ -1435,7 +1454,7 @@ impl<'a> Generator<'a> {
             // and the most negative value over `-1` has no quotient at all.
             BinaryOp::Div | BinaryOp::Rem => {
                 self.inst(Inst::Test(argument.clone(), argument.clone()));
-                self.inst(Inst::Jcc(Cond::E, div_zero_trampoline()));
+                self.inst(Inst::Jcc(Cond::E, div_zero_trampoline(&self.symbol)));
                 if !kind.signed && kind.is_full_width() {
                     // Unsigned: no sign to extend, and no quotient that does
                     // not fit, so `rdx` is cleared rather than filled.
@@ -1447,7 +1466,7 @@ impl<'a> Generator<'a> {
                         self.inst(Inst::Alu(AluOp::Cmp, reg("rax"), reg("rdx")));
                         self.inst(Inst::Jcc(Cond::Ne, Target::Forward(1)));
                         self.inst(Inst::Alu(AluOp::Cmp, reg("rcx"), Operand::Imm(-1)));
-                        self.inst(Inst::Jcc(Cond::E, overflow_trampoline()));
+                        self.inst(Inst::Jcc(Cond::E, overflow_trampoline(&self.symbol)));
                         self.asm.push(Item::Numeric(1));
                     }
                     // A narrow operand cannot be the most negative *word*, so
@@ -1477,7 +1496,7 @@ impl<'a> Generator<'a> {
                     argument,
                     Operand::Imm(i64::from(kind.bits)),
                 ));
-                self.inst(Inst::Jcc(Cond::Ae, shift_trampoline()));
+                self.inst(Inst::Jcc(Cond::Ae, shift_trampoline(&self.symbol)));
                 let shift = match (op, kind.signed) {
                     (BinaryOp::Shl, _) => ShiftOp::Shl,
                     (_, true) => ShiftOp::Sar,
@@ -1926,24 +1945,24 @@ impl<'a> Generator<'a> {
         for (used, trampoline, message) in [
             (
                 traps.div_zero,
-                ".Lsl_panic_div_zero_trampoline",
+                div_zero_trampoline(&self.symbol),
                 ".Lsl_panic_div_zero",
             ),
             (
                 traps.overflow,
-                ".Lsl_panic_overflow_trampoline",
+                overflow_trampoline(&self.symbol),
                 ".Lsl_panic_overflow",
             ),
             (
                 traps.shift,
-                ".Lsl_panic_shift_trampoline",
+                shift_trampoline(&self.symbol),
                 ".Lsl_panic_shift",
             ),
         ] {
             if !used {
                 continue;
             }
-            self.asm.push(Item::Label(trampoline.into()));
+            self.asm.push(Item::Label(trampoline.to_string()));
             if self.options.panic_abort {
                 // No message to load, and a distinct entry that just exits, so
                 // the message strings can be absent from the binary entirely.
@@ -2374,7 +2393,7 @@ mod tests {
             "an i32 result is canonicalised:\n{assembly}"
         );
         assert!(
-            assembly.contains("jne .Lsl_panic_overflow_trampoline"),
+            assembly.contains("jne .Lsl_fn_6d61696e_panic_overflow_trampoline"),
             "and traps when that changed it:\n{assembly}"
         );
     }
@@ -2822,9 +2841,9 @@ mod tests {
         // Addition overflows but never divides: overflow only.
         let adds = assembly("(fn add ((a i64) (b i64)) -> i64 (+ a b))\n(fn main () -> i32 0)");
         assert!(adds.contains(".Lsl_panic_overflow:"), "{adds}");
-        assert!(adds.contains(".Lsl_panic_overflow_trampoline:"), "{adds}");
+        assert!(adds.contains("_panic_overflow_trampoline:"), "{adds}");
         assert!(!adds.contains(".Lsl_panic_div_zero:"), "{adds}");
-        assert!(!adds.contains(".Lsl_panic_div_zero_trampoline:"), "{adds}");
+        assert!(!adds.contains("_panic_div_zero_trampoline:"), "{adds}");
 
         // Division reaches both — the zero divisor and the INT_MIN/-1 overflow.
         let divides = assembly("(fn div ((a i64) (b i64)) -> i64 (/ a b))\n(fn main () -> i32 0)");
@@ -2851,7 +2870,7 @@ mod tests {
         assert!(!aborting.contains("call sl_rt_panic"), "{aborting}");
         // The trampolines still exist and still trap — only the message is gone.
         assert!(
-            aborting.contains(".Lsl_panic_div_zero_trampoline:"),
+            aborting.contains("_panic_div_zero_trampoline:"),
             "{aborting}"
         );
     }

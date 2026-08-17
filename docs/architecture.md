@@ -179,11 +179,19 @@ in the compiler rather than a surprise at assembly time.
 
 `asm` owns the half neither architecture decides: section identity, label
 scope, symbol binding, and the layout pass that turns labels into addresses and
-then into either patched bytes or relocations. A branch to a local label inside
-`.text` is arithmetic the compiler can do; a call, or an address in another
-section, is left to the linker under the same rules a linker expects. `elf`
-turns the result into a file, and knows only two things per architecture: the
-machine number, and which relocation type spells each fixup.
+then into either patched bytes or relocations. A branch to a local label *in
+the same section* is arithmetic the compiler can do; a call, or an address
+anywhere else, is left to the linker under the same rules a linker expects.
+`elf` turns the result into a file, and knows only three things per
+architecture: the machine number, which relocation type spells each fixup, and
+what a section of instructions is aligned to.
+
+A section's *kind* is a closed set — code, constants, and the empty
+`.note.GNU-stack` marker — and how many sections of a kind an object has is
+not. A backend obtains one by asking for a kind and naming a function, never by
+spelling a string, so the flags and the alignment come from the kind and the
+object writer can still see every section that exists. That is what lets a
+function own the `.text` its code sits in.
 
 Linking is still the system linker's. It is what knows where the C runtime
 lives, which dynamic loader to name, and how the platform starts a process —
@@ -193,11 +201,20 @@ The link is asked to keep only what a program uses. The runtime is two C files
 of every helper the language might call, so they are compiled with a section
 per function and linked with `--gc-sections`: a program that never makes a
 slice does not carry `sl_rt_slice_*`. That only ever removes unreferenced code, so it
-is unconditional. The granularity is the C runtime's functions and the Slopium
-*object*, though, not the Slopium function: an object is one `.text`, so a
-library module a program takes brings whatever that module calls. Since
-v0.5.3, `core:string:split` builds a list, so every program that prints a
-number links the list runtime. Stripping the symbol table is a choice, because it removes
+is unconditional. **A Slopium function is granular the same way**: it owns the
+`.text` its own code sits in, so a library module a program takes no longer
+brings whatever that module calls. A module is still emitted whole — `emit` is
+per module — and the linker is what drops the rest, which is why `basics`
+defines seventy-three functions across its objects and links twelve.
+
+Each function's panic trampolines sit inside its section rather than at the end
+of a shared one. A trampoline is two or three instructions and only the ones a
+function's arithmetic can reach are emitted, so the cost is small and it is
+dropped along with the function it serves. The reason it is not shared is that
+AArch64 reaches one with a 19-bit conditional branch: within a section that is
+a displacement the compiler works out, and it can say so at compile time when
+it does not fit, whereas across sections it becomes an `R_AARCH64_CONDBR19`
+that no linker will supply a veneer for. Stripping the symbol table is a choice, because it removes
 the mangled `sl_fn_*` and runtime names a debugger needs — so it is a flag
 (`slopic --strip`), not something the compiler decides. A test body is code
 only the harness reaches, so a build without `--test` does not emit it at all,

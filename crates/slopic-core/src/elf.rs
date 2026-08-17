@@ -11,7 +11,7 @@
 //! platform starts a process; none of that is a code generation question, and
 //! `D-001` keeps that dependency deliberately.
 
-use crate::asm::{Against, Definition, FixupKind, Object, Section};
+use crate::asm::{Against, Definition, FixupKind, Object, Section, SectionKind};
 
 const EM_X86_64: u16 = 62;
 const EM_AARCH64: u16 = 183;
@@ -40,6 +40,11 @@ const RELOCATION_SIZE: u64 = 24;
 #[derive(Clone, Copy, Debug)]
 pub struct Machine {
     id: u16,
+    /// What a section holding instructions is aligned to, which is what the
+    /// platform assembler gives one and therefore what our object has to say
+    /// to agree with it. A fixed-width instruction set needs its width; x86-64
+    /// has no requirement and `as` claims none.
+    code_align: u64,
     /// The relocation types this architecture spells the shared fixup kinds
     /// with. A kind the architecture has no relocation for cannot appear in
     /// its objects, and saying so here is how that is enforced.
@@ -48,6 +53,7 @@ pub struct Machine {
 
 pub const X86_64: Machine = Machine {
     id: EM_X86_64,
+    code_align: 1,
     relocation: |kind| match kind {
         // Values from the System V AMD64 psABI.
         FixupKind::Pc32 => Some(2),
@@ -58,6 +64,7 @@ pub const X86_64: Machine = Machine {
 
 pub const AARCH64: Machine = Machine {
     id: EM_AARCH64,
+    code_align: 4,
     relocation: |kind| match kind {
         // Values from the AArch64 ELF ABI.
         FixupKind::AdrPage21 => Some(275),
@@ -80,7 +87,7 @@ pub fn machine_for(triple: &str) -> Option<Machine> {
 
 /// A section as it will appear in the file.
 struct Part {
-    name: &'static str,
+    name: String,
     kind: u32,
     flags: u64,
     align: u64,
@@ -95,30 +102,25 @@ pub fn write(object: &Object, machine: Machine) -> Result<Vec<u8>, String> {
     let mut strings = StringTable::new();
     let mut section_names = StringTable::new();
 
-    // Section indices are fixed here and referred to below, because a
-    // relocation section names the one it applies to by index and the symbol
-    // table names the section every defined symbol sits in.
-    let text_index = 1u16;
-    let rodata_index = 2u16;
-    let note_index = 3u16;
-    let symtab_index = 4u16;
-    let strtab_index = 5u16;
-
-    let index_of = |section: Section| match section {
-        Section::Text => text_index,
-        Section::RoData => rodata_index,
-        Section::GnuStack => note_index,
-    };
+    // A section's index is its position. The data sections are written first
+    // and in the order the object carries them, so nothing has to be kept in
+    // step by hand — which is what stops this from being three literals again
+    // the moment a function claims a section of its own.
+    let sections: Vec<Section> = object.sections().map(|(section, _)| section).collect();
+    let index_of = |section: Section| object.position(section) as u16 + 1;
+    let symtab_index = sections.len() as u16 + 1;
+    let strtab_index = sections.len() as u16 + 2;
 
     // The symbol table opens with the null entry and the section symbols,
     // which are what a local label is reached through, and which have to come
     // before every global because `sh_info` splits the table in exactly one
     // place.
     let mut symbols = vec![SymbolEntry::null()];
-    let text_symbol = symbols.len() as u32;
-    symbols.push(SymbolEntry::section(text_index));
-    let rodata_symbol = symbols.len() as u32;
-    symbols.push(SymbolEntry::section(rodata_index));
+    let mut section_symbol = Vec::with_capacity(sections.len());
+    for section in &sections {
+        section_symbol.push(symbols.len() as u32);
+        symbols.push(SymbolEntry::section(index_of(*section)));
+    }
     let first_global = symbols.len() as u32;
 
     let mut symbol_index = Vec::with_capacity(object.symbols.len());
@@ -153,27 +155,39 @@ pub fn write(object: &Object, machine: Machine) -> Result<Vec<u8>, String> {
         });
     }
 
-    let mut relocations = Vec::with_capacity(object.relocations.len() * RELOCATION_SIZE as usize);
-    for relocation in &object.relocations {
-        let kind = (machine.relocation)(relocation.kind).ok_or_else(|| {
-            format!(
-                "{:?} has no relocation on this architecture",
-                relocation.kind
-            )
-        })?;
-        let symbol = match relocation.against {
-            Against::Symbol(index) => *symbol_index
-                .get(index)
-                .ok_or_else(|| format!("relocation names symbol {index}, which does not exist"))?,
-            Against::Section(Section::Text) => text_symbol,
-            Against::Section(Section::RoData) => rodata_symbol,
-            Against::Section(Section::GnuStack) => {
-                return Err("nothing can refer to .note.GNU-stack".into())
-            }
-        };
-        relocations.extend_from_slice(&relocation.offset.to_le_bytes());
-        relocations.extend_from_slice(&(((symbol as u64) << 32) | kind as u64).to_le_bytes());
-        relocations.extend_from_slice(&relocation.addend.to_le_bytes());
+    // One encoded block per section, because `.rela.<name>` is per section by
+    // definition: `sh_info` names the one section its entries patch.
+    let mut relocations: Vec<Vec<u8>> = Vec::with_capacity(sections.len());
+    for section in &sections {
+        let mut encoded = Vec::new();
+        for relocation in object.relocations(*section) {
+            let kind = (machine.relocation)(relocation.kind).ok_or_else(|| {
+                format!(
+                    "{:?} has no relocation on this architecture",
+                    relocation.kind
+                )
+            })?;
+            let symbol = match relocation.against {
+                Against::Symbol(index) => *symbol_index.get(index).ok_or_else(|| {
+                    format!("relocation names symbol {index}, which does not exist")
+                })?,
+                // A section symbol exists for every section, but existing is
+                // not permission to point at one that holds nothing.
+                Against::Section(against) => {
+                    if !object.def(against).kind().holds_data() {
+                        return Err(format!(
+                            "nothing can refer to {}",
+                            object.def(against).name()
+                        ));
+                    }
+                    section_symbol[object.position(against)]
+                }
+            };
+            encoded.extend_from_slice(&relocation.offset.to_le_bytes());
+            encoded.extend_from_slice(&(((symbol as u64) << 32) | kind as u64).to_le_bytes());
+            encoded.extend_from_slice(&relocation.addend.to_le_bytes());
+        }
+        relocations.push(encoded);
     }
 
     let mut symbol_bytes = Vec::with_capacity(symbols.len() * SYMBOL_SIZE as usize);
@@ -181,70 +195,67 @@ pub fn write(object: &Object, machine: Machine) -> Result<Vec<u8>, String> {
         symbol.write(&mut symbol_bytes);
     }
 
-    let parts = vec![
-        Part {
-            name: Section::Text.name(),
+    let mut parts = Vec::with_capacity(sections.len() + 3);
+    for section in &sections {
+        let def = object.def(*section);
+        // An empty section is still written. `.note.GNU-stack` is empty by
+        // design — its absence is what makes a linker mark the stack
+        // executable — and once functions own their own `.text`, the shared
+        // one is empty too. Dropping either would renumber every section.
+        let (flags, align) = match def.kind() {
+            SectionKind::Text => (SHF_ALLOC | SHF_EXECINSTR, machine.code_align),
+            SectionKind::RoData => (SHF_ALLOC, 8),
+            SectionKind::GnuStack => (0, 1),
+        };
+        parts.push(Part {
+            name: def.name().to_owned(),
             kind: SHT_PROGBITS,
-            flags: SHF_ALLOC | SHF_EXECINSTR,
-            align: 16,
+            flags,
+            align,
             link: 0,
             info: 0,
             entry_size: 0,
-            body: object.text.clone(),
-        },
-        Part {
-            name: Section::RoData.name(),
-            kind: SHT_PROGBITS,
-            flags: SHF_ALLOC,
-            align: 8,
-            link: 0,
-            info: 0,
-            entry_size: 0,
-            body: object.rodata.clone(),
-        },
-        // Present and empty is the whole point: its absence is what makes a
-        // linker mark the stack executable.
-        Part {
-            name: Section::GnuStack.name(),
-            kind: SHT_PROGBITS,
-            flags: 0,
-            align: 1,
-            link: 0,
-            info: 0,
-            entry_size: 0,
-            body: Vec::new(),
-        },
-        Part {
-            name: ".symtab",
-            kind: SHT_SYMTAB,
-            flags: 0,
-            align: 8,
-            link: strtab_index as u32,
-            info: first_global,
-            entry_size: SYMBOL_SIZE,
-            body: symbol_bytes,
-        },
-        Part {
-            name: ".strtab",
-            kind: SHT_STRTAB,
-            flags: 0,
-            align: 1,
-            link: 0,
-            info: 0,
-            entry_size: 0,
-            body: strings.finish(),
-        },
-        Part {
-            name: ".rela.text",
+            body: object.bytes(*section).to_vec(),
+        });
+    }
+    parts.push(Part {
+        name: ".symtab".to_owned(),
+        kind: SHT_SYMTAB,
+        flags: 0,
+        align: 8,
+        link: strtab_index as u32,
+        info: first_global,
+        entry_size: SYMBOL_SIZE,
+        body: symbol_bytes,
+    });
+    parts.push(Part {
+        name: ".strtab".to_owned(),
+        kind: SHT_STRTAB,
+        flags: 0,
+        align: 1,
+        link: 0,
+        info: 0,
+        entry_size: 0,
+        body: strings.finish(),
+    });
+    // The relocation sections come last so that a section's index stays its
+    // position among the data sections, whatever it does or does not need
+    // patching.
+    for (section, body) in sections.iter().zip(relocations) {
+        if body.is_empty() {
+            continue;
+        }
+        parts.push(Part {
+            name: format!(".rela{}", object.def(*section).name()),
             kind: SHT_RELA,
             flags: SHF_INFO_LINK,
             align: 8,
             link: symtab_index as u32,
-            info: text_index as u32,
+            info: index_of(*section) as u32,
             entry_size: RELOCATION_SIZE,
-            body: relocations,
-        },
-    ];
+            body,
+        });
+    }
     let shstrtab_index = parts.len() as u16 + 1;
 
     let mut file = vec![0u8; HEADER_SIZE as usize];
@@ -254,7 +265,7 @@ pub fn write(object: &Object, machine: Machine) -> Result<Vec<u8>, String> {
         let offset = file.len() as u64;
         file.extend_from_slice(&part.body);
         headers.push(SectionHeader {
-            name: section_names.add(part.name),
+            name: section_names.add(&part.name),
             kind: part.kind,
             flags: part.flags,
             offset,
@@ -461,16 +472,16 @@ mod tests {
 
     fn sample() -> Object {
         let mut assembly: Assembly<Nop> = Assembly::new();
-        assembly.push(Item::Section(Section::RoData));
+        assembly.push(Item::Section(Section::RODATA));
         assembly.push(Item::Label(".Lstr".into()));
         assembly.push(Item::Bytes(b"hi\0".to_vec()));
-        assembly.push(Item::Section(Section::Text));
+        assembly.push(Item::Section(Section::TEXT));
         assembly.push(Item::Global("main".into()));
         assembly.push(Item::Function("main".into()));
         assembly.push(Item::Label("main".into()));
         assembly.push(Item::Instruction(Nop));
         assembly.push(Item::Size("main".into()));
-        assembly.push(Item::Section(Section::GnuStack));
+        assembly.push(Item::Section(Section::GNU_STACK));
         assembly.finish().unwrap()
     }
 
@@ -524,12 +535,14 @@ mod tests {
         // An AArch64 page reference in an x86-64 object is a compiler bug, and
         // it has to fail here rather than produce a file a linker misreads.
         let mut object = sample();
-        object.relocations.push(crate::asm::Relocation {
-            offset: 0,
-            kind: FixupKind::AdrPage21,
-            against: Against::Section(Section::RoData),
-            addend: 0,
-        });
+        object
+            .relocations_mut(Section::TEXT)
+            .push(crate::asm::Relocation {
+                offset: 0,
+                kind: FixupKind::AdrPage21,
+                against: Against::Section(Section::RODATA),
+                addend: 0,
+            });
         let error = write(&object, X86_64).unwrap_err();
         assert!(error.contains("no relocation"), "{error}");
     }

@@ -965,9 +965,9 @@ mod tests {
 
     fn bytes(instruction: Inst) -> Vec<u8> {
         let mut assembly: Assembly<Inst> = Assembly::new();
-        assembly.push(Item::Section(Section::Text));
+        assembly.push(Item::Section(Section::TEXT));
         assembly.push(Item::Instruction(instruction));
-        assembly.finish().unwrap().text
+        assembly.finish().unwrap().text().to_vec()
     }
 
     fn r(name: &'static str) -> Reg {
@@ -1294,34 +1294,34 @@ mod tests {
     #[test]
     fn a_jump_inside_the_section_is_resolved_without_the_linker() {
         let mut assembly: Assembly<Inst> = Assembly::new();
-        assembly.push(Item::Section(Section::Text));
+        assembly.push(Item::Section(Section::TEXT));
         assembly.push(Item::Instruction(Inst::Jmp(Target::Named(".Lend".into()))));
         assembly.push(Item::Instruction(Inst::Ret));
         assembly.push(Item::Label(".Lend".into()));
         let object = assembly.finish().unwrap();
-        assert!(object.relocations.is_empty());
+        assert!(object.relocations(Section::TEXT).is_empty());
         // `e9` and a displacement measured from the end of the instruction,
         // which is one byte past the `ret`.
-        assert_eq!(object.text, vec![0xe9, 0x01, 0, 0, 0, 0xc3]);
+        assert_eq!(object.text(), vec![0xe9, 0x01, 0, 0, 0, 0xc3]);
     }
 
     #[test]
     fn a_call_and_an_address_are_the_linkers() {
         let mut assembly: Assembly<Inst> = Assembly::new();
-        assembly.push(Item::Section(Section::RoData));
+        assembly.push(Item::Section(Section::RODATA));
         assembly.push(Item::Label(".Lstr".into()));
         assembly.push(Item::Bytes(vec![104, 105, 0]));
-        assembly.push(Item::Section(Section::Text));
+        assembly.push(Item::Section(Section::TEXT));
         assembly.push(Item::Instruction(Inst::Lea(
             r("rdi"),
             Operand::Rip(".Lstr".into()),
         )));
         assembly.push(Item::Instruction(Inst::Call("sl_rt_alloc".into())));
         let object = assembly.finish().unwrap();
-        assert_eq!(object.text[0..3], [0x48, 0x8d, 0x3d]);
-        assert_eq!(object.text[7], 0xe8);
+        assert_eq!(object.text()[0..3], [0x48, 0x8d, 0x3d]);
+        assert_eq!(object.text()[7], 0xe8);
         let kinds: Vec<_> = object
-            .relocations
+            .relocations(Section::TEXT)
             .iter()
             .map(|relocation| (relocation.kind, relocation.offset, relocation.addend))
             .collect();

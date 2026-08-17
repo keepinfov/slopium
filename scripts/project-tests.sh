@@ -394,20 +394,35 @@ if command -v readelf >/dev/null 2>&1; then
   fi
   # And nothing a program never calls is dragged along: `basics` makes no
   # slice, so the linker must have dropped the slice runtime.
-  #
-  # It used to be the list runtime, and at v0.5.3 it stopped being: a whole
-  # Slopium object is one `.text`, so the granularity here is the C runtime's
-  # functions and the Slopium *object*, not the Slopium function. `basics`
-  # takes `std:io`, `std:io` takes `core:string`, and `core:string:split`
-  # builds a list — so `sl_rt_list_*` is now reachable from every program that
-  # prints a number. Per-function sections for our own text would fix it and
-  # are not this milestone's business.
   if readelf -sW "$basic_project/target/$host_target/dev/basics" 2>/dev/null |
     grep -q 'sl_rt_slice_'; then
     echo "project-tests: an unused runtime helper survived --gc-sections" >&2
     exit 1
   fi
   echo "project-tests: release binaries are stripped and unused helpers dropped ... ok"
+
+  # The same is now true of a Slopium function, which is what a function owning
+  # its own section bought (`D-030`). `basics` prints no float, so nothing it
+  # calls reaches `core:float:assemble`.
+  #
+  # The object is checked first and on purpose. A module is emitted whole —
+  # `emit` is per module, not per function — so the symbol really is there to
+  # be dropped, and without that half this check would keep passing the day
+  # something starts pruning earlier, for a reason that has nothing to do with
+  # the linker. The mangling is spelled out rather than pasted, so a change to
+  # it fails here instead of quietly looking for a symbol nobody emits.
+  unused_symbol="sl_fn_$(printf 'core:float:assemble' | od -An -tx1 | tr -d ' \n')"
+  unused_object="$basic_project/target/$host_target/dev/objects/basics/$(printf 'core:float' | od -An -tx1 | tr -d ' \n').o"
+  if ! nm "$unused_object" 2>/dev/null | grep -q "$unused_symbol"; then
+    echo "project-tests: $unused_symbol is not in its object, so dropping it proves nothing" >&2
+    exit 1
+  fi
+  if readelf -sW "$basic_project/target/$host_target/dev/basics" 2>/dev/null |
+    grep -q "$unused_symbol"; then
+    echo "project-tests: an uncalled Slopium function survived --gc-sections" >&2
+    exit 1
+  fi
+  echo "project-tests: an uncalled Slopium function is dropped at link time ... ok"
 else
   skip "readelf not found; debug-section check skipped"
 fi

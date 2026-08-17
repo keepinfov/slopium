@@ -195,6 +195,9 @@ struct Generator<'a> {
     /// arguments need sits below it, so writing those cannot reach a local.
     slot_base: usize,
     last_location: Option<(usize, usize, usize)>,
+    /// The symbol of the function being emitted, which names both its section
+    /// and its panic trampolines.
+    symbol: String,
 }
 
 impl<'a> Generator<'a> {
@@ -211,13 +214,14 @@ impl<'a> Generator<'a> {
             registers: &CALLEE_SAVED,
             slot_base: 0,
             last_location: None,
+            symbol: String::new(),
         }
     }
 
     fn generate(mut self) -> CompileResult<Assembly<Inst>> {
         self.collect_strings();
         self.file_table();
-        self.asm.push(Item::Section(Section::RoData));
+        self.asm.push(Item::Section(Section::RODATA));
         let traps = self.trap_usage();
         // Only the messages a check can reach, and none at all under
         // `panic = "abort"`. Shared with the other backend (`D-025`).
@@ -235,7 +239,7 @@ impl<'a> Generator<'a> {
         for (label, value) in self.strings.clone() {
             self.byte_string(&label, &value);
         }
-        self.asm.push(Item::Section(Section::Text));
+        self.asm.push(Item::Section(Section::TEXT));
 
         for function in self
             .module
@@ -253,7 +257,10 @@ impl<'a> Generator<'a> {
             }
         }
         // Generated glue from here on. It writes no location and inherits the
-        // last row, for the reason recorded in `D-023`.
+        // last row, for the reason recorded in `D-023`. Back to the shared
+        // `.text` too: the glue is reached from wherever it is needed and has
+        // no function of its own to be dropped with.
+        self.asm.push(Item::Section(Section::TEXT));
         let structs = self.module.structs.clone();
         for structure in structs.iter().filter(|structure| structure.emit) {
             self.struct_clone_helper(&structure.name, &structure.fields);
@@ -269,8 +276,7 @@ impl<'a> Generator<'a> {
         } else if self.options.emit_entrypoint {
             self.program_entrypoint();
         }
-        self.runtime_panic_trampolines(traps);
-        self.asm.push(Item::Section(Section::GnuStack));
+        self.asm.push(Item::Section(Section::GNU_STACK));
 
         if self.diagnostics.is_empty() {
             self.asm.remove_redundant_copies();
@@ -552,6 +558,7 @@ impl<'a> Generator<'a> {
 
     fn function(&mut self, function: &MirFunction, is_test: bool) {
         let symbol = function_symbol(&function.name, is_test);
+        self.symbol = symbol.clone();
         let epilogue = format!(".L{symbol}_epilogue");
 
         let cfg = Cfg::new(function);
@@ -582,6 +589,10 @@ impl<'a> Generator<'a> {
         let save_base = self.alloc.memory_slots();
         let frame_size = align_to(outgoing + (save_base + saved.len()) * 8, 16);
 
+        // A function owns the section its code sits in, so `--gc-sections`
+        // can drop the whole of one nothing calls (`D-030`).
+        let section = self.asm.text_for(&symbol);
+        self.asm.push(Item::Section(section));
         self.asm.push(Item::Global(symbol.clone()));
         self.asm.push(Item::Function(symbol.clone()));
         self.label(&symbol);
@@ -625,6 +636,9 @@ impl<'a> Generator<'a> {
         self.inst(Inst::Mov { dst: SP, src: X29 });
         self.inst(Inst::PopFrame);
         self.inst(Inst::Ret);
+        // Inside the symbol rather than after it, so a backtrace that stops in
+        // a trampoline still names the function whose check reached it.
+        self.runtime_panic_trampolines(trap_usage(std::iter::once(function)));
         self.asm.push(Item::Size(symbol.clone()));
     }
 
@@ -1028,7 +1042,7 @@ impl<'a> Generator<'a> {
                         (false, true) => Cond::Hs,
                         (false, false) => Cond::Lo,
                     };
-                    self.inst(Inst::Bcond(carried, overflow_trampoline()));
+                    self.inst(Inst::Bcond(carried, overflow_trampoline(&self.symbol)));
                 }
                 self.canonicalize_checked(kind);
                 self.write(dst, X16);
@@ -1066,9 +1080,9 @@ impl<'a> Generator<'a> {
                             rhs: X16,
                             amount: 63,
                         });
-                        self.inst(Inst::Bcond(Cond::Ne, overflow_trampoline()));
+                        self.inst(Inst::Bcond(Cond::Ne, overflow_trampoline(&self.symbol)));
                     } else {
-                        self.inst(Inst::Cbnz(X15, overflow_trampoline()));
+                        self.inst(Inst::Cbnz(X15, overflow_trampoline(&self.symbol)));
                     }
                 }
                 self.canonicalize_checked(kind);
@@ -1181,7 +1195,7 @@ impl<'a> Generator<'a> {
         self.inst(Inst::Mov { dst: X15, src: X16 });
         self.canonicalize(kind);
         self.inst(Inst::Cmp { lhs: X16, rhs: X15 });
-        self.inst(Inst::Bcond(Cond::Ne, overflow_trampoline()));
+        self.inst(Inst::Bcond(Cond::Ne, overflow_trampoline(&self.symbol)));
     }
 
     /// A shift, with the count checked against the operand width first.
@@ -1200,10 +1214,7 @@ impl<'a> Generator<'a> {
             lhs: count,
             rhs: X15,
         });
-        self.inst(Inst::Bcond(
-            Cond::Hs,
-            Target::Named(".Lsl_panic_shift_trampoline".into()),
-        ));
+        self.inst(Inst::Bcond(Cond::Hs, trampoline(&self.symbol, "shift")));
         let variable = match (op, kind.signed) {
             (BinaryOp::Shl, _) => Arith::Lslv,
             (_, true) => Arith::Asrv,
@@ -1240,10 +1251,7 @@ impl<'a> Generator<'a> {
     fn divide(&mut self, dst: LocalId, op: BinaryOp, lhs: LocalId, rhs: LocalId, kind: IntKind) {
         let left = self.read(lhs, 1);
         let right = self.read(rhs, 2);
-        self.inst(Inst::Cbz(
-            right,
-            Target::Named(".Lsl_panic_div_zero_trampoline".into()),
-        ));
+        self.inst(Inst::Cbz(right, trampoline(&self.symbol, "div_zero")));
         // A narrow operand cannot be the most negative *word*, so that guard is
         // unreachable there, and the one narrow quotient that overflows — the
         // least `i8` over `-1` — is caught by the range check below. An
@@ -1257,7 +1265,7 @@ impl<'a> Generator<'a> {
             self.inst(Inst::Bcond(Cond::Ne, Target::Forward(1)));
             // `cmn r, #1` is `cmp r, #-1` without needing a negative immediate.
             self.inst(Inst::CmnImm { lhs: right, imm: 1 });
-            self.inst(Inst::Bcond(Cond::Eq, overflow_trampoline()));
+            self.inst(Inst::Bcond(Cond::Eq, overflow_trampoline(&self.symbol)));
             self.asm.push(Item::Numeric(1));
         }
         // A narrow unsigned operand is a small non-negative word, so the signed
@@ -1677,7 +1685,7 @@ impl<'a> Generator<'a> {
                 continue;
             }
             self.asm
-                .push(Item::Label(format!(".Lsl_panic_{message}_trampoline")));
+                .push(Item::Label(trampoline(&self.symbol, message).to_string()));
             if self.options.panic_abort {
                 self.inst(Inst::Bl("sl_rt_abort".into()));
             } else {
@@ -1961,8 +1969,17 @@ fn outgoing_bytes(module: &MirModule, function: &MirFunction) -> usize {
 }
 
 /// The trampoline every arithmetic check branches to.
-fn overflow_trampoline() -> Target {
-    Target::Named(".Lsl_panic_overflow_trampoline".into())
+fn overflow_trampoline(symbol: &str) -> Target {
+    trampoline(symbol, "overflow")
+}
+
+/// A panic trampoline, named after the function that carries it.
+///
+/// One copy per function rather than one per program: a `b.cond` reaches
+/// ±1 MiB, and a conditional branch that leaves its own section becomes an
+/// `R_AARCH64_CONDBR19` no linker will veneer (`D-116`).
+fn trampoline(symbol: &str, message: &str) -> Target {
+    Target::Named(format!(".L{symbol}_panic_{message}_trampoline"))
 }
 
 /// Only `u64` needs the unsigned conditions: a narrower unsigned type is held
@@ -2085,7 +2102,7 @@ mod tests {
             ("(fn main () -> i64 (* 2 3))", vec!["smulh", "b.ne"]),
             (
                 "(fn main () -> i64 (/ 6 3))",
-                vec!["cbz", ".Lsl_panic_div_zero_trampoline", "b.eq"],
+                vec!["cbz", "_panic_div_zero_trampoline", "b.eq"],
             ),
         ] {
             // Constant folding is off in the default profile, so the operator
