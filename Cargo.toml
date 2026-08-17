@@ -13,7 +13,7 @@ resolver = "2"
 version = "0.8.4"
 edition = "2021"
 license = "MIT"
-authors = ["TBWanderer"]
+authors = ["keepinfov"]
 
 [workspace.dependencies]
 clap = { version = "4.6.4", features = ["derive"] }
