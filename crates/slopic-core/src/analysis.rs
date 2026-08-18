@@ -19,6 +19,7 @@ pub enum AnalysisSymbolKind {
     Constructor,
     Field,
     Builtin,
+    Constant,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -71,6 +72,7 @@ impl Analysis {
                                 | AnalysisSymbolKind::Struct
                                 | AnalysisSymbolKind::Enum
                                 | AnalysisSymbolKind::Constructor
+                                | AnalysisSymbolKind::Constant
                         ) || symbol.definition.start <= offset))
             })
             .collect()
@@ -234,6 +236,19 @@ impl<'a> SymbolIndexBuilder<'a> {
                 self.top_level.insert(path, id);
             }
         }
+        for constant in &self.ast.consts {
+            let detail = match &constant.ty {
+                Some(ty) => format!("const {} : {ty}", constant.name),
+                None => format!("const {}", constant.name),
+            };
+            self.define_top_level(
+                &constant.name,
+                AnalysisSymbolKind::Constant,
+                detail,
+                constant.span,
+                file_scope,
+            );
+        }
         for (name, detail) in BUILTINS {
             self.define_top_level(
                 name,
@@ -369,6 +384,9 @@ impl<'a> SymbolIndexBuilder<'a> {
                 for arm in arms {
                     let mut arm_bindings = bindings.clone();
                     self.pattern(&arm.pattern, arm.span, &mut arm_bindings);
+                    if let Some(guard) = &arm.guard {
+                        self.expr(guard, arm.span, &mut arm_bindings);
+                    }
                     self.expr(&arm.body, arm.span, &mut arm_bindings);
                 }
             }
@@ -466,12 +484,20 @@ impl<'a> SymbolIndexBuilder<'a> {
                     });
                 }
             }
+            TExprKind::Break(value) => {
+                if let Some(value) = value {
+                    self.expr(value, scope, bindings);
+                }
+            }
+            // A `const` use is a reference to the declaration, the way a `fn`
+            // named as a value is (`D-121`), so hover and rename follow it
+            // even though the literal is already here.
+            TExprKind::Const { name, .. } => self.top_level_reference(name, expression.span),
             TExprKind::Unit
             | TExprKind::Bool(_)
             | TExprKind::Int(_)
             | TExprKind::Float(_)
             | TExprKind::String(_)
-            | TExprKind::Break
             | TExprKind::Continue => {}
         }
     }

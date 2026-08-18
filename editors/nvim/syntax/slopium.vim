@@ -28,6 +28,9 @@ syntax match slopiumTypeName "[A-Z][A-Za-z0-9_-]*" contained
 syntax keyword slopiumTestKeyword test
 
 syntax keyword slopiumBindingKeyword let nextgroup=slopiumModifier,slopiumVariableDefinition skipwhite
+" A module-level name for a literal. It binds like `let` and is declared like a
+" `fn`, so it takes the binding group and the declaration's `nextgroup`.
+syntax keyword slopiumConstKeyword const nextgroup=slopiumVariableDefinition skipwhite
 syntax keyword slopiumModifier mut contained nextgroup=slopiumVariableDefinition skipwhite
 syntax match slopiumVariableDefinition "[a-z_][A-Za-z0-9_-]*" contained
 syntax keyword slopiumAssignmentKeyword set nextgroup=slopiumVariable skipwhite
@@ -37,7 +40,7 @@ syntax keyword slopiumControl do loop while break continue
 " system. It gets its own group so that a reader scanning a file can find every
 " place the compiler stopped proving things.
 syntax keyword slopiumUnsafe unsafe
-syntax keyword slopiumConditional if match try and or
+syntax keyword slopiumConditional if match when try and or
 " Anchored after `(` so the `:as` of an import alias stays a field.
 syntax match slopiumConversion "\%((\s*\)\@<=as\>"
 " `export`, `take` and `extern` are the three words that name a boundary: the
@@ -55,6 +58,9 @@ syntax match slopiumOperator "\%((\s*\)\@<=\%([<>!]\=[=]\|[-+*/<>%]\)"
 syntax keyword slopiumType unit bool i8 i16 i32 i64 u8 u16 u32 u64 f64 String List Array Slice Fn Ptr
 syntax match slopiumEnumPath "\v<[A-Za-z_][A-Za-z0-9_-]*(:[A-Za-z_][A-Za-z0-9_-]*)+>"
 syntax match slopiumField "\v:[A-Za-z_][A-Za-z0-9_-]*"
+" A lone `:` is the type written after a value — `(let x 0 : u8)`. Anchored on
+" whitespace so the `:` of a field or of a module path stays what it was.
+syntax match slopiumAscription "\v\s:\ze\s"
 syntax match slopiumArrow "->"
 syntax match slopiumWildcard "\v<_>"
 
@@ -90,6 +96,8 @@ highlight default link slopiumVariableDefinition @variable
 highlight default link slopiumVariable @variable
 highlight default link slopiumEnumPath @constructor
 highlight default link slopiumField @property
+highlight default link slopiumConstKeyword @keyword
+highlight default link slopiumAscription @keyword.operator
 highlight default link slopiumArrow Operator
 highlight default link slopiumWildcard Special
 highlight default link slopiumDelimiter Delimiter

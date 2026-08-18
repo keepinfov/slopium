@@ -1,0 +1,104 @@
+; The everyday forms (`D-121`): a `const`, a `let` that carries its value's
+; type, a `loop` that produces a value, a guard on a `match` arm, and a name
+; bound twice in one scope.
+
+(take std:io println println-i64 println-u64)
+(take std:string hash equals from-i64 concat trim)
+(take std:map Map map-new map-insert map-lookup)
+(take std:option unwrap-or)
+(take limits com1-data retry-limit greeting)
+
+; An empty container's element types appear in no argument, so until v0.9.1 the
+; only place to write them down was a function's result. The type goes after
+; the value, because it annotates the value rather than the name.
+(fn scores () -> i64
+  (let mut table (map-new hash equals) : (Map String i64))
+  (let ann "ann")
+  (let bo "bo")
+  (map-insert (&mut table) (clone (& ann)) 30)
+  (map-insert (&mut table) (clone (& bo)) 12)
+  (+ (unwrap-or (map-lookup (& table) (& ann)) 0)
+    (unwrap-or (map-lookup (& table) (& bo)) 0)))
+
+; A `loop` is an expression: the value leaves through the `break` rather than
+; through a `let mut` written above the loop.
+(fn doubled-at ((stop i64)) -> i64
+  (let mut n 0)
+  (loop
+    (set n (+ n 1))
+    (if (= n stop) (break (* n 2)) ())))
+
+(enum Reading
+  (Port ((address u16)))
+  (Retry ((attempt i64)))
+  Silent)
+
+; A guard is tested after the pattern matched and before the arm is taken, so
+; two arms can share a pattern and differ only in the condition.
+(fn describe ((reading Reading)) -> String
+  (match reading
+    ((Reading:Port address) when (= address com1-data) "the serial port")
+    ((Reading:Port _) "another port")
+    ((Reading:Retry attempt) when (> attempt retry-limit) "gave up")
+    ((Reading:Retry attempt)
+      (do
+        (let prefix "attempt ")
+        (let count (from-i64 attempt))
+        (concat (& prefix) (& count))))
+    ((Reading:Silent) "nothing")))
+
+; A guard reads and never moves, which is why `name` is still there for the
+; second arm to bind.
+(fn label ((reading (& Reading))) -> i64
+  (match reading
+    ((Reading:Retry attempt) when (> (clone attempt) 0) (clone attempt))
+    ((Reading:Retry _) 0)
+    ((Reading:Port _) (- 0 1))
+    ((Reading:Silent) (- 0 2))))
+
+; Shadowing: the second `let` is a new name, not a mutation, and the string the
+; first one held is still dropped when the scope ends.
+(fn tidy () -> String
+  (let pad "  ")
+  (let tail greeting)
+  (let text (concat (& pad) (& tail)))
+  (let text (concat (& text) (& pad)))
+  (let text (trim (& text)))
+  text)
+
+(fn say ((text String)) -> unit
+  (println (& text)))
+
+(fn main () -> i32
+  (println-u64 (as u64 com1-data))
+  (println-i64 (scores))
+  (println-i64 (doubled-at 8))
+  (say (describe (Reading:Port 0x3F8)))
+  (say (describe (Reading:Port 0x2F8)))
+  (say (describe (Reading:Retry 9)))
+  (say (describe (Reading:Retry 2)))
+  (say (describe (Reading:Silent)))
+  (let retried (Reading:Retry 7))
+  (println-i64 (label (& retried)))
+  (say (tidy))
+  0)
+
+(test "a const is the literal it names"
+  (= (as i64 com1-data) 1016))
+
+(test "a let carries the type its value could not infer"
+  (= (scores) 42))
+
+(test "a loop produces a value"
+  (= (doubled-at 21) 42))
+
+(test "a guard picks between two arms of one pattern"
+  (do
+    (let positive (Reading:Retry 7))
+    (let zero (Reading:Retry 0))
+    (and (= (label (& positive)) 7) (= (label (& zero)) 0))))
+
+(test "a name can be bound twice in one scope"
+  (do
+    (let tidied (tidy))
+    (= (len (& tidied)) 8)))

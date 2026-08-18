@@ -1,0 +1,6 @@
+guard-moves-binding.slp:10:49: error[SL0300]: cannot move `name` inside a `when` guard
+  |
+10 |     ((Tag :name name :weight _) when (> (length name) 3) 1)
+  |                                                 ^^^^
+  = label 10:17: value was declared here
+  = help: a guard runs before its arm is taken, so the value has to still be there for the arms after it; borrow it or `clone` it

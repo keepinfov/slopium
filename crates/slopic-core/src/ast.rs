@@ -348,6 +348,7 @@ pub struct Program {
     pub tests: Vec<Test>,
     pub structs: Vec<StructDecl>,
     pub enums: Vec<EnumDecl>,
+    pub consts: Vec<ConstDecl>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -377,6 +378,23 @@ pub struct Function {
     pub params: Vec<Param>,
     pub return_type: Type,
     pub body: Expr,
+    pub span: Span,
+}
+
+/// A module-level name for a literal, inlined wherever it is used (`D-121`).
+///
+/// The value is a literal and nothing else — not arithmetic, not another
+/// `const` — because a constant that can call is a constant evaluator, and one
+/// that can only be a literal is additive to whatever a later milestone decides
+/// about that. What it replaces is a `fn` with a body of one number, which is
+/// what a program addressing hardware wrote before this existed.
+#[derive(Clone, Debug, Serialize)]
+pub struct ConstDecl {
+    pub name: String,
+    /// The type written after the value as `: T`, when the literal could not
+    /// choose for itself.
+    pub ty: Option<Type>,
+    pub value: Expr,
     pub span: Span,
 }
 
@@ -482,9 +500,17 @@ pub enum ExprKind {
         name: String,
         resolved: Option<String>,
     },
+    /// `(let name value)`, or `(let name value : Type)` (`D-121`).
+    ///
+    /// The type is written on the **value's** side, because it is an
+    /// annotation of the value rather than of the name: inference reaches
+    /// everywhere it can, and where it cannot — an empty container, whose
+    /// element type appears in no argument — the expectation is written down
+    /// beside the thing that could not supply it.
     Let {
         name: String,
         mutable: bool,
+        ty: Option<Type>,
         value: Box<Expr>,
     },
     Set {
@@ -515,7 +541,11 @@ pub enum ExprKind {
         condition: Box<Expr>,
         body: Box<Expr>,
     },
-    Break,
+    /// `(break)`, or `(break value)` in a `loop` (`D-121`).
+    ///
+    /// A `while` may end by its condition, where there is no value to hand
+    /// back, so a value here belongs to a `loop` alone and `sema` says so.
+    Break(Option<Box<Expr>>),
     Continue,
     Match {
         value: Box<Expr>,
@@ -581,6 +611,11 @@ pub struct Capture {
 #[derive(Clone, Debug, Serialize)]
 pub struct MatchArm {
     pub pattern: Pattern,
+    /// `((pattern) when condition body)` (`D-121`).
+    ///
+    /// It runs after the pattern matched and before the arm is taken, so an
+    /// arm that carries one proves nothing about exhaustiveness.
+    pub guard: Option<Expr>,
     pub body: Expr,
     pub span: Span,
 }
@@ -620,6 +655,7 @@ pub fn build_program(file: &str, forms: &[SExpr]) -> CompileResult<Program> {
         tests: Vec::new(),
         structs: Vec::new(),
         enums: Vec::new(),
+        consts: Vec::new(),
     };
 
     for form in forms {
@@ -664,6 +700,11 @@ pub fn build_program(file: &str, forms: &[SExpr]) -> CompileResult<Program> {
             "enum" => {
                 if let Some(decl) = builder.enum_decl(form.span, items) {
                     program.enums.push(decl);
+                }
+            }
+            "const" => {
+                if let Some(decl) = builder.const_decl(form.span, items) {
+                    program.consts.push(decl);
                 }
             }
             other => builder.error(
@@ -1247,13 +1288,14 @@ impl AstBuilder<'_> {
                             body: Box::new(self.body(&items[2..], form.span)?),
                         }
                     }
-                    "break" => {
-                        if items.len() != 1 {
-                            self.error(form.span, "`break` does not accept a value");
+                    "break" => match items.len() {
+                        1 => ExprKind::Break(None),
+                        2 => ExprKind::Break(Some(Box::new(self.expr(&items[1])?))),
+                        _ => {
+                            self.error(form.span, "`break` expects at most one value");
                             return None;
                         }
-                        ExprKind::Break
-                    }
+                    },
                     "continue" => {
                         if items.len() != 1 {
                             self.error(form.span, "`continue` does not accept a value");
@@ -1331,21 +1373,78 @@ impl AstBuilder<'_> {
         } else {
             (false, 1, 2)
         };
-        if items.len() != value_index + 1 {
+        if items.len() <= value_index {
             self.error(
                 span,
-                "`let` syntax is `(let name value)` or `(let mut name value)`",
+                "`let` syntax is `(let name value)`, `(let mut name value)`, \
+                 or either with `: Type` after the value",
             );
             return None;
         }
+        let name = self
+            .required_atom(&items[name_index], "binding name")?
+            .to_owned();
+        let value = Box::new(self.expr(&items[value_index])?);
+        let ty = self.ascription(span, &items[value_index + 1..], "let")?;
         Some(Expr {
             kind: ExprKind::Let {
-                name: self
-                    .required_atom(&items[name_index], "binding name")?
-                    .to_owned(),
+                name,
                 mutable,
-                value: Box::new(self.expr(&items[value_index])?),
+                ty,
+                value,
             },
+            span,
+        })
+    }
+
+    /// The `: Type` a value may carry after it (`D-121`).
+    ///
+    /// Shared by `let` and `const`, which is the whole reason it is a function:
+    /// two forms that annotate a value in two different ways would be two
+    /// things to remember rather than one.
+    fn ascription(&mut self, span: Span, tail: &[SExpr], form: &str) -> Option<Option<Type>> {
+        match tail {
+            [] => Some(None),
+            [marker, written] if atom(marker) == Some(":") => Some(Some(self.ty(written)?)),
+            _ => {
+                self.error(
+                    span,
+                    format!("`{form}` writes a type as `: Type` after the value"),
+                );
+                None
+            }
+        }
+    }
+
+    fn const_decl(&mut self, span: Span, items: &[SExpr]) -> Option<ConstDecl> {
+        if items.len() < 3 {
+            self.error(
+                span,
+                "`const` syntax is `(const name value)` or `(const name value : Type)`",
+            );
+            return None;
+        }
+        let name = self.required_atom(&items[1], "constant name")?.to_owned();
+        let value = self.expr(&items[2])?;
+        let ty = self.ascription(span, &items[3..], "const")?;
+        // A literal and nothing else (`D-121`). Arithmetic here would be a
+        // constant evaluator, and every program that would want one can write
+        // the number; allowing it later is additive, and taking it back is not.
+        if !matches!(
+            value.kind,
+            ExprKind::Unit
+                | ExprKind::Bool(_)
+                | ExprKind::Int(_)
+                | ExprKind::Float(_)
+                | ExprKind::String(_)
+        ) {
+            self.error(value.span, "a `const` value must be a literal");
+            return None;
+        }
+        Some(ConstDecl {
+            name,
+            ty,
+            value,
             span,
         })
     }
@@ -1361,14 +1460,30 @@ impl AstBuilder<'_> {
             let Some(parts) = self.list(item, "match arm") else {
                 continue;
             };
-            if parts.len() != 2 {
-                self.error(item.span, "match arm syntax is `(pattern expression)`");
-                continue;
-            }
+            // Two elements is an arm, four with `when` in the second is a
+            // guarded one (`D-121`). Nothing else was ever legal here, so the
+            // guard costs no ambiguity.
+            let (guard_form, body_form) = match parts {
+                [_, body] => (None, body),
+                [_, marker, guard, body] if atom(marker) == Some("when") => (Some(guard), body),
+                _ => {
+                    self.error(
+                        item.span,
+                        "match arm syntax is `(pattern expression)` or \
+                         `(pattern when condition expression)`",
+                    );
+                    continue;
+                }
+            };
             let pattern = self.pattern(&parts[0])?;
-            let body = self.expr(&parts[1])?;
+            let guard = match guard_form {
+                Some(form) => Some(self.expr(form)?),
+                None => None,
+            };
+            let body = self.expr(body_form)?;
             arms.push(MatchArm {
                 pattern,
+                guard,
                 body,
                 span: item.span,
             });

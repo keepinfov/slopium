@@ -1,0 +1,8 @@
+; A `const` is a name for a literal, exported like anything else (`D-121`).
+; Before v0.9.1 each of these was `(fn com1-data () -> u16 0x3F8)` — a constant
+; wearing a function's clothes, which is what the v0.8.5 kernel had seven of.
+(export com1-data retry-limit greeting)
+
+(const com1-data 0x3F8 : u16)
+(const retry-limit 3)
+(const greeting "everyday")

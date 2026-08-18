@@ -1,0 +1,5 @@
+guard-arm-not-exhaustive.slp:6:3: error[SL0400]: non-exhaustive match
+  |
+ 6 |   (match shape
+  |   ^^^^^^^^^^^^^^
+  = help: cover every enum variant, or add `_`

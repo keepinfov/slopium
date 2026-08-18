@@ -1,0 +1,6 @@
+; A `const` is a name for a literal and nothing else (`D-121`). Arithmetic here
+; would be a constant evaluator, which is a milestone rather than a form, and
+; allowing it later stays compatible while taking it back would not.
+(const doubled (* 2 21))
+
+(fn main () -> i32 0)

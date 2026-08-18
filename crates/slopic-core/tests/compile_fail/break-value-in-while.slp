@@ -1,0 +1,10 @@
+; `(break value)` belongs to a `loop` alone (`D-121`): a `while` ends when its
+; condition is false, and there is no value to produce on that edge.
+(fn count-up () -> unit
+  (let mut n 0)
+  (while (< n 10)
+    (set n (+ n 1))
+    (break n)))
+
+(fn main () -> i32
+  (do (count-up) 0))

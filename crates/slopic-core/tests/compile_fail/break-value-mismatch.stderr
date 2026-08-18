@@ -1,0 +1,4 @@
+break-value-mismatch.slp:9:19: error[SL0200]: this loop produces `i64`, and this `break` gives `unit`
+  |
+ 9 |     (if (> n 100) (break) ())))
+  |                   ^^^^^^^

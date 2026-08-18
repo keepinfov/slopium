@@ -14,9 +14,10 @@
 (take std:set Set set-of set-add set-holds set-discard set-count set-each)
 (take std:option Option unwrap-or)
 
-; An empty container needs its type from somewhere, and a `let` carries none.
-; A function that says what it returns is where the type is written down, the
-; same as `(fn nothing () -> (Option String) (Option:None))`.
+; An empty container needs its type from somewhere. Since v0.9.1 a `let` can
+; carry it — `(let mut scores (map-new hash equals) : (Map String i64))` — and
+; a function that says what it returns is the other place to write it down,
+; which is what these three are: one type, several call sites.
 (fn empty-scores () -> (Map String i64)
   (map-new hash equals))
 

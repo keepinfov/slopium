@@ -31,8 +31,9 @@
   (let sentinel 0)
   (filter items (lambda (sentinel) ((element (& T))) -> bool (= sentinel 0))))
 
-; An empty `Option` of a type nothing else names, since a `let` carries no type
-; and `or-else` has to know what it is falling back to.
+; An empty `Option` of a type nothing else names: `or-else` has to know what it
+; is falling back to, and a function's result says so at every call rather than
+; at one binding.
 (fn nothing () -> (Option String)
   (Option:None))
 

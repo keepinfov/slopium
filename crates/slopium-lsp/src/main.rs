@@ -44,10 +44,10 @@ const RENAME: &str = Rename::METHOD;
 /// `package.rs` already deduplicated the operator table because two copies drift,
 /// and the copies of this one that live in Vim and Lua drifted anyway.
 const KEYWORDS: &[&str] = &[
-    "fn", "test", "struct", "enum", "let", "mut", "set", "if", "match", "do", "true", "false", "_",
-    "unit", "bool", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f64", "String", "List",
-    "Array", "Slice", "Fn", "Ptr", "lambda", "loop", "while", "break", "continue", "export",
-    "take", "extern", "try", "as", "and", "or", "not", "unsafe",
+    "fn", "test", "struct", "enum", "const", "let", "mut", "set", "if", "match", "when", "do",
+    "true", "false", "_", "unit", "bool", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
+    "f64", "String", "List", "Array", "Slice", "Fn", "Ptr", "lambda", "loop", "while", "break",
+    "continue", "export", "take", "extern", "try", "as", ":", "and", "or", "not", "unsafe",
 ];
 
 struct Document {
@@ -378,6 +378,9 @@ impl Server {
                 AnalysisSymbolKind::Field => 4,
                 AnalysisSymbolKind::Struct | AnalysisSymbolKind::Enum => 5,
                 AnalysisSymbolKind::Constructor => 6,
+                // A `const` is a name for a literal, and the editor already
+                // has a colour for a name that never changes.
+                AnalysisSymbolKind::Constant => 2,
             };
             let modifiers = if occurrence.is_definition { 1 } else { 0 };
             tokens.push((
@@ -476,9 +479,9 @@ impl Server {
             }
         }
         for keyword in [
-            "fn", "test", "struct", "enum", "export", "take", "let", "set", "if", "match", "do",
-            "loop", "while", "break", "continue", "try", "as", "Fn", "Ptr", "lambda", "&", "&mut",
-            "and", "or", "unsafe",
+            "fn", "test", "struct", "enum", "const", "export", "take", "let", "set", "if", "match",
+            "when", "do", "loop", "while", "break", "continue", "try", "as", "Fn", "Ptr", "lambda",
+            "&", "&mut", "and", "or", "unsafe",
         ] {
             if seen.insert(keyword.to_owned()) {
                 items.push(json!({ "label": keyword, "kind": 14 }));
@@ -923,6 +926,7 @@ fn index_workspace_symbols(
                 DeclarationKind::Function | DeclarationKind::Extern => AnalysisSymbolKind::Function,
                 DeclarationKind::Struct => AnalysisSymbolKind::Struct,
                 DeclarationKind::Enum => AnalysisSymbolKind::Enum,
+                DeclarationKind::Const => AnalysisSymbolKind::Constant,
             };
             let definition = atom_span(&file.tokens, declaration.span, &declaration.name)
                 .unwrap_or(declaration.span);
@@ -1017,6 +1021,15 @@ fn declaration_detail(program: &Program, name: &str, kind: AnalysisSymbolKind) -
             .unwrap_or_else(|| format!("fn {name}")),
         AnalysisSymbolKind::Struct => format!("struct {name}"),
         AnalysisSymbolKind::Enum => format!("enum {name}"),
+        AnalysisSymbolKind::Constant => program
+            .consts
+            .iter()
+            .find(|item| item.name == name)
+            .map(|item| match &item.ty {
+                Some(ty) => format!("const {name} : {ty}"),
+                None => format!("const {name}"),
+            })
+            .unwrap_or_else(|| format!("const {name}")),
         _ => name.to_owned(),
     }
 }
@@ -1069,6 +1082,11 @@ fn scan_program_occurrences(
         );
         scan_expr_occurrences(workspace, modules, summary, file, &function.body);
     }
+    for constant in &file.program.consts {
+        if let Some(ty) = &constant.ty {
+            scan_type_occurrences(workspace, modules, summary, file, ty, constant.span);
+        }
+    }
     for structure in &file.program.structs {
         for field in &structure.fields {
             scan_type_occurrences(workspace, modules, summary, file, &field.ty, field.span);
@@ -1094,7 +1112,13 @@ fn scan_expr_occurrences(
     expression: &Expr,
 ) {
     match &expression.kind {
-        ExprKind::Let { value, .. } | ExprKind::Set { value, .. } => {
+        ExprKind::Let { ty, value, .. } => {
+            if let Some(ty) = ty {
+                scan_type_occurrences(workspace, modules, summary, file, ty, expression.span);
+            }
+            scan_expr_occurrences(workspace, modules, summary, file, value);
+        }
+        ExprKind::Set { value, .. } => {
             scan_expr_occurrences(workspace, modules, summary, file, value);
         }
         ExprKind::Do(items) | ExprKind::Unsafe(items) => {
@@ -1122,6 +1146,9 @@ fn scan_expr_occurrences(
             scan_expr_occurrences(workspace, modules, summary, file, value);
             for arm in arms {
                 scan_pattern_occurrences(workspace, modules, summary, file, &arm.pattern);
+                if let Some(guard) = &arm.guard {
+                    scan_expr_occurrences(workspace, modules, summary, file, guard);
+                }
                 scan_expr_occurrences(workspace, modules, summary, file, &arm.body);
             }
         }
@@ -1151,13 +1178,17 @@ fn scan_expr_occurrences(
                 scan_expr_occurrences(workspace, modules, summary, file, operand);
             }
         }
+        ExprKind::Break(value) => {
+            if let Some(value) = value {
+                scan_expr_occurrences(workspace, modules, summary, file, value);
+            }
+        }
         ExprKind::Unit
         | ExprKind::Bool(_)
         | ExprKind::Int(_)
         | ExprKind::Float(_)
         | ExprKind::String(_)
         | ExprKind::Var { .. }
-        | ExprKind::Break
         | ExprKind::Continue => {}
     }
 }
@@ -1480,6 +1511,7 @@ fn symbol_kind(kind: AnalysisSymbolKind) -> u32 {
         AnalysisSymbolKind::Enum => 10,
         AnalysisSymbolKind::Constructor => 22,
         AnalysisSymbolKind::Field => 8,
+        AnalysisSymbolKind::Constant => 14,
     }
 }
 
@@ -1490,6 +1522,7 @@ fn completion_kind(kind: AnalysisSymbolKind) -> u32 {
         AnalysisSymbolKind::Struct | AnalysisSymbolKind::Enum => 7,
         AnalysisSymbolKind::Constructor => 4,
         AnalysisSymbolKind::Field => 5,
+        AnalysisSymbolKind::Constant => 21,
     }
 }
 

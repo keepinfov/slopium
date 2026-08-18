@@ -1,0 +1,4 @@
+let-type-mismatch.slp:4:13: error[SL0200]: expected `bool`, found `i64`
+  |
+ 4 |   (let flag 0 : bool)
+  |             ^

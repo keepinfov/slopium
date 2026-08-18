@@ -676,6 +676,11 @@ struct LoopTarget {
     continue_block: BlockId,
     break_block: BlockId,
     scope_depth: usize,
+    /// Where a `(break value)` writes what the loop produces (`D-121`).
+    ///
+    /// `None` for a `while` and for a `loop` of type `unit`, which is every
+    /// loop written before v0.9.1.
+    result: Option<LocalId>,
 }
 
 impl Builder {
@@ -1090,22 +1095,20 @@ impl Builder {
                 then_expr,
                 else_expr,
             } => self.lower_if(expr, condition, then_expr, else_expr),
-            TExprKind::Loop { body } => {
-                self.lower_loop(None, body);
-                None
-            }
+            TExprKind::Loop { body } => self.lower_loop(None, body, &expr.ty),
             TExprKind::While { condition, body } => {
-                self.lower_loop(Some(condition), body);
-                None
+                self.lower_loop(Some(condition), body, &Type::Unit)
             }
-            TExprKind::Break => {
-                self.lower_loop_jump(false);
+            TExprKind::Break(value) => {
+                let value = value.as_ref().and_then(|value| self.expr(value));
+                self.lower_loop_jump(false, value);
                 None
             }
             TExprKind::Continue => {
-                self.lower_loop_jump(true);
+                self.lower_loop_jump(true, None);
                 None
             }
+            TExprKind::Const { value, .. } => self.expr(value),
             TExprKind::Match { value, arms } => self.lower_match(expr, value, arms),
             TExprKind::Borrow { id, .. } => {
                 let src = self.bindings[id];
@@ -1490,10 +1493,20 @@ impl Builder {
         }
     }
 
-    fn lower_loop(&mut self, condition: Option<&TExpr>, body: &TExpr) {
+    fn lower_loop(
+        &mut self,
+        condition: Option<&TExpr>,
+        body: &TExpr,
+        result_type: &Type,
+    ) -> Option<Value> {
         let condition_block = self.block();
         let body_block = self.block();
         let exit_block = self.block();
+        // A `loop` that produces something writes into one local on every
+        // break edge and reads it once past the exit (`D-121`). There is no
+        // new instruction in that: it is `Assign` and `Goto`, which is what a
+        // `break` already was.
+        let result = (*result_type != Type::Unit).then(|| self.temp(result_type.clone()));
         self.blocks[self.current].terminator = Some(Terminator::Goto(condition_block));
 
         self.current = condition_block;
@@ -1515,6 +1528,7 @@ impl Builder {
             continue_block: condition_block,
             break_block: exit_block,
             scope_depth: self.scopes.len(),
+            result,
         });
         self.current = body_block;
         let value = self.expr(body);
@@ -1524,11 +1538,32 @@ impl Builder {
         }
         self.loop_targets.pop();
         self.current = exit_block;
+        result.map(|local| Value {
+            local,
+            ty: result_type.clone(),
+            owned_temporary: !result_type.is_copy(),
+        })
     }
 
-    fn lower_loop_jump(&mut self, continuing: bool) {
+    fn lower_loop_jump(&mut self, continuing: bool, value: Option<Value>) {
         let Some(target) = self.loop_targets.last().copied() else {
             return;
+        };
+        // The value leaves before the scopes it was standing in are dropped,
+        // and the local it moved into is exempted from that walk the way
+        // `drop_scope_except` exempts a block's result.
+        let escaping = match (target.result, value) {
+            (Some(result), Some(value)) => {
+                self.emit(Instruction::Assign {
+                    dst: result,
+                    src: value.local,
+                });
+                Some(value.local)
+            }
+            (_, value) => {
+                self.drop_temporary(value);
+                None
+            }
         };
         // Collect before emitting: `emit` needs `&mut self`, and the scope walk
         // holds an immutable borrow. Order is unchanged.
@@ -1539,6 +1574,9 @@ impl Builder {
                     continue;
                 }
                 let local = self.bindings[id];
+                if Some(local) == escaping {
+                    continue;
+                }
                 let ty = self.locals[local].ty.clone();
                 if !ty.is_copy() {
                     pending.push(Instruction::Drop { local, ty });
@@ -1880,6 +1918,36 @@ impl Builder {
         }
     }
 
+    /// Binds a pattern's names for a `when` guard, taking nothing apart
+    /// (`D-121`).
+    ///
+    /// `consume_pattern` without the `Free`, without the drop bookkeeping and
+    /// without the scope entries: a guard only reads — `sema` refuses a move
+    /// inside one — so a field is the word already in the slot, and the
+    /// aggregate is still whole whichever way the condition goes. The bindings
+    /// are rebound for real in the arm's own block, so the locals made here
+    /// are the guard's alone.
+    fn bind_pattern_for_guard(&mut self, pattern: &TPattern, value: LocalId, borrowed: bool) {
+        match pattern {
+            TPattern::Wildcard | TPattern::Bool(_) | TPattern::Int(_) => {}
+            TPattern::Binding(binding) => {
+                let local = self.local(binding.ty.clone(), Some(binding.name.clone()), false);
+                self.emit(Instruction::Assign {
+                    dst: local,
+                    src: value,
+                });
+                self.bindings.insert(binding.id, local);
+            }
+            TPattern::Enum { fields, .. } | TPattern::Struct { fields, .. } => {
+                let enumeration = matches!(pattern, TPattern::Enum { .. });
+                for (index, field) in fields.iter().enumerate() {
+                    let local = self.pattern_field(value, index, &field.ty, enumeration, borrowed);
+                    self.bind_pattern_for_guard(&field.pattern, local, borrowed);
+                }
+            }
+        }
+    }
+
     /// Remembers which field a name stands for, when the borrow it was bound
     /// through was an exclusive one (`D-120`).
     ///
@@ -1961,11 +2029,41 @@ impl Builder {
         for arm in arms {
             let arm_block = self.block();
             let next_check = self.block();
+            // The guard is built before the arm block, so it starts from the
+            // same live set the arm will: without this it would inherit the
+            // previous arm's, which is a state no path into this guard has.
+            self.live = base_live.clone();
+            // A guarded arm is tested twice (`D-121`): the pattern first, and
+            // then the condition in a block of its own. The names the guard
+            // reads are bound there without taking the aggregate apart, so a
+            // guard that answers `false` leaves the scrutinee exactly as the
+            // next arm expects to find it — no `Free`, nothing live, nothing
+            // to unwind.
+            let entry = match &arm.guard {
+                None => arm_block,
+                Some(guard) => {
+                    let guard_block = self.block();
+                    let previous = self.current;
+                    self.current = guard_block;
+                    self.bind_pattern_for_guard(&arm.pattern, scrutinee.local, borrowed);
+                    let condition = self.expr(guard);
+                    self.blocks[self.current].terminator = Some(match condition {
+                        Some(condition) => Terminator::Branch {
+                            condition: condition.local,
+                            then_block: arm_block,
+                            else_block: next_check,
+                        },
+                        None => Terminator::Goto(next_check),
+                    });
+                    self.current = previous;
+                    guard_block
+                }
+            };
             self.branch_pattern(
                 &arm.pattern,
                 scrutinee.local,
                 &pattern_type,
-                arm_block,
+                entry,
                 next_check,
             );
             self.current = arm_block;
@@ -1991,7 +2089,7 @@ impl Builder {
             self.blocks[self.current].terminator = Some(Terminator::Goto(merge_block));
             arm_states.push((self.current, self.live.clone()));
             self.current = next_check;
-            if mir_pattern_irrefutable(&arm.pattern) {
+            if mir_pattern_irrefutable(&arm.pattern) && arm.guard.is_none() {
                 break;
             }
         }

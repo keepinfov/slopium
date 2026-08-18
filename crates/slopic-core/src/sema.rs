@@ -123,7 +123,7 @@ pub enum TExprKind {
         condition: Box<TExpr>,
         body: Box<TExpr>,
     },
-    Break,
+    Break(Option<Box<TExpr>>),
     Continue,
     Match {
         value: Box<TExpr>,
@@ -200,11 +200,23 @@ pub enum TExprKind {
         struct_name: String,
         index: usize,
     },
+    /// A module-level `const` named where a value is expected (`D-121`).
+    ///
+    /// The value is already the literal the declaration held, so this node is
+    /// the inlining and not a step before it. What the wrapper keeps is the
+    /// name, for the same reason `FnRef` does: hover and go-to-definition
+    /// follow a top-level reference, and a bare literal is not one.
+    Const {
+        name: String,
+        value: Box<TExpr>,
+    },
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct TMatchArm {
     pub pattern: TPattern,
+    /// The `when` condition, typed as `bool` (`D-121`).
+    pub guard: Option<TExpr>,
     pub body: TExpr,
     pub span: Span,
 }
@@ -300,6 +312,17 @@ enum CollectionKind {
     Slice,
 }
 
+/// A loop being typed, and what it has been told to produce (`D-121`).
+#[derive(Clone, Debug)]
+struct LoopFrame {
+    /// A `while` may end by its condition, where there is no value to hand
+    /// back, so `(break value)` belongs to a `loop` alone.
+    conditional: bool,
+    /// The type every `break` in this loop agrees on, once one has been seen or
+    /// the context asked for one.
+    result: Option<Type>,
+}
+
 #[derive(Clone, Debug)]
 struct Binding {
     id: BindingId,
@@ -324,6 +347,12 @@ struct Binding {
 struct Scope {
     names: HashMap<String, BindingId>,
     loans: Vec<BindingId>,
+    /// Bindings a later `let` of the same name displaced (`D-121`).
+    ///
+    /// Shadowing takes the name away and not the value: the first `x` is still
+    /// alive until the scope ends and is still dropped there, so the id has to
+    /// outlive the entry in `names` that pointed at it.
+    shadowed: Vec<BindingId>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -345,7 +374,7 @@ impl Environment {
             for id in scope.loans {
                 self.release_loan(id);
             }
-            for id in scope.names.values() {
+            for id in scope.names.values().chain(scope.shadowed.iter()) {
                 self.bindings.remove(id);
             }
         }
@@ -361,6 +390,25 @@ impl Environment {
         scope.names.insert(name, binding.id);
         self.bindings.insert(binding.id, binding);
         Ok(())
+    }
+
+    /// Binds `name`, displacing whatever it named in this scope (`D-121`).
+    ///
+    /// This is `let` alone. A rebind in the same scope was refused until
+    /// v0.9.1 while a rebind in a nested one was not, which was a split nobody
+    /// had decided; it is one rule now, and the rule is the permissive one
+    /// because allowing this later would have been compatible and forbidding
+    /// it later would not. A parameter, a capture and a pattern binding still
+    /// go through `insert`, because each of those is a list the author wrote
+    /// twice rather than a name they reused.
+    fn rebind(&mut self, name: String, binding: Binding) {
+        let Some(scope) = self.scopes.last_mut() else {
+            return;
+        };
+        if let Some(previous) = scope.names.insert(name, binding.id) {
+            scope.shadowed.push(previous);
+        }
+        self.bindings.insert(binding.id, binding);
     }
 
     fn name_of(&self, id: BindingId) -> Option<String> {
@@ -493,7 +541,26 @@ struct Analyzer<'a> {
     language_items: crate::LanguageItems,
     validate_entry_point: bool,
     current_return_type: Option<Type>,
-    loop_depth: usize,
+    /// One frame per loop being typed, innermost last (`D-121`).
+    ///
+    /// It replaces the depth counter a bare `break` needed, because a `break`
+    /// with a value has to know two more things: whether the loop it leaves can
+    /// produce one at all, and what the loop's earlier breaks already decided
+    /// it is.
+    loops: Vec<LoopFrame>,
+    /// The module-level constants, by canonical name (`D-121`).
+    ///
+    /// Each is the literal the declaration held, already typed, so a use is a
+    /// clone of it rather than a lookup anything downstream performs.
+    consts: HashMap<String, TExpr>,
+    /// One entry per `when` guard being typed, holding the first binding id
+    /// that did not exist when the guard started (`D-121`).
+    ///
+    /// A guard runs before its arm is taken, so moving out of a name the guard
+    /// found already there would consume a value the next arm still matches
+    /// against. A name the guard *made* is its own, which is what the floor
+    /// distinguishes: ids only ever go up.
+    guards: Vec<BindingId>,
     /// How many `unsafe` blocks enclose the expression being typed (`D-067`).
     ///
     /// A raw-pointer operation is refused at zero. It is a depth rather than a
@@ -651,7 +718,9 @@ impl<'a> Analyzer<'a> {
             language_items: language_items.clone(),
             validate_entry_point,
             current_return_type: None,
-            loop_depth: 0,
+            loops: Vec::new(),
+            consts: HashMap::new(),
+            guards: Vec::new(),
             unsafe_depth: 0,
             diagnostics: Vec::new(),
             next_binding: 0,
@@ -663,8 +732,41 @@ impl<'a> Analyzer<'a> {
         }
     }
 
+    /// Types every module-level `const` before anything can name one
+    /// (`D-121`).
+    ///
+    /// The value is a literal, so this is the only place it is ever typed and
+    /// a use is a copy of the result. Order does not matter: a `const` cannot
+    /// mention another one, which is exactly the property that lets this be a
+    /// single pass with no dependency between its entries.
+    fn collect_consts(&mut self, program: &Program) {
+        self.env.push();
+        for constant in &program.consts {
+            if self.signatures.contains_key(&constant.name) {
+                self.error(
+                    constant.span,
+                    format!("`{}` is already a function", constant.name),
+                );
+                continue;
+            }
+            let written = constant.ty.as_ref().map(|ty| {
+                self.validate_type(ty, constant.span);
+                self.normalize_type(ty, constant.span)
+            });
+            let value = self.expr(&constant.value, written.as_ref());
+            if self.consts.insert(constant.name.clone(), value).is_some() {
+                self.error(
+                    constant.span,
+                    format!("`{}` is defined more than once", constant.name),
+                );
+            }
+        }
+        self.env.pop();
+    }
+
     fn analyze(mut self, program: &Program) -> CompileResult<TypedProgram> {
         self.collect_signatures(program);
+        self.collect_consts(program);
         self.validate_declarations(program);
         let mut functions = Vec::new();
         for function in &program.functions {
@@ -1258,9 +1360,15 @@ impl<'a> Analyzer<'a> {
             ExprKind::Let {
                 name,
                 mutable,
+                ty,
                 value,
             } => {
-                let value = self.expr(value, None);
+                // The written type is the value's expectation (`D-121`), which
+                // is the whole of what a typed `let` is: `D-105` already makes
+                // an expectation reach an empty container's element type, and
+                // a `let` was the one place that had nothing to reach from.
+                let written = ty.as_ref().map(|ty| self.normalize_type(ty, expr.span));
+                let value = self.expr(value, written.as_ref());
                 let (borrowed_from, owns_loan) = self
                     .reference_loan(&value)
                     .map_or((None, false), |(origin, owns)| (Some(origin), owns));
@@ -1283,12 +1391,7 @@ impl<'a> Analyzer<'a> {
                     place: false,
                 };
                 self.refuse_function_shadow(name, &value.ty, expr.span);
-                if self.env.insert(name.clone(), binding).is_err() {
-                    self.error(
-                        expr.span,
-                        format!("`{name}` is already defined in this scope"),
-                    );
-                }
+                self.env.rebind(name.clone(), binding);
                 self.typed(
                     expr,
                     Type::Unit,
@@ -1317,16 +1420,13 @@ impl<'a> Analyzer<'a> {
                 then_expr,
                 else_expr,
             } => self.if_expr(expr, condition, then_expr, else_expr, expected),
-            ExprKind::Loop { body } => self.loop_expr(expr, None, body),
-            ExprKind::While { condition, body } => self.loop_expr(expr, Some(condition), body),
-            ExprKind::Break => {
-                if self.loop_depth == 0 {
-                    self.error(expr.span, "`break` can only be used inside a loop");
-                }
-                self.typed(expr, Type::Unit, TExprKind::Break)
+            ExprKind::Loop { body } => self.loop_expr(expr, None, body, expected),
+            ExprKind::While { condition, body } => {
+                self.loop_expr(expr, Some(condition), body, expected)
             }
+            ExprKind::Break(value) => self.break_expr(expr, value.as_deref()),
             ExprKind::Continue => {
-                if self.loop_depth == 0 {
+                if self.loops.is_empty() {
                     self.error(expr.span, "`continue` can only be used inside a loop");
                 }
                 self.typed(expr, Type::Unit, TExprKind::Continue)
@@ -1431,6 +1531,30 @@ impl<'a> Analyzer<'a> {
             // top-level item, and it comes first because it is the one that
             // accounts for imports. The bare name is tried after it for the
             // sources that never went through the resolver.
+            // A `const` is looked for the same way and first (`D-121`): the
+            // two tables cannot hold one name, so the order between them
+            // decides nothing, and putting the cheaper one in front keeps the
+            // fallback readable.
+            let constant = resolved
+                .filter(|candidate| self.consts.contains_key(*candidate))
+                .map(str::to_owned)
+                .or_else(|| self.consts.contains_key(name).then(|| name.to_owned()));
+            if let Some(constant) = constant {
+                let mut value = self.consts[&constant].clone();
+                // The literal is stamped with the span of the *use*, not of the
+                // declaration. A line table that sent a debugger to the `const`
+                // is the classic inlining confusion, and the use is where the
+                // program is.
+                value.span = expr.span;
+                return TExpr {
+                    ty: value.ty.clone(),
+                    span: expr.span,
+                    kind: TExprKind::Const {
+                        name: constant,
+                        value: Box::new(value),
+                    },
+                };
+            }
             let candidate = resolved
                 .filter(|candidate| self.signatures.contains_key(*candidate))
                 .map(str::to_owned)
@@ -1509,6 +1633,27 @@ impl<'a> Analyzer<'a> {
                 )
                 .with_label(binding.definition, "captured here")
                 .with_help("borrow it or call `clone`; the capture stays where it is"),
+            );
+        }
+        // A guard is asked whether this arm applies, and an arm that does not
+        // apply leaves the value to the next one (`D-121`). So a guard reads,
+        // and a move inside one is refused by where it is written rather than
+        // by what state the binding is in — the same shape the capture above
+        // uses, and for the same reason: the damage is to the arm that runs
+        // afterwards.
+        if consume && !binding.ty.is_copy() && self.guards.last().is_some_and(|floor| id < *floor) {
+            self.diagnostics.push(
+                Diagnostic::error(
+                    codes::OWNERSHIP,
+                    self.file,
+                    expr.span,
+                    format!("cannot move `{name}` inside a `when` guard"),
+                )
+                .with_label(binding.definition, "value was declared here")
+                .with_help(
+                    "a guard runs before its arm is taken, so the value has to still be \
+                     there for the arms after it; borrow it or `clone` it",
+                ),
             );
         }
         if consume && !binding.ty.is_copy() && binding.state == OwnershipState::Available {
@@ -1831,7 +1976,74 @@ impl<'a> Analyzer<'a> {
         folded
     }
 
-    fn loop_expr(&mut self, expr: &Expr, condition: Option<&Expr>, body: &Expr) -> TExpr {
+    /// `(break)`, or `(break value)` in a `loop` (`D-121`).
+    ///
+    /// The value's type is the loop's, agreed between the breaks and whatever
+    /// the context asked the loop for. A bare `break` agrees on `unit`, which
+    /// is what every loop was before this, so nothing that compiled changes.
+    fn break_expr(&mut self, expr: &Expr, value: Option<&Expr>) -> TExpr {
+        let Some(frame) = self.loops.last().cloned() else {
+            self.error(expr.span, "`break` can only be used inside a loop");
+            let value = value.map(|value| Box::new(self.expr(value, None)));
+            return self.typed(expr, Type::Unit, TExprKind::Break(value));
+        };
+        let Some(value) = value else {
+            if !frame.conditional {
+                self.agree_on_break_type(expr.span, &Type::Unit);
+            }
+            return self.typed(expr, Type::Unit, TExprKind::Break(None));
+        };
+        if frame.conditional {
+            self.diagnostics.push(
+                Diagnostic::error(
+                    codes::NAME_OR_TYPE,
+                    self.file,
+                    expr.span,
+                    "a `while` cannot `break` with a value",
+                )
+                .with_help(
+                    "a `while` ends when its condition is false, where there is no value to \
+                     produce; write `loop` with the condition inside it",
+                ),
+            );
+            let value = self.expr(value, None);
+            return self.typed(expr, Type::Unit, TExprKind::Break(Some(Box::new(value))));
+        }
+        let value = self.expr(value, frame.result.as_ref());
+        self.agree_on_break_type(expr.span, &value.ty);
+        self.typed(expr, Type::Unit, TExprKind::Break(Some(Box::new(value))))
+    }
+
+    /// Records what this loop produces, or reports that its breaks disagree.
+    ///
+    /// The first `break` decides and the rest are typed against it, so the only
+    /// disagreement that reaches here is a bare `break` beside a valued one —
+    /// the case the expectation could not catch, because a bare one carries no
+    /// expression to hang the diagnostic on.
+    fn agree_on_break_type(&mut self, span: Span, ty: &Type) {
+        let Some(frame) = self.loops.last_mut() else {
+            return;
+        };
+        match &frame.result {
+            None => frame.result = Some(ty.clone()),
+            Some(previous) if previous == ty || ty.weakens_to(previous) => {}
+            Some(previous) => {
+                let previous = previous.clone();
+                self.error(
+                    span,
+                    format!("this loop produces `{previous}`, and this `break` gives `{ty}`"),
+                );
+            }
+        }
+    }
+
+    fn loop_expr(
+        &mut self,
+        expr: &Expr,
+        condition: Option<&Expr>,
+        body: &Expr,
+        expected: Option<&Type>,
+    ) -> TExpr {
         // A loop body runs an unknown number of times, so a value consumed by
         // one iteration is already gone when the next one starts. Record which
         // bindings were still owned on entry and reject any that the body moves
@@ -1846,11 +2058,22 @@ impl<'a> Analyzer<'a> {
 
         let condition =
             condition.map(|condition| Box::new(self.expr(condition, Some(&Type::Bool))));
-        self.loop_depth += 1;
+        // A `loop` in value position starts out knowing what it owes, so the
+        // first `(break (list))` has an element type to infer from — the same
+        // reach `D-105` gave a call argument, one form further out.
+        self.loops.push(LoopFrame {
+            conditional: condition.is_some(),
+            result: expected.filter(|_| condition.is_none()).cloned(),
+        });
         self.env.push();
         let body = Box::new(self.expr(body, Some(&Type::Unit)));
         self.env.pop();
-        self.loop_depth -= 1;
+        let frame = self.loops.pop().expect("the frame was just pushed");
+        let result = if frame.conditional {
+            Type::Unit
+        } else {
+            frame.result.unwrap_or(Type::Unit)
+        };
 
         let mut escaped = owned_on_entry
             .into_iter()
@@ -1884,7 +2107,7 @@ impl<'a> Analyzer<'a> {
 
         match condition {
             Some(condition) => self.typed(expr, Type::Unit, TExprKind::While { condition, body }),
-            None => self.typed(expr, Type::Unit, TExprKind::Loop { body }),
+            None => self.typed(expr, result, TExprKind::Loop { body }),
         }
     }
 
@@ -2144,8 +2367,35 @@ impl<'a> Analyzer<'a> {
             self.env = base.clone();
             self.env.push();
             let pattern = self.type_pattern(&arm.pattern, &scrutinee);
-            if pattern_irrefutable(&pattern) {
+            // A guarded arm proves nothing (`D-121`). It is tested last, its
+            // condition can be false, and so the value it did not take is
+            // still the next arm's business: it counts toward neither the
+            // wildcard nor the variants seen, and two arms with one pattern
+            // and different guards are not a duplicate.
+            let guarded = arm.guard.is_some();
+            let guard = arm.guard.as_ref().map(|guard| {
+                self.guards.push(self.next_binding);
+                let guard = self.expr(guard, Some(&Type::Bool));
+                self.guards.pop();
+                guard
+            });
+            if pattern_irrefutable(&pattern) && !guarded {
                 wildcard = true;
+            }
+            if guarded {
+                let body = self.expr(&arm.body, result_type.as_ref());
+                self.env.pop();
+                if result_type.is_none() {
+                    result_type = Some(body.ty.clone());
+                }
+                arm_environments.push(self.env.clone());
+                typed_arms.push(TMatchArm {
+                    pattern,
+                    guard,
+                    body,
+                    span: arm.span,
+                });
+                continue;
             }
             match &pattern {
                 TPattern::Bool(pattern) => {
@@ -2176,6 +2426,7 @@ impl<'a> Analyzer<'a> {
             arm_environments.push(self.env.clone());
             typed_arms.push(TMatchArm {
                 pattern,
+                guard,
                 body,
                 span: arm.span,
             });
@@ -2910,10 +3161,21 @@ impl<'a> Analyzer<'a> {
             if let Some(argument) = substitutions.get(parameter) {
                 type_args.push(argument.clone());
             } else {
-                self.error_with_code(
-                    codes::GENERIC,
-                    expr.span,
-                    format!("cannot infer generic parameter `{parameter}` for `{callee}`"),
+                // The fix is a place to write the type down, and since v0.9.1
+                // there is one at every binding (`D-121`). Naming it here is
+                // why the typed `let` moved this snapshot: a diagnostic that
+                // knows the answer should say it.
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        codes::GENERIC,
+                        self.file,
+                        expr.span,
+                        format!("cannot infer generic parameter `{parameter}` for `{callee}`"),
+                    )
+                    .with_help(
+                        "write the type after the value — `(let name value : Type)` — or pass \
+                         an argument that mentions it",
+                    ),
                 );
                 type_args.push(Type::Unit);
             }
@@ -3999,6 +4261,9 @@ impl<'a> Analyzer<'a> {
                 let scrutinee = value.ty.clone();
                 for arm in arms {
                     self.materialize_pattern(&mut arm.pattern, &scrutinee, arm.span);
+                    if let Some(guard) = &mut arm.guard {
+                        self.materialize_typed_expr(guard);
+                    }
                     self.materialize_typed_expr(&mut arm.body);
                 }
             }
@@ -4063,6 +4328,12 @@ impl<'a> Analyzer<'a> {
                     *enum_name = instance.clone();
                 }
             }
+            TExprKind::Break(value) => {
+                if let Some(value) = value {
+                    self.materialize_typed_expr(value);
+                }
+            }
+            TExprKind::Const { value, .. } => self.materialize_typed_expr(value),
             TExprKind::Unit
             | TExprKind::Bool(_)
             | TExprKind::Int(_)
@@ -4070,7 +4341,6 @@ impl<'a> Analyzer<'a> {
             | TExprKind::String(_)
             | TExprKind::Var(_)
             | TExprKind::Borrow { .. }
-            | TExprKind::Break
             | TExprKind::Continue
             | TExprKind::Field { .. } => {}
         }
@@ -4531,12 +4801,16 @@ fn collect_variable_names(expr: &Expr, output: &mut HashSet<String>) {
                 collect_variable_names(operand, output);
             }
         }
+        ExprKind::Break(value) => {
+            if let Some(value) = value {
+                collect_variable_names(value, output);
+            }
+        }
         ExprKind::Unit
         | ExprKind::Bool(_)
         | ExprKind::Int(_)
         | ExprKind::Float(_)
         | ExprKind::String(_)
-        | ExprKind::Break
         | ExprKind::Continue => {}
     }
 }
@@ -4934,6 +5208,9 @@ fn specialize_expr(
             specialize_expr(value, substitutions, queue);
             for arm in arms {
                 specialize_pattern(&mut arm.pattern, substitutions);
+                if let Some(guard) = &mut arm.guard {
+                    specialize_expr(guard, substitutions, queue);
+                }
                 specialize_expr(&mut arm.body, substitutions, queue);
             }
         }
@@ -5000,6 +5277,12 @@ fn specialize_expr(
             specialize_expr(value, substitutions, queue);
             *ok_type = substitute_type(ok_type, substitutions);
         }
+        TExprKind::Break(value) => {
+            if let Some(value) = value {
+                specialize_expr(value, substitutions, queue);
+            }
+        }
+        TExprKind::Const { value, .. } => specialize_expr(value, substitutions, queue),
         TExprKind::Unit
         | TExprKind::Bool(_)
         | TExprKind::Int(_)
@@ -5008,7 +5291,6 @@ fn specialize_expr(
         | TExprKind::Var(_)
         | TExprKind::Borrow { .. }
         | TExprKind::Field { .. }
-        | TExprKind::Break
         | TExprKind::Continue => {}
     }
 }

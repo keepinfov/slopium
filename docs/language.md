@@ -62,6 +62,17 @@ All module dependency cycles are rejected.
   (= (add 20 22) 42))
 ```
 
+A **constant** is a module-level name for a literal, inlined wherever it is
+used and exported like anything else. It is a literal and nothing else — no
+arithmetic, no reference to another constant — and it carries a type after the
+value when the literal cannot choose one for itself (`D-121`).
+
+```lisp
+(const com1-data 0x3F8 : u16)
+(const retry-limit 3)
+(const greeting "hello")
+```
+
 Generic applications use S-expressions, for example `(Box String)` and
 `(Result i64 Error)`. Type arguments are inferred at calls and constructors.
 The compiler monomorphizes only reachable concrete instances. A generic
@@ -244,6 +255,27 @@ along with it.
   (clone text))
 ```
 
+A `let` may carry the type of its value, written after it with `:` — the value
+is what the annotation is about, and the machine infers everywhere it can
+(`D-121`). It is the answer to a value that says nothing about itself, such as
+an empty container whose element type appears in no argument:
+
+```lisp
+(let total 0 : u8)
+(let mut index 0 : u64)
+(let table (map-new hash equals) : (Map String i64))
+```
+
+A name may be bound twice in one scope. The second `let` is a new binding under
+the same name, not an assignment: the first value is untouched and is still
+dropped when the scope ends, and `set` remains the only way to change what a
+binding holds.
+
+```lisp
+(let text (read-line))
+(let text (trim (& text)))
+```
+
 Owned values move by default. `(& value)` and `(&mut value)` create shared and
 exclusive borrows. A borrow ends after its last use where the control-flow
 analysis can prove that it is dead; references still cannot escape a function
@@ -279,8 +311,21 @@ so giving the permission up costs nothing and taking it is not offered.
 ```
 
 `if` has a value and both branches must have the same type. `do` evaluates a
-sequence and returns its final expression. `while` and `loop` return `unit`;
-`break` and `continue` do not take values.
+sequence and returns its final expression. `while` returns `unit`, and
+`continue` never takes a value.
+
+A `loop` is an expression: `(break value)` is what it produces (`D-121`). Every
+`break` in one loop agrees on the type, a bare `break` produces `unit` — which
+is what every loop was before this existed — and a `while` cannot break with a
+value at all, because it can end by its condition where there is nothing to
+hand back.
+
+```lisp
+(let doubled
+  (loop
+    (set counter (+ counter 1))
+    (if (= counter 8) (break (* counter 2)) ())))
+```
 
 `set` assigns to a `(let mut ...)` binding, and to a field bound by a `(&mut
 ...)` match — see the patterns below. In both cases the value that was there is
@@ -304,6 +349,22 @@ Patterns can nest enum and named struct patterns. A bare name binds and moves
 the matched value; `_` discards it. Boolean and enum matches must be
 exhaustive or contain an irrefutable arm. Integer matches require a final
 irrefutable arm.
+
+An arm may carry a **guard**, written `when` between the pattern and the body
+(`D-121`). It is tested after the pattern matched and before the arm is taken,
+so two arms can share a pattern and differ only in the condition. A guarded arm
+proves nothing about exhaustiveness — its condition can be false, and then the
+value it did not take is the next arm's business — and a guard may only read
+the names its pattern bound: moving one out is refused, because the arm after
+it still matches against the same value.
+
+```lisp
+(fn describe ((reading (& Reading))) -> i64
+  (match reading
+    ((Reading:Retry attempt) when (> (clone attempt) 3) 0)
+    ((Reading:Retry attempt) (clone attempt))
+    ((Reading:Silent) (- 0 1))))
+```
 
 A `match` also looks through a **shared borrow** of an enum or a struct
 (`D-099`), and then it takes nothing apart: the value stays where it was, and
@@ -502,12 +563,9 @@ key is. Both take the two functions that make a key a key:
 (take std:map Map map-new map-insert map-lookup map-size)
 (take std:option unwrap-or)
 
-; An empty container takes its type from where it is written, and a `let`
-; carries no type — so an empty map is written as the result of a function.
-(fn empty-scores () -> (Map String i64)
-  (map-new hash equals))
-
-(let mut scores (empty-scores))
+; An empty container's element types appear in no argument, so they are written
+; down: after the value on the `let`, or as the result of a function.
+(let mut scores (map-new hash equals) : (Map String i64))
 (map-insert (&mut scores) "ann" 3)
 (let key "ann")
 (let held (unwrap-or (map-lookup (& scores) (& key)) 0))

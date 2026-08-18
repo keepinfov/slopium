@@ -1,4 +1,5 @@
-empty-container-needs-a-type.slp:12:14: error[SL0452]: cannot infer generic parameter `V` for `empty-table`
+empty-container-needs-a-type.slp:13:14: error[SL0452]: cannot infer generic parameter `V` for `empty-table`
   |
-12 |   (let table (empty-table names))
+13 |   (let table (empty-table names))
   |              ^^^^^^^^^^^^^^^^^^^
+  = help: write the type after the value — `(let name value : Type)` — or pass an argument that mentions it

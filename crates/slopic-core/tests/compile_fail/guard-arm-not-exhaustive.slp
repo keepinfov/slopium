@@ -1,0 +1,11 @@
+; A guarded arm proves nothing about exhaustiveness (`D-121`): its condition can
+; be false, and then the value it did not take is still the next arm's business.
+(enum Shape (Round ((radius i64))) (Square ((side i64))))
+
+(fn describe ((shape Shape)) -> i64
+  (match shape
+    ((Shape:Round radius) radius)
+    (other when (> 1 0) 0)))
+
+(fn main () -> i32
+  (as i32 (- (describe (Shape:Square 1)) 0)))

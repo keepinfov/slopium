@@ -1,0 +1,12 @@
+; Every `break` in one `loop` agrees on what it produces. The first one decides
+; and the rest are typed against it; a bare `break` produces `unit`, which is
+; what every loop was before v0.9.1.
+(fn stop-at ((limit i64)) -> i64
+  (let mut n 0)
+  (loop
+    (set n (+ n 1))
+    (if (= n limit) (break n) ())
+    (if (> n 100) (break) ())))
+
+(fn main () -> i32
+  (as i32 (- (stop-at 3) (stop-at 3))))

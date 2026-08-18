@@ -58,6 +58,7 @@ pub enum DeclarationKind {
     Struct,
     Enum,
     Extern,
+    Const,
 }
 
 #[derive(Clone, Debug)]
@@ -237,6 +238,7 @@ pub fn analyze_package(input: &PackageInput, options: &CompileOptions) -> Packag
         tests: Vec::new(),
         structs: Vec::new(),
         enums: Vec::new(),
+        consts: Vec::new(),
     };
     for (unit, source) in units.iter_mut().zip(&input.files) {
         merged.functions.append(&mut unit.program.functions);
@@ -251,6 +253,7 @@ pub fn analyze_package(input: &PackageInput, options: &CompileOptions) -> Packag
         }
         merged.structs.append(&mut unit.program.structs);
         merged.enums.append(&mut unit.program.enums);
+        merged.consts.append(&mut unit.program.consts);
     }
 
     let language_items = resolved_language_items(
@@ -361,6 +364,12 @@ fn collect_declarations(
                     .externs
                     .iter()
                     .map(|item| (&item.name, DeclarationKind::Extern, item.span)),
+            )
+            .chain(
+                unit.program
+                    .consts
+                    .iter()
+                    .map(|item| (&item.name, DeclarationKind::Const, item.span)),
             )
         {
             // A builtin name is never rewritten to a canonical one, so a call
@@ -694,6 +703,13 @@ impl Resolver<'_> {
                 }
             }
         }
+        for constant in &mut program.consts {
+            let original = constant.name.clone();
+            constant.name = self.unit.declarations[&original].canonical.clone();
+            if let Some(ty) = &mut constant.ty {
+                self.rewrite_type(ty, constant.span, diagnostics);
+            }
+        }
         program.exports.clear();
         program.takes.clear();
     }
@@ -725,9 +741,13 @@ impl Resolver<'_> {
 
     fn rewrite_expr(&self, expression: &mut Expr, diagnostics: &mut Vec<Diagnostic>) {
         match &mut expression.kind {
-            ExprKind::Let { value, .. } | ExprKind::Set { value, .. } => {
+            ExprKind::Let { ty, value, .. } => {
+                if let Some(ty) = ty {
+                    self.rewrite_type(ty, expression.span, diagnostics);
+                }
                 self.rewrite_expr(value, diagnostics);
             }
+            ExprKind::Set { value, .. } => self.rewrite_expr(value, diagnostics),
             ExprKind::Do(items) | ExprKind::Unsafe(items) => {
                 for item in items {
                     self.rewrite_expr(item, diagnostics);
@@ -749,8 +769,17 @@ impl Resolver<'_> {
             }
             ExprKind::Match { value, arms } => {
                 self.rewrite_expr(value, diagnostics);
-                for MatchArm { pattern, body, .. } in arms {
+                for MatchArm {
+                    pattern,
+                    guard,
+                    body,
+                    ..
+                } in arms
+                {
                     self.rewrite_pattern(pattern, diagnostics);
+                    if let Some(guard) = guard {
+                        self.rewrite_expr(guard, diagnostics);
+                    }
                     self.rewrite_expr(body, diagnostics);
                 }
             }
@@ -821,8 +850,12 @@ impl Resolver<'_> {
             | ExprKind::Int(_)
             | ExprKind::Float(_)
             | ExprKind::String(_)
-            | ExprKind::Break
             | ExprKind::Continue => {}
+            ExprKind::Break(value) => {
+                if let Some(value) = value {
+                    self.rewrite_expr(value, diagnostics);
+                }
+            }
         }
     }
 
@@ -998,7 +1031,15 @@ fn collect_qualified_names<'a>(program: &'a Program, output: &mut Vec<&'a str>) 
             }
         }
         match &expression.kind {
-            ExprKind::Let { value, .. } | ExprKind::Set { value, .. } => expr(value, output),
+            ExprKind::Let {
+                ty: written, value, ..
+            } => {
+                if let Some(written) = written {
+                    ty(written, output);
+                }
+                expr(value, output);
+            }
+            ExprKind::Set { value, .. } => expr(value, output),
             ExprKind::Do(items) | ExprKind::Unsafe(items) => {
                 items.iter().for_each(|item| expr(item, output))
             }
@@ -1020,9 +1061,13 @@ fn collect_qualified_names<'a>(program: &'a Program, output: &mut Vec<&'a str>) 
                 expr(value, output);
                 for arm in arms {
                     pattern(&arm.pattern, output);
+                    if let Some(guard) = &arm.guard {
+                        expr(guard, output);
+                    }
                     expr(&arm.body, output);
                 }
             }
+            ExprKind::Break(Some(value)) => expr(value, output),
             ExprKind::Borrow { value, .. }
             | ExprKind::Try(value)
             | ExprKind::Convert { value, .. } => expr(value, output),
@@ -1079,6 +1124,11 @@ fn collect_qualified_names<'a>(program: &'a Program, output: &mut Vec<&'a str>) 
     }
     for test in &program.tests {
         expr(&test.body, output);
+    }
+    for constant in &program.consts {
+        if let Some(written) = &constant.ty {
+            ty(written, output);
+        }
     }
 }
 
@@ -1190,7 +1240,13 @@ fn shift_program(program: &mut Program, base: usize) {
     fn shift_expr(expression: &mut Expr, base: usize) {
         shift_span(&mut expression.span, base);
         match &mut expression.kind {
-            ExprKind::Let { value, .. } | ExprKind::Set { value, .. } => shift_expr(value, base),
+            ExprKind::Let { ty, value, .. } => {
+                if let Some(ty) = ty {
+                    shift_type(ty, base);
+                }
+                shift_expr(value, base);
+            }
+            ExprKind::Set { value, .. } => shift_expr(value, base),
             ExprKind::Do(items) | ExprKind::Unsafe(items) => {
                 items.iter_mut().for_each(|item| shift_expr(item, base))
             }
@@ -1213,9 +1269,13 @@ fn shift_program(program: &mut Program, base: usize) {
                 for arm in arms {
                     shift_span(&mut arm.span, base);
                     shift_pattern(&mut arm.pattern, base);
+                    if let Some(guard) = &mut arm.guard {
+                        shift_expr(guard, base);
+                    }
                     shift_expr(&mut arm.body, base);
                 }
             }
+            ExprKind::Break(Some(value)) => shift_expr(value, base),
             ExprKind::Borrow { value, .. }
             | ExprKind::Try(value)
             | ExprKind::Convert { value, .. } => shift_expr(value, base),
@@ -1281,6 +1341,13 @@ fn shift_program(program: &mut Program, base: usize) {
                 shift_span(&mut field.span, base);
             }
         }
+    }
+    for constant in &mut program.consts {
+        shift_span(&mut constant.span, base);
+        if let Some(ty) = &mut constant.ty {
+            shift_type(ty, base);
+        }
+        shift_expr(&mut constant.value, base);
     }
 }
 

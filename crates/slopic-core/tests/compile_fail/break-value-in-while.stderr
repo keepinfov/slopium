@@ -1,0 +1,5 @@
+break-value-in-while.slp:7:5: error[SL0200]: a `while` cannot `break` with a value
+  |
+ 7 |     (break n)))
+  |     ^^^^^^^^^
+  = help: a `while` ends when its condition is false, where there is no value to produce; write `loop` with the condition inside it

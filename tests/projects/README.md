@@ -20,6 +20,7 @@ scripts/project-tests.sh
 | `aggregates-patterns` | Structs, field access, enums, bool/int/enum match, owned and nested patterns |
 | `collections` | Copy/owned lists, all list operations, `Option`, arrays, slices, clone/drop |
 | `loops` | `while`, `loop`, `break`, `continue` |
+| `everyday-forms` | A module-level `const` across a module boundary, a `let` that carries its value's type, a `loop` that produces a value, `match` guards, and a name bound twice in one scope |
 | `generics-std` | Generic functions/structs/enums, bundled `Option`/`Result`, successful and propagated `try` |
 | `modules` | Nested path modules, exports, `take` aliases, re-exports, qualified calls, separate objects |
 | `path-dependencies` | Direct and transitive path dependencies, each under its package name |

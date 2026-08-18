@@ -1,0 +1,11 @@
+[package]
+name = "everyday-forms"
+version = "0.9.1"
+source = "src"
+entry = "src/main.slp"
+
+[dependencies]
+std = { toolchain = true }
+
+[build]
+target = "x86_64-unknown-linux-gnu"

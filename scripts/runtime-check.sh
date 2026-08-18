@@ -79,6 +79,11 @@ cat >"$check_dir/runtime.slp" <<'SLOPIUM'
   (match (& item)
     ((Labelled :render render) (render text))))
 
+(fn wider ((pair Pair) (limit i64)) -> String
+  (match pair
+    ((Pair :left left :right _) when (> (len (& left)) limit) left)
+    ((Pair :left _ :right right) right)))
+
 (fn decorate ((text String)) -> String
   (let mark "?")
   (concat (& text) (& mark)))
@@ -100,6 +105,25 @@ cat >"$check_dir/runtime.slp" <<'SLOPIUM'
 (fn width-of ((item (& Labelled))) -> i64
   (match item
     ((Labelled :name name :render _) (len name))))
+
+; A `loop` that produces an owned value (`D-121`). The `String` leaves through
+; the break edge, so a lowering that dropped it on the way out is a
+; use-after-free at the caller and one that forgot to move it is a leak —
+; neither of which is a type error.
+(fn built ((upto i64)) -> String
+  (let mut index 0)
+  (let mark "-")
+  (loop
+    (set index (+ index 1))
+    (let digits (from-i64 index))
+    (let piece (concat (& mark) (& digits)))
+    (if (= index upto) (break piece) ())))
+
+; A guard over an *owned* aggregate, answering `false` on the first call and
+; `true` on the second (`D-121`). The failing guard must leave the `Pair`
+; exactly as the arm after it expects to find it: a guard that took the struct
+; apart would free it twice, and one that bound its fields as owners would drop
+; two `String`s the struct still holds.
 
 ; A closure that owns a `String` and outlives the call that built it (`D-101`).
 ; Its environment is a heap block with generated glue, so every way of getting
@@ -272,6 +296,14 @@ cat >"$check_dir/runtime.slp" <<'SLOPIUM'
       (do
         (println left)
         (println right))))
+  (let assembled (built 4))
+  (println (& assembled))
+  (let narrow (Pair :left "ab" :right "kept"))
+  (let narrower (wider narrow 8))
+  (println (& narrower))
+  (let broad (Pair :left "abcdefghij" :right "kept"))
+  (let broader (wider broad 8))
+  (println (& broader))
   ; `replace` on its own: the value that comes out is owned by the caller and
   ; the one that goes in is owned by the list (`D-103`).
   (let mut slots (list "first" "second"))

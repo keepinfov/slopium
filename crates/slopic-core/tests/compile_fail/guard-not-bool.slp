@@ -1,0 +1,11 @@
+; A guard is a condition, so it is typed against `bool` the way `if`'s is.
+(enum Shape (Round ((radius i64))) Flat)
+
+(fn describe ((shape Shape)) -> i64
+  (match shape
+    ((Shape:Round radius) when radius 1)
+    ((Shape:Round _) 2)
+    ((Shape:Flat) 0)))
+
+(fn main () -> i32
+  (as i32 (- (describe (Shape:Flat)) 0)))

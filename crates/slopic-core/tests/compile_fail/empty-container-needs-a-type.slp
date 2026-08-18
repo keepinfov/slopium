@@ -1,7 +1,8 @@
-; The shape `core:map:new` has, and the one ergonomic hole `D-104` leaves open:
-; the value type appears only in the result, and a `let` carries no type, so
-; nothing at the call says what the empty container holds. An empty one has to
-; be written where a type is written down — as the result of a function.
+; The shape `core:map:new` has: the value type appears only in the result, so
+; nothing in the call says what the empty container holds. Since v0.9.1 there
+; is somewhere to say it — `(let table (empty-table names) : (Table String
+; i64))` — and the diagnostic names that fix rather than only the hole
+; (`D-121`). Written without it, this is still the error it always was.
 (struct Table (K V) ((keys (List K)) (values (List V))))
 
 (fn empty-table (K V) ((keys (List K))) -> (Table K V)

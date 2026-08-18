@@ -1,0 +1,4 @@
+guard-not-bool.slp:6:32: error[SL0200]: expected `bool`, found `i64`
+  |
+ 6 |     ((Shape:Round radius) when radius 1)
+  |                                ^^^^^^

@@ -1,0 +1,4 @@
+const-not-a-literal.slp:4:16: error[SL0100]: a `const` value must be a literal
+  |
+ 4 | (const doubled (* 2 21))
+  |                ^^^^^^^^

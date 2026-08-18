@@ -21,11 +21,21 @@ command-line protocol is internal and versioned.
 4. Package analysis derives module identities, resolves collected exports,
    imports, privacy, dependency namespaces, and rejects cycles.
 5. Semantic analysis checks types, generics, nested match exhaustiveness, and
-   affine ownership with control-flow-shortened borrows.
+   affine ownership with control-flow-shortened borrows. It is also where a
+   module-level `const` disappears: the declaration's literal is typed once and
+   a use is a copy of it, so nothing after this pass knows the name existed
+   (`D-121`).
 6. Reachability-driven monomorphization materializes concrete generic
    functions and aggregate layouts.
 7. Lowering produces whole-package target-independent MIR with locals, basic
    blocks, explicit moves, borrows, loops, calls, and structural drops.
+   A `loop` that produces a value writes into one local on every break edge and
+   reads it once past the exit, and a `when` guard is a second branch between
+   the pattern test and the arm — a block that binds the pattern's names
+   without taking the aggregate apart, so a guard that answers `false` leaves
+   the scrutinee exactly as the next arm expects it. Neither costs an
+   instruction that did not exist: a break value is `Assign` and `Goto`, and a
+   guard is `Branch` (`D-121`).
    Assigning a field is `FieldStore` and its `EnumFieldStore` twin, the writing
    half of the two instructions that form a field's address: the place is known
    because the name came from a pattern this function wrote, so a borrow keeps

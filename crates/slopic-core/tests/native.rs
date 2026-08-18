@@ -542,6 +542,54 @@ fn loops_support_break_continue_and_mutation() {
     fs::remove_dir_all(directory).unwrap();
 }
 
+/// A `loop` that produces a value, and a guard that owns nothing (`D-121`).
+///
+/// The two halves that a snapshot cannot decide are here rather than in a
+/// compile-fail case: an owned `String` leaving a loop through `(break value)`
+/// must be moved out and not dropped on the way, and a guard that answers
+/// `false` must leave the aggregate whole for the arm after it — the arm that
+/// then takes the same `String` apart. Both are drops, so both are only
+/// visible when the program runs.
+#[test]
+fn a_loop_produces_a_value_and_a_failed_guard_leaves_the_value_alone() {
+    let (directory, executable) = native_program(
+        r#"
+        (struct Tag ((name String) (weight i64)))
+
+        (fn pick ((tag Tag)) -> String
+          (match tag
+            ((Tag :name name :weight weight) when (> weight 10) name)
+            ((Tag :name name :weight _) name)))
+
+        (fn label ((stop i64)) -> String
+          (let mut n 0)
+          (let heavy "heavy")
+          (loop
+            (set n (+ n 1))
+            (if (= n stop) (break (clone (& heavy))) ())))
+
+        (fn say ((text String)) -> unit
+          (println (& text)))
+
+        (fn main () -> i32
+          (say (pick (Tag :name "big" :weight 20)))
+          (say (pick (Tag :name "small" :weight 1)))
+          (say (label 3))
+          0)
+        "#,
+    );
+    let output = Command::new(executable).output().unwrap();
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "big
+small
+heavy
+"
+    );
+    fs::remove_dir_all(directory).unwrap();
+}
+
 #[test]
 fn arrays_and_borrowed_slices_support_owned_elements() {
     let (directory, executable) = native_program(

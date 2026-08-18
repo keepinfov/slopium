@@ -1,0 +1,5 @@
+; The type is written after the value because it annotates the value (`D-121`),
+; so a disagreement is reported at the value rather than at the name.
+(fn main () -> i32
+  (let flag 0 : bool)
+  0)
