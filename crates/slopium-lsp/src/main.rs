@@ -376,7 +376,8 @@ impl Server {
             "fn", "test", "struct", "enum", "let", "mut", "set", "if", "match", "do", "true",
             "false", "_", "unit", "bool", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
             "f64", "String", "List", "Array", "Slice", "Fn", "Ptr", "lambda", "loop", "while",
-            "break", "continue", "export", "take", "try", "as", "and", "or", "unsafe",
+            "break", "continue", "export", "take", "extern", "try", "as", "and", "or", "not",
+            "unsafe",
         ];
         for token in &document.analysis.syntax.tokens {
             if token.kind == SyntaxKind::Atom && KEYWORDS.contains(&token.text.as_str()) {

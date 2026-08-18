@@ -40,7 +40,10 @@ syntax keyword slopiumUnsafe unsafe
 syntax keyword slopiumConditional if match try and or
 " Anchored after `(` so the `:as` of an import alias stays a field.
 syntax match slopiumConversion "\%((\s*\)\@<=as\>"
-syntax keyword slopiumModuleKeyword export take
+" `export`, `take` and `extern` are the three words that name a boundary: the
+" first two the module's, the third the C one. `extern` takes no `nextgroup`
+" because what follows it is the foreign name as a string, not an identifier.
+syntax keyword slopiumModuleKeyword export take extern
 
 " A lowercase name followed by a type and `)` is a parameter/field
 " declaration. Uses remain slopiumIdentifier, while the type has its own group.
