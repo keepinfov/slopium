@@ -35,6 +35,21 @@ const DEFINITION: &str = GotoDefinition::METHOD;
 const REFERENCES: &str = References::METHOD;
 const RENAME: &str = Rename::METHOD;
 
+/// The words the language owns that are not builtins — every form, modifier and
+/// type name a semantic token may be issued for. `analysis::BUILTINS` is the
+/// other half and stays where it is.
+///
+/// It sits at module scope rather than inside the request handler so that a test
+/// can hold the editor's own lists against it. That is the whole reason it moved:
+/// `package.rs` already deduplicated the operator table because two copies drift,
+/// and the copies of this one that live in Vim and Lua drifted anyway.
+const KEYWORDS: &[&str] = &[
+    "fn", "test", "struct", "enum", "let", "mut", "set", "if", "match", "do", "true", "false", "_",
+    "unit", "bool", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f64", "String", "List",
+    "Array", "Slice", "Fn", "Ptr", "lambda", "loop", "while", "break", "continue", "export",
+    "take", "extern", "try", "as", "and", "or", "not", "unsafe",
+];
+
 struct Document {
     version: i32,
     text: String,
@@ -372,13 +387,6 @@ impl Server {
                 modifiers,
             ));
         }
-        const KEYWORDS: &[&str] = &[
-            "fn", "test", "struct", "enum", "let", "mut", "set", "if", "match", "do", "true",
-            "false", "_", "unit", "bool", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
-            "f64", "String", "List", "Array", "Slice", "Fn", "Ptr", "lambda", "loop", "while",
-            "break", "continue", "export", "take", "extern", "try", "as", "and", "or", "not",
-            "unsafe",
-        ];
         for token in &document.analysis.syntax.tokens {
             if token.kind == SyntaxKind::Atom && KEYWORDS.contains(&token.text.as_str()) {
                 let token_type = if matches!(
@@ -1491,6 +1499,163 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static NEXT_WORKSPACE: AtomicUsize = AtomicUsize::new(0);
+
+    fn editor_file(relative: &str) -> String {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../editors/nvim")
+            .join(relative);
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
+    }
+
+    fn is_word_character(character: char) -> bool {
+        character.is_alphanumeric() || character == '_' || character == '-'
+    }
+
+    /// A `-` is a word character here, so `bit-and` is not found inside
+    /// `bit-and-something` and `not` is not found inside `bit-not`.
+    fn mentions_word(haystack: &str, word: &str) -> bool {
+        haystack.match_indices(word).any(|(index, _)| {
+            let before = haystack[..index].chars().next_back();
+            let after = haystack[index + word.len()..].chars().next();
+            !before.is_some_and(is_word_character) && !after.is_some_and(is_word_character)
+        })
+    }
+
+    fn without_comments(source: &str) -> String {
+        source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with('"'))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn syntax_keywords(source: &str) -> Vec<String> {
+        let mut words = Vec::new();
+        for line in source.lines() {
+            let Some(rest) = line.strip_prefix("syntax keyword ") else {
+                continue;
+            };
+            for (index, token) in rest.split_whitespace().enumerate() {
+                let is_directive =
+                    token == "contained" || token == "skipwhite" || token.starts_with("nextgroup=");
+                if index == 0 || is_directive {
+                    continue;
+                }
+                words.push(token.to_string());
+            }
+        }
+        words
+    }
+
+    fn completion_labels(source: &str) -> Vec<String> {
+        const OPENING: &str = "label = \"";
+        let mut labels = Vec::new();
+        let mut rest = source;
+        while let Some(index) = rest.find(OPENING) {
+            rest = &rest[index + OPENING.len()..];
+            let Some(end) = rest.find('"') else { break };
+            labels.push(rest[..end].to_string());
+            rest = &rest[end..];
+        }
+        labels
+    }
+
+    fn lispwords(source: &str) -> Vec<String> {
+        let after = source
+            .split_once("lispwords")
+            .expect("the ftplugin sets no `lispwords`")
+            .1;
+        let opening = after.find('"').expect("`lispwords` is not a string");
+        let rest = &after[opening + 1..];
+        let end = rest.find('"').expect("`lispwords` is unterminated");
+        rest[..end].split(',').map(str::to_string).collect()
+    }
+
+    fn language_words() -> Vec<String> {
+        slopic_core::analysis::BUILTINS
+            .iter()
+            .map(|(name, _)| (*name).to_string())
+            .chain(KEYWORDS.iter().map(|word| (*word).to_string()))
+            .collect()
+    }
+
+    /// The lists that live outside Rust must know every word the language has.
+    ///
+    /// `AGENTS.md` names the Neovim syntax file, its completion table and its
+    /// `lispwords` as the companions of a syntax change, and until this test
+    /// existed nothing read them. `extern` arrived at v0.5.0 and reached one of
+    /// the four lists; `unsafe` and `Ptr` arrived at v0.8.2 and missed the
+    /// completion table. Four milestones of green suite said nothing, which is
+    /// the failure mode this repository treats as the worst one.
+    ///
+    /// What it can and cannot see is worth writing down. It holds the editor's
+    /// three lists against `BUILTINS` and `KEYWORDS` in both directions, so a
+    /// missing word and a word the language has dropped both fail. `lispwords`
+    /// is checked against those two rather than the reverse, and that is the
+    /// assertion that would have caught `extern`: `lispwords` knew the word
+    /// while `KEYWORDS` did not. A form added to none of the five lists is
+    /// still invisible — the compiler keeps no single table of its own forms,
+    /// and inventing one here would be the sixth copy of the thing that drifts.
+    #[test]
+    fn the_editor_lists_know_every_word_the_language_has() {
+        let syntax = editor_file("syntax/slopium.vim");
+        let completion = editor_file("lua/slopium/completion.lua");
+        let ftplugin = editor_file("ftplugin/slopium.lua");
+
+        let known = language_words();
+        let highlighted = without_comments(&syntax);
+        let labels = completion_labels(&completion);
+
+        for word in &known {
+            // An operator is a regexp in the syntax file and a label in the
+            // completion table, so only the word-shaped names are looked for
+            // here. `_` is a wildcard match rather than a keyword.
+            if !word.starts_with(|character: char| character.is_alphabetic()) {
+                continue;
+            }
+            assert!(
+                mentions_word(&highlighted, word),
+                "`{word}` is a word of the language and `editors/nvim/syntax/slopium.vim` \
+                 does not mention it"
+            );
+            assert!(
+                labels.iter().any(|label| label == word),
+                "`{word}` is a word of the language and \
+                 `editors/nvim/lua/slopium/completion.lua` does not offer it"
+            );
+        }
+
+        // `TODO` and its companions belong to the comment highlighting rather
+        // than to the language.
+        let todo = ["TODO", "FIXME", "NOTE", "SAFETY"];
+        for word in syntax_keywords(&syntax) {
+            assert!(
+                known.contains(&word) || todo.contains(&word.as_str()),
+                "`editors/nvim/syntax/slopium.vim` highlights `{word}`, which the language \
+                 does not have"
+            );
+        }
+
+        // A borrow is spelled with a sigil and `let mut` is two words; neither
+        // is a name the compiler holds in a table.
+        let composite = ["let mut", "&", "&mut"];
+        for label in &labels {
+            assert!(
+                known.contains(label) || composite.contains(&label.as_str()),
+                "`editors/nvim/lua/slopium/completion.lua` offers `{label}`, which the \
+                 language does not have"
+            );
+        }
+
+        for word in lispwords(&ftplugin) {
+            assert!(
+                known.contains(&word),
+                "`editors/nvim/ftplugin/slopium.lua` indents under `{word}`, which the \
+                 language does not have"
+            );
+        }
+    }
 
     #[test]
     fn utf16_positions_round_trip_unicode() {
