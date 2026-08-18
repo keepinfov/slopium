@@ -56,6 +56,8 @@ pub fn defs(instruction: &Instruction) -> Option<LocalId> {
         | Instruction::VolatileLoad { dst, .. } => Some(*dst),
         Instruction::Drop { .. }
         | Instruction::Free { .. }
+        | Instruction::FieldStore { .. }
+        | Instruction::EnumFieldStore { .. }
         | Instruction::VolatileStore { .. } => None,
     }
 }
@@ -101,6 +103,13 @@ pub fn uses(instruction: &Instruction, out: &mut Vec<LocalId>) {
         Instruction::VolatileLoad { addr, .. } => out.push(*addr),
         Instruction::VolatileStore { addr, src, .. } => {
             out.push(*addr);
+            out.push(*src);
+        }
+        // A field write reads the aggregate as surely as a field read does, and
+        // the word going in with it (`D-120`).
+        Instruction::FieldStore { base, src, .. }
+        | Instruction::EnumFieldStore { base, src, .. } => {
+            out.push(*base);
             out.push(*src);
         }
     }

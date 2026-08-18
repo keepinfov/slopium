@@ -506,6 +506,29 @@ impl<'a> Generator<'a> {
         self.write(dst, X16);
     }
 
+    /// `base.offset = src`, one machine word into a pointer-shaped aggregate.
+    ///
+    /// The value is read first and the address second, so the scratch the value
+    /// lands in is not the one the address needs — the order `VolatileStore`
+    /// uses, for the same reason. A field is a machine word whatever it holds,
+    /// so the width is `Double` and no narrow form is reachable from here.
+    fn field_store(&mut self, base: LocalId, offset: usize, src: LocalId) {
+        let value = self.read(src, 1);
+        let address = self.read(base, 2);
+        if value != X16 {
+            self.inst(Inst::Mov {
+                dst: X16,
+                src: value,
+            });
+        }
+        self.inst(Inst::Store {
+            src: X16,
+            base: address,
+            offset: Some(offset as u32),
+            size: AccessSize::Double,
+        });
+    }
+
     /// Builds a 64-bit constant, one 16-bit field at a time.
     ///
     /// AArch64 has no instruction that takes a 64-bit immediate, so every
@@ -926,6 +949,13 @@ impl<'a> Generator<'a> {
             }
             Instruction::EnumFieldAddr { dst, base, index } => {
                 self.field_address(*dst, *base, (index + 1) * 8);
+            }
+            // The word into the field rather than out of it (`D-120`).
+            Instruction::FieldStore { base, index, src } => {
+                self.field_store(*base, index * 8, *src);
+            }
+            Instruction::EnumFieldStore { base, index, src } => {
+                self.field_store(*base, (index + 1) * 8, *src);
             }
             Instruction::Load { dst, src } => {
                 let base = self.read(*src, 1);
@@ -1907,6 +1937,11 @@ fn calls_something(module: &MirModule, function: &MirFunction) -> bool {
             // holding one is still a leaf.
             | Instruction::VolatileLoad { .. }
             | Instruction::VolatileStore { .. }
+            // A field write is one store, so a leaf that assigns to a field
+            // is still a leaf (`D-120`). What the *old* value costs is a
+            // `Drop`, which is already counted above.
+            | Instruction::FieldStore { .. }
+            | Instruction::EnumFieldStore { .. }
             | Instruction::EnumFieldAddr { .. } => false,
         })
 }

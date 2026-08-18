@@ -62,6 +62,15 @@ cat >"$check_dir/runtime.slp" <<'SLOPIUM'
   (let mark "!")
   (concat text (& mark)))
 
+; Assignment to a field, which takes the value going in and drops the one that
+; was there (`D-120`). Called twice over one `String` field, so a write that
+; forgets the old value leaks it and a write that drops it twice is a double
+; free — and neither is a type error.
+(fn rename ((pair (&mut Pair)) (name String)) -> unit
+  (match pair
+    ((Pair :left left :right _)
+      (set left name))))
+
 ; Owned here and dropped here, so the struct releases both its `String` and the
 ; function value in its other field. The field is read through a borrow because
 ; a `Fn` is owned since `D-101` and reading it out would move it out of a
@@ -119,7 +128,7 @@ cat >"$check_dir/runtime.slp" <<'SLOPIUM'
     (let digits (from-i64 index))
     (let prefix "k")
     (let key (concat (& prefix) (& digits)))
-    (set labels (map-insert labels key (shout (& digits))))
+    (map-insert (&mut labels) key (shout (& digits)))
     (set index (+ index 1)))
   labels)
 
@@ -245,14 +254,24 @@ cat >"$check_dir/runtime.slp" <<'SLOPIUM'
   (println (& held))
   (let mut shrunk (label-table 6))
   (let doomed (from-i64 3))
-  (set shrunk (map-delete shrunk (& doomed)))
+  (map-delete (&mut shrunk) (& doomed))
   (println-i64 (map-size (& shrunk)))
   (let mut words (empty-words))
-  (set words (set-add words "one"))
-  (set words (set-add words "one"))
+  (set-add (&mut words) "one")
+  (set-add (&mut words) "one")
   (let gone "one")
-  (set words (set-discard words (& gone)))
+  (set-discard (&mut words) (& gone))
   (println-i64 (set-count (& words)))
+  ; Field assignment over an owning field, twice, with what the first write put
+  ; there dropped by the second.
+  (let mut renamed (Pair :left "before" :right "kept"))
+  (rename (&mut renamed) (shout (& gone)))
+  (rename (&mut renamed) "after")
+  (match (& renamed)
+    ((Pair :left left :right right)
+      (do
+        (println left)
+        (println right))))
   ; `replace` on its own: the value that comes out is owned by the caller and
   ; the one that goes in is owned by the list (`D-103`).
   (let mut slots (list "first" "second"))

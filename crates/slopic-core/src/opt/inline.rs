@@ -437,6 +437,16 @@ fn remap_instruction(instruction: &Instruction, map: &impl Fn(LocalId) -> LocalI
             base: m(*base),
             index: *index,
         },
+        Instruction::FieldStore { base, index, src } => Instruction::FieldStore {
+            base: m(*base),
+            index: *index,
+            src: m(*src),
+        },
+        Instruction::EnumFieldStore { base, index, src } => Instruction::EnumFieldStore {
+            base: m(*base),
+            index: *index,
+            src: m(*src),
+        },
         Instruction::Free { local } => Instruction::Free { local: m(*local) },
         // Locals are renumbered and nothing else is. A volatile access carries
         // no identity to renumber, which is exactly why `D-114` does not try to

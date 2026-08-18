@@ -5,7 +5,7 @@
 ; against every key is always `true` and nothing reads it; what does the work
 ; is that `insert` keeps one entry per key (`D-104`).
 ;
-; Like a map, everything that writes consumes the set and gives it back.
+; Like a map, everything that writes takes the set exclusively (`D-120`).
 
 (take core:map Map new insert lookup contains delete size fold)
 
@@ -16,17 +16,17 @@
 (fn of (T) ((hash (Fn ((& T)) i64)) (same (Fn ((& T) (& T)) bool))) -> (Set T)
   (Set :entries (new hash same)))
 
-(fn add (T) ((set (Set T)) (key T)) -> (Set T)
+(fn add (T) ((set (&mut (Set T))) (key T)) -> unit
   (match set
-    ((Set :entries entries) (Set :entries (insert entries key true)))))
+    ((Set :entries entries) (insert entries key true))))
 
 (fn holds (T) ((set (& (Set T))) (key (& T))) -> bool
   (match set
     ((Set :entries entries) (contains entries key))))
 
-(fn discard (T) ((set (Set T)) (key (& T))) -> (Set T)
+(fn discard (T) ((set (&mut (Set T))) (key (& T))) -> unit
   (match set
-    ((Set :entries entries) (Set :entries (delete entries key)))))
+    ((Set :entries entries) (delete entries key))))
 
 (fn count (T) ((set (& (Set T)))) -> i64
   (match set

@@ -1,0 +1,4 @@
+(fn bump ((count (&mut i64))) -> unit
+  (set count 1))
+
+(fn main () -> i32 0)

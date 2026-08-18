@@ -251,14 +251,18 @@ or be stored in aggregate fields or collection elements. Borrowed slices
 cannot be returned either. `clone` recursively copies strings, lists, arrays,
 structs, and enums. Generated drop glue recursively destroys them.
 
-`clone` crosses a borrow (`D-091`, `D-100`): `(clone text)` on a `(& String)` is
-a `String`, and `(clone n)` on a `(& i64)` is an `i64`. This is how a borrowed
-value is read, and it is the only way — the language has no dereference operator
-and none is planned, because through a borrow this form already is one. It
-refuses a `&mut`. It refuses an *owned* scalar: a `bool`, an `i32`, an `i64` or
-an `f64` is copied by being used, so `(clone 42)` is an error rather than a call
-that does nothing. Reading one out of a borrow is never nothing, which is why
-the two cases differ.
+`clone` crosses a borrow of either kind (`D-091`, `D-100`, `D-120`):
+`(clone text)` on a `(& String)` is a `String`, `(clone n)` on a `(& i64)` is an
+`i64`, and a `(&mut i64)` reads the same way. This is how a borrowed value is
+read, and it is the only way — the language has no dereference operator and none
+is planned, because through a borrow this form already is one. It refuses an
+*owned* scalar: a `bool`, an `i32`, an `i64` or an `f64` is copied by being
+used, so `(clone 42)` is an error rather than a call that does nothing. Reading
+one out of a borrow is never nothing, which is why the two cases differ.
+
+An exclusive borrow is accepted wherever a shared one is asked for, and never
+the other way round: `(&mut T)` is a `(& T)` that may also be written through,
+so giving the permission up costs nothing and taking it is not offered.
 
 ## Control flow
 
@@ -277,6 +281,10 @@ the two cases differ.
 `if` has a value and both branches must have the same type. `do` evaluates a
 sequence and returns its final expression. `while` and `loop` return `unit`;
 `break` and `continue` do not take values.
+
+`set` assigns to a `(let mut ...)` binding, and to a field bound by a `(&mut
+...)` match — see the patterns below. In both cases the value that was there is
+dropped.
 
 ## Structs, enums, and patterns
 
@@ -315,8 +323,30 @@ every name a pattern binds is a borrow of the field it names.
 `x` there is a `(& i64)`, not an `i64`, and `clone` is what reads it. The
 binding is a borrow for **every** field type, including a `Copy` one: inside a
 generic body, whether `T` is `Copy` is not known, and a binding's type has to
-be. An exclusive borrow cannot be matched, and a borrowed scalar has nothing to
-take apart — use `clone` and match the value.
+be. A borrowed scalar has nothing to take apart — use `clone` and match the
+value.
+
+A `match` through a **`(&mut ...)`** binds each field as a `(&mut ...)` of
+itself, and such a name is a **place**: `set` writes the field it stands for and
+drops the value that was there (`D-120`).
+
+```lisp
+(struct Counter ((count i64) (label String)))
+
+(fn bump ((counter (&mut Counter))) -> unit
+  (match counter
+    ((Counter :count count :label label)
+      (do
+        (set count (+ (clone count) 1))
+        (set label "bumped")))))
+```
+
+Only a name bound that way is a place. A name a *shared* pattern bound cannot be
+assigned, and neither can a `(&mut T)` **parameter**, which is a borrow of a
+value this function never took apart. Match the aggregate, and assign one of the
+fields it gives you. A field a pattern binds through a `&mut` is still a borrow
+and not an owner, so it cannot be moved out either — `clone` reads it, `set`
+replaces it.
 
 ## Collections
 
@@ -478,19 +508,19 @@ key is. Both take the two functions that make a key a key:
   (map-new hash equals))
 
 (let mut scores (empty-scores))
-(set scores (map-insert scores "ann" 3))
+(map-insert (&mut scores) "ann" 3)
 (let key "ann")
 (let held (unwrap-or (map-lookup (& scores) (& key)) 0))
 ```
 
 `map-new` takes a `(Fn ((& K)) i64)` and a `(Fn ((& K) (& K)) bool)`; a key
 type that does not have them yet gets them written for it, in Slopium, at the
-call. **Everything that writes consumes the map and gives it back** —
-`map-insert` and `map-delete` return the map — because the language assigns to
-a name and to nothing else. Reading does not: `map-lookup`, `map-contains`,
-`map-size` and `map-fold` take `(& (Map K V))`. `map-lookup` answers
-`(Option V)` with the value cloned out, since a reference cannot leave the
-function that made it.
+call. **Everything that writes takes `(&mut (Map K V))` and returns `unit`** —
+`map-insert` and `map-delete` change the map they are handed, because a field
+can be assigned (`D-120`). Reading takes `(& (Map K V))`: `map-lookup`,
+`map-contains`, `map-size` and `map-fold`. `map-lookup` answers `(Option V)`
+with the value cloned out, since a reference cannot leave the function that made
+it.
 
 `map-fold` is the only way to walk a map, and its accumulator comes from the
 caller — `(map-fold m start step)` with `step` a `(Fn (A (& K) (& V)) A)`.
@@ -498,8 +528,9 @@ There is no `keys` and no iterator: an iterator is a lazy sequence, which is a
 closure plus a protocol, and the protocol is a trait (`D-088`).
 
 `std:set` is the same machine with the value left out: `set-of`, `set-add`,
-`set-holds`, `set-discard`, `set-count` and `set-each`. A `Set` **is** a
-`(Map T bool)`, written in Slopium over the map like anything else.
+`set-holds`, `set-discard`, `set-count` and `set-each`, with `set-add` and
+`set-discard` writing through a `(&mut (Set T))` as the map's do. A `Set` **is**
+a `(Map T bool)`, written in Slopium over the map like anything else.
 
 None of this needed traits, which is the whole point of it (`D-104`): `D-062`
 made `Map` a non-goal on the grounds that a generic container over a comparable

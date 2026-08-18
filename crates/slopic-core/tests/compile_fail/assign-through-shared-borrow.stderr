@@ -1,0 +1,6 @@
+assign-through-shared-borrow.slp:8:9: error[SL0300]: cannot assign through the shared borrow `count`
+  |
+ 8 |         (set count 1)
+  |         ^^^^^^^^^^^^^
+  = label 6:22: borrow bound here
+  = help: read it with `clone`; to assign, match through `(&mut ...)`

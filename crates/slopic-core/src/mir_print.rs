@@ -247,6 +247,10 @@ fn render_instruction(instruction: &Instruction) -> String {
         Instruction::EnumFieldAddr { dst, base, index } => {
             format!("_{dst} = &payload(_{base}, {index});")
         }
+        Instruction::FieldStore { base, index, src } => format!("_{base}.{index} = _{src};"),
+        Instruction::EnumFieldStore { base, index, src } => {
+            format!("payload(_{base}, {index}) = _{src};")
+        }
         Instruction::Free { local } => format!("free(_{local});"),
         Instruction::VolatileLoad { dst, addr, ty } => {
             format!("_{dst} = volatile *({ty} *)_{addr};")

@@ -247,6 +247,30 @@ pub enum Instruction {
         base: LocalId,
         index: usize,
     },
+    /// `base.index = src`, one machine word into a struct field (`D-120`).
+    ///
+    /// `FieldLoad`'s twin, and the whole of what assigning to a field is. The
+    /// field is named rather than addressed because the name came from a
+    /// pattern this function wrote, so the place is known here and a borrow
+    /// keeps the representation it always had.
+    ///
+    /// A field is a machine word whatever it holds, so there is no width
+    /// question and nothing here to canonicalise: the narrow memory in this
+    /// compiler is still `VolatileLoad` and `VolatileStore` alone (`D-067`).
+    FieldStore {
+        base: LocalId,
+        index: usize,
+        src: LocalId,
+    },
+    /// `base.(index + 1) = src`, one machine word into an enum payload slot.
+    ///
+    /// `FieldStore` off by the word the tag occupies, exactly as
+    /// `EnumFieldAddr` is `FieldAddr`.
+    EnumFieldStore {
+        base: LocalId,
+        index: usize,
+        src: LocalId,
+    },
     Free {
         local: LocalId,
     },
@@ -608,6 +632,13 @@ struct Builder {
     blocks: Vec<BuilderBlock>,
     current: BlockId,
     bindings: HashMap<BindingId, LocalId>,
+    /// Where each name an exclusive pattern bound actually lives (`D-120`).
+    ///
+    /// A binding carries its type and nothing else, so the aggregate a field
+    /// belongs to and the index it sits at are known while the pattern is being
+    /// lowered and nowhere afterwards. `set` reads this to write the field
+    /// rather than the name.
+    places: HashMap<BindingId, Place>,
     /// Which owned bindings still hold a value.
     ///
     /// Ordered, not hashed: the merge points below iterate this map to decide
@@ -632,6 +663,14 @@ struct Builder {
     layouts: Vec<MirStruct>,
 }
 
+/// The field a name bound through an exclusive borrow stands for (`D-120`).
+#[derive(Clone, Copy)]
+struct Place {
+    base: LocalId,
+    index: usize,
+    enumeration: bool,
+}
+
 #[derive(Clone, Copy)]
 struct LoopTarget {
     continue_block: BlockId,
@@ -654,6 +693,7 @@ impl Builder {
             }],
             current: 0,
             bindings: HashMap::new(),
+            places: HashMap::new(),
             live: BTreeMap::new(),
             scopes: Vec::new(),
             loop_targets: Vec::new(),
@@ -970,6 +1010,51 @@ impl Builder {
             }
             TExprKind::Set { id, value } => {
                 let value = self.expr(value)?;
+                // Assigning to a field through an exclusive borrow (`D-120`).
+                // The old word comes out first and is dropped only once the new
+                // one is in the slot, so the field never briefly holds two
+                // owners or none — `replace`'s discipline (`D-103`), one level
+                // in. The name's own local is not touched: it is a borrow of
+                // the field, and the field is what changed.
+                if let Some(place) = self.places.get(id).copied() {
+                    let old = (!value.ty.is_copy()).then(|| {
+                        let old = self.temp(value.ty.clone());
+                        self.emit(if place.enumeration {
+                            Instruction::EnumFieldLoad {
+                                dst: old,
+                                base: place.base,
+                                index: place.index,
+                            }
+                        } else {
+                            Instruction::FieldLoad {
+                                dst: old,
+                                base: place.base,
+                                index: place.index,
+                            }
+                        });
+                        old
+                    });
+                    self.emit(if place.enumeration {
+                        Instruction::EnumFieldStore {
+                            base: place.base,
+                            index: place.index,
+                            src: value.local,
+                        }
+                    } else {
+                        Instruction::FieldStore {
+                            base: place.base,
+                            index: place.index,
+                            src: value.local,
+                        }
+                    });
+                    if let Some(old) = old {
+                        self.emit(Instruction::Drop {
+                            local: old,
+                            ty: value.ty.clone(),
+                        });
+                    }
+                    return None;
+                }
                 let dst = self.bindings[id];
                 if self.live.get(id).copied().unwrap_or(false) && !value.ty.is_copy() {
                     self.emit(Instruction::Drop {
@@ -1775,6 +1860,7 @@ impl Builder {
             TPattern::Enum { fields, .. } => {
                 for (index, field) in fields.iter().enumerate() {
                     let local = self.pattern_field(value, index, &field.ty, true, borrowed);
+                    self.record_place(&field.pattern, value, index, true);
                     self.consume_pattern(&field.pattern, local, &field.ty, scope, borrowed);
                 }
                 if !borrowed {
@@ -1784,6 +1870,7 @@ impl Builder {
             TPattern::Struct { fields, .. } => {
                 for (index, field) in fields.iter().enumerate() {
                     let local = self.pattern_field(value, index, &field.ty, false, borrowed);
+                    self.record_place(&field.pattern, value, index, false);
                     self.consume_pattern(&field.pattern, local, &field.ty, scope, borrowed);
                 }
                 if !borrowed {
@@ -1791,6 +1878,30 @@ impl Builder {
                 }
             }
         }
+    }
+
+    /// Remembers which field a name stands for, when the borrow it was bound
+    /// through was an exclusive one (`D-120`).
+    ///
+    /// The aggregate and the index are in hand here and nowhere downstream,
+    /// because a binding carries only its type. An exclusive binding at any
+    /// other position — the whole scrutinee, or a name a shared pattern bound —
+    /// records nothing, and `sema` has already refused to write through one.
+    fn record_place(&mut self, pattern: &TPattern, base: LocalId, index: usize, enumeration: bool) {
+        let TPattern::Binding(binding) = pattern else {
+            return;
+        };
+        if !matches!(binding.ty, Type::Ref { mutable: true, .. }) {
+            return;
+        }
+        self.places.insert(
+            binding.id,
+            Place {
+                base,
+                index,
+                enumeration,
+            },
+        );
     }
 
     /// One field of an aggregate a pattern is taking apart, moved out of it or
@@ -1979,6 +2090,94 @@ mod tests {
                 )
             });
         assert!(has_drop);
+    }
+
+    /// Assigning an owning field is a store and a drop, in that order (`D-120`).
+    ///
+    /// The order is what the test is for: dropping the old value before the new
+    /// one is in the slot leaves the field holding a word nobody owns, which is
+    /// the failure `replace` was shaped to avoid one level down (`D-103`).
+    #[test]
+    fn assigning_an_owning_field_stores_before_it_drops_the_old_value() {
+        let source = r#"
+            (struct Holder ((text String)))
+            (fn rename ((holder (&mut Holder))) -> unit
+              (match holder
+                ((Holder :text text) (set text "after"))))
+            (fn main () -> i32 0)
+        "#;
+        let mir = compile_to_mir("test.slp", source, &CompileOptions::default()).unwrap();
+        let rename = mir
+            .functions
+            .iter()
+            .find(|function| function.name.ends_with("rename"))
+            .expect("the function is lowered");
+        let written = rename
+            .blocks
+            .iter()
+            .flat_map(|block| block.instructions())
+            .filter(|instruction| {
+                matches!(
+                    instruction,
+                    Instruction::FieldStore { index: 0, .. }
+                        | Instruction::Drop {
+                            ty: Type::String,
+                            ..
+                        }
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            matches!(
+                written.as_slice(),
+                [
+                    Instruction::FieldStore { index: 0, .. },
+                    Instruction::Drop {
+                        ty: Type::String,
+                        ..
+                    }
+                ]
+            ),
+            "{written:?}"
+        );
+    }
+
+    /// A scalar field is written and nothing is dropped, because there is
+    /// nothing in the slot that owns anything.
+    #[test]
+    fn assigning_a_scalar_field_costs_one_store() {
+        let source = r#"
+            (struct Counter ((count i64)))
+            (fn bump ((counter (&mut Counter))) -> unit
+              (match counter
+                ((Counter :count count) (set count 1))))
+            (fn main () -> i32 0)
+        "#;
+        let mir = compile_to_mir("test.slp", source, &CompileOptions::default()).unwrap();
+        let bump = mir
+            .functions
+            .iter()
+            .find(|function| function.name.ends_with("bump"))
+            .expect("the function is lowered");
+        let instructions = bump
+            .blocks
+            .iter()
+            .flat_map(|block| block.instructions())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            instructions
+                .iter()
+                .filter(|instruction| matches!(instruction, Instruction::FieldStore { .. }))
+                .count(),
+            1,
+            "{instructions:?}"
+        );
+        assert!(
+            !instructions
+                .iter()
+                .any(|instruction| matches!(instruction, Instruction::Drop { .. })),
+            "{instructions:?}"
+        );
     }
 
     #[test]

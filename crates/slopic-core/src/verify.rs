@@ -54,6 +54,7 @@ fn verify_module_after(file: &str, module: &MirModule, phase: Option<&str>) -> V
         verify_indirect_calls(file, function, phase, &mut errors);
         verify_returns(file, function, phase, &mut errors);
         verify_borrow_reads(file, function, phase, &mut errors);
+        verify_field_stores(file, module, function, phase, &mut errors);
         verify_volatile_accesses(file, function, phase, &mut errors);
     }
     errors
@@ -217,7 +218,10 @@ fn verify_direct_calls(
                 let Some(declared) = declaration.locals.get(*param) else {
                     continue;
                 };
-                if actual != &declared.ty {
+                // An exclusive borrow where a shared one is declared is the
+                // weakening `D-120` allows, and it is the same word, so the
+                // verifier accepts what `sema` accepted.
+                if actual != &declared.ty && !actual.weakens_to(&declared.ty) {
                     report(format!(
                         "{where_} passing `{actual:?}` as argument {argument}, which it takes as \
                          `{:?}`",
@@ -359,7 +363,7 @@ fn verify_indirect_calls(
                 continue;
             }
             for (argument, (actual, declared)) in arg_types.iter().zip(params).enumerate() {
-                if actual != declared {
+                if actual != declared && !actual.weakens_to(declared) {
                     report(format!(
                         "{where_} passing `{actual:?}` as argument {argument}, which its type \
                          declares `{declared:?}`"
@@ -370,6 +374,83 @@ fn verify_indirect_calls(
                 report(format!(
                     "{where_} taking `{result:?}` as the result, which its type declares \
                      `{declared:?}`"
+                ));
+            }
+        }
+    }
+}
+
+/// Checks that a field write agrees with the layout it writes into (`D-120`).
+///
+/// This is the half of the invariant a verifier handed one module can decide,
+/// and it is the half that prevents a miscompile rather than a missed
+/// optimisation (`D-114`): a word stored where a pointer belongs is a heap
+/// block the drop glue will follow, and nothing downstream would notice. The
+/// aggregate a payload slot belongs to has no single layout — the variant
+/// decides it and the instruction does not name one — so the enum case checks
+/// what it can, which is that the base is an aggregate at all.
+fn verify_field_stores(
+    file: &str,
+    module: &MirModule,
+    function: &MirFunction,
+    phase: Option<&str>,
+    errors: &mut Vec<Diagnostic>,
+) {
+    let after = phase.map_or(String::new(), |phase| format!(" after {phase}"));
+    let mut report = |message: String| {
+        errors.push(Diagnostic::error(
+            codes::INTERNAL,
+            file,
+            function.span,
+            format!(
+                "internal compiler error: MIR verification failed{after} in `{}`: {message}; \
+                 this is a compiler bug",
+                function.name
+            ),
+        ));
+    };
+
+    let type_of = |local: usize| function.locals.get(local).map(|local| &local.ty);
+    for (index, block) in function.blocks.iter().enumerate() {
+        for (position, instruction) in block.instructions().enumerate() {
+            let where_ = format!("block {index} instruction {position}");
+            let (base, field, src, enumeration) = match instruction {
+                Instruction::FieldStore { base, index, src } => (base, index, src, false),
+                Instruction::EnumFieldStore { base, index, src } => (base, index, src, true),
+                _ => continue,
+            };
+            // An out-of-range local is the operand check's complaint, not this
+            // one's.
+            let (Some(base_ty), Some(src_ty)) = (type_of(*base), type_of(*src)) else {
+                continue;
+            };
+            let aggregate = base_ty.strip_ref();
+            if !crate::lowering::is_pointer_like(aggregate) {
+                report(format!(
+                    "{where_} writes a field of _{base}, which holds `{aggregate:?}` rather than \
+                     an aggregate"
+                ));
+                continue;
+            }
+            if enumeration {
+                continue;
+            }
+            let Type::Named(name) = aggregate else {
+                continue;
+            };
+            let Some(layout) = module.structs.iter().find(|item| &item.name == name) else {
+                continue;
+            };
+            let Some((_, field_ty)) = layout.fields.get(*field) else {
+                report(format!(
+                    "{where_} writes field {field} of `{name}`, which has {} of them",
+                    layout.fields.len()
+                ));
+                continue;
+            };
+            if field_ty != src_ty {
+                report(format!(
+                    "{where_} writes `{src_ty:?}` into a field of `{field_ty:?}`"
                 ));
             }
         }

@@ -25,7 +25,14 @@ command-line protocol is internal and versioned.
 6. Reachability-driven monomorphization materializes concrete generic
    functions and aggregate layouts.
 7. Lowering produces whole-package target-independent MIR with locals, basic
-   blocks, explicit moves, borrows, loops, calls, and structural drops. A
+   blocks, explicit moves, borrows, loops, calls, and structural drops.
+   Assigning a field is `FieldStore` and its `EnumFieldStore` twin, the writing
+   half of the two instructions that form a field's address: the place is known
+   because the name came from a pattern this function wrote, so a borrow keeps
+   the representation it always had and nothing at a call boundary changes
+   (`D-120`). One write is a load of the old word, the store, and a drop of what
+   came out — in that order, so the field never briefly holds two owners or
+   none. A
    `lambda` body becomes a function of its own here and its environment becomes
    a struct, which is why a closure costs neither backend an instruction: the
    block is laid out as an aggregate, so the clone and drop helpers generated
@@ -49,7 +56,12 @@ command-line protocol is internal and versioned.
    borrow: a borrow of a pointer-shaped value is that pointer and a borrow of
    anything else is the address of a slot, so the two field instructions are
    each garbage in the other's place, and getting it wrong reads an integer as
-   a pointer rather than failing (`D-099`, `D-100`). So is every volatile
+   a pointer rather than failing (`D-099`, `D-100`). So is every field write,
+   against the layout it writes into: a word stored where a pointer belongs is a
+   heap block the drop glue will follow, and the enum case can only be checked
+   as far as the instruction names a layout, since the variant decides a payload
+   slot's type and the instruction does not name one (`D-120`). So is every
+   volatile
    access, whose width has to agree with what the pointer points at and with
    the local the value came from or went to: a width one size wrong does not
    fault, it reads or writes the bytes of the neighbouring device register

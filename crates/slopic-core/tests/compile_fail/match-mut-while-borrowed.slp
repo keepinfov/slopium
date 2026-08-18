@@ -1,0 +1,13 @@
+(struct Counter ((count i64)))
+
+(fn peek ((counter (& Counter))) -> i64
+  (match counter
+    ((Counter :count count) (clone count))))
+
+(fn main () -> i32
+  (let mut counter (Counter :count 1))
+  (let seen (& counter))
+  (match (&mut counter)
+    ((Counter :count count) (set count 2)))
+  (peek seen)
+  0)

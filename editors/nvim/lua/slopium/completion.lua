@@ -20,7 +20,7 @@ local static_items = {
   { label = "extern", kind = kinds.Snippet, detail = "declare a C function", insertText = 'extern "${1:c_name}" (${2:name} (${3:arg} ${4:i64})) -> ${0:i64}', insertTextFormat = 2 },
   { label = "let", kind = kinds.Snippet, detail = "immutable binding", insertText = "let ${1:name} ${0:value}", insertTextFormat = 2 },
   { label = "let mut", kind = kinds.Snippet, detail = "mutable binding", insertText = "let mut ${1:name} ${0:value}", insertTextFormat = 2 },
-  { label = "set", kind = kinds.Snippet, detail = "assign a mutable binding", insertText = "set ${1:name} ${0:value}", insertTextFormat = 2 },
+  { label = "set", kind = kinds.Snippet, detail = "assign a mutable binding or a field bound by a `&mut` match", insertText = "set ${1:name} ${0:value}", insertTextFormat = 2 },
   { label = "if", kind = kinds.Snippet, detail = "conditional expression", insertText = "if ${1:condition}\n    ${2:then}\n    ${0:else}", insertTextFormat = 2 },
   { label = "match", kind = kinds.Snippet, detail = "pattern match", insertText = "match ${1:value}\n    (${2:pattern} ${0:body})", insertTextFormat = 2 },
   { label = "lambda", kind = kinds.Snippet, detail = "closure over named captures", insertText = "lambda (${1:capture}) ((${2:arg} ${3:type})) -> ${4:type}\n    ${0:body}", insertTextFormat = 2 },

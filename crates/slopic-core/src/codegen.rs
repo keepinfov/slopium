@@ -718,6 +718,11 @@ impl<'a> Generator<'a> {
                 // leaf holding one is still a leaf.
                 | Instruction::VolatileLoad { .. }
                 | Instruction::VolatileStore { .. }
+                // A field write is one store, so a leaf that assigns to a field
+                // is still a leaf (`D-120`). What the *old* value costs is a
+                // `Drop`, which is already counted above.
+                | Instruction::FieldStore { .. }
+                | Instruction::EnumFieldStore { .. }
                 | Instruction::EnumFieldAddr { .. } => false,
             })
     }
@@ -915,6 +920,26 @@ impl<'a> Generator<'a> {
         ));
     }
 
+    /// `base.offset = src`, one machine word into a pointer-shaped aggregate.
+    ///
+    /// Two registers rather than one, because both ends can be in memory and a
+    /// `mov` takes at most one memory operand — the same reason `copy` goes
+    /// through `rax`.
+    fn field_store(&mut self, base: LocalId, offset: usize, src: LocalId) {
+        self.inst(Inst::Mov(
+            reg("rax"),
+            operand(&self.alloc, self.registers, base),
+        ));
+        self.inst(Inst::Mov(
+            reg("rcx"),
+            operand(&self.alloc, self.registers, src),
+        ));
+        self.inst(Inst::Mov(
+            Operand::slot(Size::Qword, Reg("rax"), offset as i64),
+            reg("rcx"),
+        ));
+    }
+
     /// Copies one local to another, going through `rax` only when both ends are
     /// in memory — `mov` allows at most one memory operand.
     fn copy(&mut self, dst: LocalId, src: LocalId) {
@@ -1086,6 +1111,15 @@ impl<'a> Generator<'a> {
             }
             Instruction::EnumFieldAddr { dst, base, index } => {
                 self.field_address(*dst, *base, (index + 1) * 8);
+            }
+            // The word into the field rather than out of it (`D-120`) — the
+            // same store `StructNew` makes, at a block somebody else already
+            // allocated.
+            Instruction::FieldStore { base, index, src } => {
+                self.field_store(*base, index * 8, *src);
+            }
+            Instruction::EnumFieldStore { base, index, src } => {
+                self.field_store(*base, (index + 1) * 8, *src);
             }
             // The dereference (`D-100`), and the same two moves `EnumTag` makes
             // — a tag is the word at offset zero, which is what this is.

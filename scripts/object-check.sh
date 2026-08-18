@@ -50,7 +50,9 @@ programs=(
   # A map is a generic struct holding two function values and a list of lists
   # (`D-104`), so its clone and drop helpers nest one level deeper than
   # anything else in this corpus, and `replace` is a runtime call neither
-  # backend had emitted.
+  # backend had emitted. Since `D-120` it is also where a field is written:
+  # `insert` and `delete` store into a map they were lent, which is the one
+  # store in this compiler that is not part of building an aggregate.
   "tests/projects/pass/maps/src/main.slp"
   # The largest single addition to this corpus so far (`D-106`): a remainder,
   # six bitwise operations, two shifts and four comparisons, on both widths.

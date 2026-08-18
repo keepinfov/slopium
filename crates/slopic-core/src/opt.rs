@@ -316,9 +316,14 @@ fn apply(instruction: &Instruction, state: &mut State) {
         | Instruction::EnumTag { dst, .. }
         | Instruction::EnumFieldLoad { dst, .. }
         | Instruction::EnumFieldAddr { dst, .. } => set(state, *dst, Value::Varying),
-        // Define nothing, so there is nothing to say about the state.
-        Instruction::Drop { .. } | Instruction::Free { .. } | Instruction::VolatileStore { .. } => {
-        }
+        // Define nothing, so there is nothing to say about the state. A field
+        // write defines no local either: what it changes is memory, which this
+        // pass models nowhere and therefore never folds (`D-120`).
+        Instruction::Drop { .. }
+        | Instruction::Free { .. }
+        | Instruction::FieldStore { .. }
+        | Instruction::EnumFieldStore { .. }
+        | Instruction::VolatileStore { .. } => {}
     }
 }
 
@@ -634,6 +639,11 @@ fn is_pure(instruction: &Instruction) -> bool {
         // else in this file has to know about them.
         | Instruction::VolatileLoad { .. }
         | Instruction::VolatileStore { .. }
+        // A field write's whole effect is on memory, which nothing here models,
+        // so an eliminator that judged it by its destination would judge it by
+        // something it does not have (`D-120`).
+        | Instruction::FieldStore { .. }
+        | Instruction::EnumFieldStore { .. }
         | Instruction::Free { .. } => false,
     }
 }

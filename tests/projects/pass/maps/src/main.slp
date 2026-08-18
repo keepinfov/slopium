@@ -2,9 +2,10 @@
 ; values — a hash and an equality — which is the answer `D-062` asked for and
 ; assumed needed traits (`D-104`).
 ;
-; Everything that writes consumes the map and gives it back, because the
-; language assigns to a name and to nothing else. `(set scores (map-insert
-; scores key value))` is the whole convention.
+; Everything that writes takes the map exclusively and writes into it, because
+; a `(&mut ...)` match binds each field as a place (`D-120`). Until then the
+; language assigned to a name and to nothing else, and `(set scores (map-insert
+; scores key value))` — a whole map rebuilt per write — was the convention.
 
 (take std:io println println-i64)
 (take std:string hash equals from-i64 concat)
@@ -63,7 +64,7 @@
   (let mut counts (empty-scores))
   (let mut index 0)
   (while (< index upto)
-    (set counts (map-insert counts (key-for index) index))
+    (map-insert (&mut counts) (key-for index) index)
     (set index (+ index 1)))
   counts)
 
@@ -79,14 +80,14 @@
   ; A key inserted twice keeps the second value and does not grow the map, and
   ; the value it replaced is dropped with the entry that held it.
   (let mut notes (empty-notes))
-  (set notes (map-insert notes 7 "seven"))
-  (set notes (map-insert notes 8 "eight"))
-  (set notes (map-insert notes 7 "SEVEN"))
+  (map-insert (&mut notes) 7 "seven")
+  (map-insert (&mut notes) 8 "eight")
+  (map-insert (&mut notes) 7 "SEVEN")
   (println-i64 (map-size (& notes)))
   (let seven 7)
   (let found (unwrap-or (map-lookup (& notes) (& seven)) "none"))
   (println (& found))
-  (set notes (map-delete notes (& seven)))
+  (map-delete (&mut notes) (& seven))
   (println-i64 (map-size (& notes)))
   (if (map-contains (& notes) (& seven))
     (println-i64 1)
@@ -94,13 +95,13 @@
 
   ; A set is a map whose values carry nothing, and `each` is its fold.
   (let mut names (empty-names))
-  (set names (set-add names "ann"))
-  (set names (set-add names "bo"))
-  (set names (set-add names "ann"))
+  (set-add (&mut names) "ann")
+  (set-add (&mut names) "bo")
+  (set-add (&mut names) "ann")
   (println-i64 (set-count (& names)))
   (println-i64 (set-each (& names) 0 longest))
   (let bo "bo")
-  (set names (set-discard names (& bo)))
+  (set-discard (&mut names) (& bo))
   (if (set-holds (& names) (& bo))
     (println-i64 1)
     (println-i64 0))
@@ -114,8 +115,8 @@
 
 (test "inserting a key twice replaces the value and keeps the size"
   (let mut notes (empty-notes))
-  (set notes (map-insert notes 1 "first"))
-  (set notes (map-insert notes 1 "second"))
+  (map-insert (&mut notes) 1 "first")
+  (map-insert (&mut notes) 1 "second")
   (let one 1)
   (let held (unwrap-or (map-lookup (& notes) (& one)) "none"))
   (let want "second")
@@ -123,15 +124,15 @@
 
 (test "deleting a key that was never there changes nothing"
   (let mut names (empty-names))
-  (set names (set-add names "ann"))
+  (set-add (&mut names) "ann")
   (let missing "zz")
-  (set names (set-discard names (& missing)))
+  (set-discard (&mut names) (& missing))
   (= 1 (set-count (& names))))
 
 (test "a negative hash finds its bucket, and so does the smallest i64"
   (let mut marks (empty-marks))
   (let smallest (- 0 9223372036854775807))
-  (set marks (map-insert marks (- smallest 1) 111))
-  (set marks (map-insert marks 7 70))
+  (map-insert (&mut marks) (- smallest 1) 111)
+  (map-insert (&mut marks) 7 70)
   (let key (- smallest 1))
   (and (= 111 (unwrap-or (map-lookup (& marks) (& key)) 0)) (= 2 (map-size (& marks)))))

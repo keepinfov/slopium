@@ -1,0 +1,4 @@
+move-out-of-mut-match.slp:8:35: error[SL0200]: expected `String`, found `&mut String`
+  |
+ 8 |     ((Holder :text text) (consume text)))
+  |                                   ^^^^

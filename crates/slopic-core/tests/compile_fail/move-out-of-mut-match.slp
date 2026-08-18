@@ -1,0 +1,9 @@
+(struct Holder ((text String)))
+
+(fn consume ((value String)) -> i64 0)
+
+(fn main () -> i32
+  (let mut holder (Holder :text "hello"))
+  (match (&mut holder)
+    ((Holder :text text) (consume text)))
+  0)

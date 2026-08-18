@@ -1,5 +1,0 @@
-match-borrow-mut.slp:7:10: error[SL0200]: `match` does not look through `&mut Message`
-  |
- 7 |   (match (&mut message)
-  |          ^^^^^^^^^^^^^^
-  = help: a shared borrow can be matched; an exclusive one cannot

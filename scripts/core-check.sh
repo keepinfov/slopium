@@ -116,8 +116,8 @@ cat > "$work/program.slp" <<'SLP'
                 ; list and a list needs an allocator and not an operating
                 ; system (`D-104`).
                 (let mut table (empty-table))
-                (set table (insert table "one" 1))
-                (set table (insert table "two" 2))
+                (insert (&mut table) "one" 1)
+                (insert (&mut table) "two" 2)
                 (let key "two")
                 (match (lookup (& table) (& key))
                   ((Option:Some held)

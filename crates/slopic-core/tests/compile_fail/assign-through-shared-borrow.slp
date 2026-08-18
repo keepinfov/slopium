@@ -1,0 +1,9 @@
+(struct Counter ((count i64)))
+
+(fn main () -> i32
+  (let counter (Counter :count 0))
+  (match (& counter)
+    ((Counter :count count)
+      (do
+        (set count 1)
+        0))))

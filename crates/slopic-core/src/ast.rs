@@ -197,6 +197,30 @@ impl Type {
         ) || self.is_integer()
     }
 
+    /// Whether this type stands in for `expected` because it is the exclusive
+    /// borrow of what `expected` asks for shared (`D-120`).
+    ///
+    /// One direction only: a `(& T)` is not a `(&mut T)`, because giving a
+    /// permission up is safe and taking one is not. It costs no instruction —
+    /// what a borrow *is* at runtime is decided by the referent's shape and
+    /// never by its mutability — which is why the verifier accepts it at a call
+    /// boundary as readily as `sema` accepts it at an argument.
+    pub fn weakens_to(&self, expected: &Type) -> bool {
+        matches!(
+            (self, expected),
+            (
+                Type::Ref {
+                    mutable: true,
+                    inner: from,
+                },
+                Type::Ref {
+                    mutable: false,
+                    inner: to,
+                },
+            ) if from == to
+        )
+    }
+
     /// Whether this is a type a raw pointer may point at, and a volatile
     /// access may carry (`D-067`).
     ///

@@ -1,0 +1,6 @@
+assign-through-parameter.slp:2:3: error[SL0300]: cannot assign through the borrow `count`
+  |
+ 2 |   (set count 1))
+  |   ^^^^^^^^^^^^^
+  = label 1:11: borrow bound here
+  = help: match the aggregate and assign one of its fields

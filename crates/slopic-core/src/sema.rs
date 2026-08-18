@@ -283,6 +283,16 @@ enum OwnershipState {
     MutBorrowed,
 }
 
+/// The borrow a `match` is looking through while its arms are typed.
+#[derive(Clone, Copy, Debug)]
+struct PatternBorrow {
+    /// The binding the scrutinee's borrow came from, when it had one.
+    origin: Option<BindingId>,
+    /// Whether it is exclusive, which is what makes the names underneath it
+    /// places rather than values that can only be read (`D-120`).
+    mutable: bool,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CollectionKind {
     List,
@@ -302,6 +312,12 @@ struct Binding {
     /// Whether this name is a `lambda`'s capture, which the environment owns
     /// and therefore nothing may move back out (`D-102`).
     captured: bool,
+    /// Whether this name is a field an exclusive pattern bound, and therefore a
+    /// place `set` can write through (`D-120`).
+    ///
+    /// A `(&mut T)` parameter is not one: the function was handed a borrow and
+    /// not the aggregate it came from, so there is no field here to name.
+    place: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -492,14 +508,19 @@ struct Analyzer<'a> {
     /// its next iteration would repeat.
     move_sites: HashMap<BindingId, Span>,
     /// Set while the arms of a `match` whose scrutinee is a borrow are typed
-    /// (`D-099`), holding the binding that borrow came from when it had one.
+    /// (`D-099`), holding the borrow's origin and whether it is exclusive.
     ///
     /// Every binding a pattern makes underneath this is a borrow of the field it
     /// names rather than the field itself, at every depth, which is why it is
     /// state on the analyzer and not an argument: `type_pattern` recurses
     /// through struct and enum fields and the answer never changes on the way
     /// down.
-    pattern_borrow: Option<Option<BindingId>>,
+    pattern_borrow: Option<PatternBorrow>,
+    /// How many aggregate patterns deep `type_pattern` currently is.
+    ///
+    /// A name bound at depth zero is the whole scrutinee and names no field, so
+    /// it is a borrow like any other and never a place (`D-120`).
+    pattern_depth: usize,
     /// The environments a `lambda` body is written inside of, while it is being
     /// typed.
     ///
@@ -636,6 +657,7 @@ impl<'a> Analyzer<'a> {
             next_binding: 0,
             move_sites: HashMap::new(),
             pattern_borrow: None,
+            pattern_depth: 0,
             enclosing: Vec::new(),
             env: Environment::default(),
         }
@@ -1172,6 +1194,7 @@ impl<'a> Analyzer<'a> {
                 borrowed_from: None,
                 owns_loan: false,
                 captured: false,
+                place: false,
             };
             self.refuse_function_shadow(&param.name, &parameter_type, param.span);
             if self.env.insert(param.name.clone(), binding).is_err() {
@@ -1257,6 +1280,7 @@ impl<'a> Analyzer<'a> {
                     borrowed_from,
                     owns_loan,
                     captured: false,
+                    place: false,
                 };
                 self.refuse_function_shadow(name, &value.ty, expr.span);
                 if self.env.insert(name.clone(), binding).is_err() {
@@ -1322,7 +1346,13 @@ impl<'a> Analyzer<'a> {
         };
 
         if let Some(expected) = expected {
-            if typed.ty != *expected {
+            // An exclusive borrow is accepted where a shared one is asked for
+            // (`D-120`). It costs no instruction — the two are the same word for
+            // every type, because `AddressOf` decides what a borrow *is* by the
+            // referent's shape and not by its mutability — and without it a
+            // field bound by a `(&mut ...)` match could not be handed to
+            // anything the library already has.
+            if typed.ty != *expected && !typed.ty.weakens_to(expected) {
                 self.error(
                     expr.span,
                     format!("expected `{expected}`, found `{}`", typed.ty),
@@ -1605,6 +1635,39 @@ impl<'a> Analyzer<'a> {
             .get(&id)
             .cloned()
             .expect("binding id is valid");
+        // Writing through a borrow (`D-120`). The name is a field an enclosing
+        // `match` bound through a `(&mut ...)`, and `set` puts a new value in
+        // that field and drops the one that was there. Nothing else that has a
+        // borrow's type can be written: a shared borrow may not write at all,
+        // and an exclusive one that names no field has nowhere to write to.
+        if let Type::Ref { mutable, inner } = binding.ty.clone() {
+            if !binding.place {
+                let message = if mutable {
+                    format!("cannot assign through the borrow `{name}`")
+                } else {
+                    format!("cannot assign through the shared borrow `{name}`")
+                };
+                let help = if mutable {
+                    "match the aggregate and assign one of its fields"
+                } else {
+                    "read it with `clone`; to assign, match through `(&mut ...)`"
+                };
+                self.diagnostics.push(
+                    Diagnostic::error(codes::OWNERSHIP, self.file, expr.span, message)
+                        .with_label(binding.definition, "borrow bound here")
+                        .with_help(help),
+                );
+            }
+            let value = self.expr(value, Some(&inner));
+            return self.typed(
+                expr,
+                Type::Unit,
+                TExprKind::Set {
+                    id,
+                    value: Box::new(value),
+                },
+            );
+        }
         if !binding.mutable {
             self.diagnostics.push(
                 Diagnostic::error(
@@ -1845,11 +1908,20 @@ impl<'a> Analyzer<'a> {
             );
         }
         let next_state = if mutable {
-            if binding.state != OwnershipState::Available {
-                self.error(
+            // Two exclusive borrows and an exclusive one over a shared one are
+            // the same refusal and not the same mistake, so they do not get the
+            // same sentence. A `match` through a `(&mut ...)` is what made the
+            // second reachable often enough to be worth telling apart.
+            match binding.state {
+                OwnershipState::Available | OwnershipState::Moved => {}
+                OwnershipState::MutBorrowed => self.error(
                     value.span,
                     format!("cannot mutably borrow `{name}` more than once"),
-                );
+                ),
+                OwnershipState::SharedBorrowed(_) => self.error(
+                    value.span,
+                    format!("cannot mutably borrow `{name}` while it is shared-borrowed"),
+                ),
             }
             OwnershipState::MutBorrowed
         } else {
@@ -2011,21 +2083,13 @@ impl<'a> Analyzer<'a> {
         expected: Option<&Type>,
     ) -> TExpr {
         let value = self.expr(value, None);
-        // A `match` may look through a shared borrow (`D-099`), in which case
-        // everything below asks about what is behind it and every binding a
-        // pattern makes is a borrow.
-        let borrowed = matches!(value.ty, Type::Ref { mutable: false, .. });
-        if matches!(value.ty, Type::Ref { mutable: true, .. }) {
-            self.diagnostics.push(
-                Diagnostic::error(
-                    codes::NAME_OR_TYPE,
-                    self.file,
-                    value.span,
-                    format!("`match` does not look through `{}`", value.ty),
-                )
-                .with_help("a shared borrow can be matched; an exclusive one cannot"),
-            );
-        }
+        // A `match` looks through a borrow of either kind (`D-099`, `D-120`), in
+        // which case everything below asks about what is behind it and every
+        // binding a pattern makes is a borrow of the same kind. Through an
+        // exclusive one those bindings are also places, which is the whole of
+        // what field assignment is.
+        let borrowed = matches!(value.ty, Type::Ref { .. });
+        let exclusive = matches!(value.ty, Type::Ref { mutable: true, .. });
         let scrutinee = value.ty.strip_ref().clone();
         let enum_name = self.enum_of_type(&scrutinee);
         let struct_name = match &scrutinee {
@@ -2065,7 +2129,10 @@ impl<'a> Analyzer<'a> {
         }
         let outer_borrow = self.pattern_borrow.take();
         if borrowed {
-            self.pattern_borrow = Some(self.reference_loan(&value).map(|(origin, _)| origin));
+            self.pattern_borrow = Some(PatternBorrow {
+                origin: self.reference_loan(&value).map(|(origin, _)| origin),
+                mutable: exclusive,
+            });
         }
         let base = self.env.clone();
         let mut typed_arms = Vec::new();
@@ -2188,26 +2255,35 @@ impl<'a> Analyzer<'a> {
             PatternKind::Binding(name) => {
                 let id = self.fresh_id();
                 // Through a borrow the pattern names a field it does not own,
-                // so what it binds is a borrow of that field (`D-099`). The
-                // type is the same for every field type, including one that is
-                // `Copy`: whether `T` is `Copy` is not known inside a generic
-                // body, and a binding's type has to be.
+                // so what it binds is a borrow of that field (`D-099`), and it
+                // is exclusive exactly when the scrutinee's borrow was
+                // (`D-120`). The type is the same for every field type,
+                // including one that is `Copy`: whether `T` is `Copy` is not
+                // known inside a generic body, and a binding's type has to be.
                 let ty = match self.pattern_borrow {
-                    Some(_) => Type::Ref {
-                        mutable: false,
+                    Some(borrow) => Type::Ref {
+                        mutable: borrow.mutable,
                         inner: Box::new(expected.clone()),
                     },
                     None => expected.clone(),
                 };
+                // A name is a place when it is a field of an aggregate this
+                // `match` took apart through an exclusive borrow. At depth zero
+                // it is the scrutinee itself, which names no field and so has
+                // nowhere for `set` to write.
+                let place = self
+                    .pattern_borrow
+                    .is_some_and(|borrow| borrow.mutable && self.pattern_depth > 0);
                 let binding = Binding {
                     id,
                     ty: ty.clone(),
                     mutable: false,
                     state: OwnershipState::Available,
                     definition: pattern.span,
-                    borrowed_from: self.pattern_borrow.flatten(),
+                    borrowed_from: self.pattern_borrow.and_then(|borrow| borrow.origin),
                     owns_loan: false,
                     captured: false,
+                    place,
                 };
                 self.refuse_function_shadow(name, &ty, pattern.span);
                 if self.env.insert(name.clone(), binding).is_err() {
@@ -2313,6 +2389,7 @@ impl<'a> Analyzer<'a> {
                         ),
                     );
                 }
+                self.pattern_depth += 1;
                 let typed_fields = fields
                     .iter()
                     .zip(&info.fields)
@@ -2321,6 +2398,7 @@ impl<'a> Analyzer<'a> {
                         pattern: self.type_pattern(field, ty),
                     })
                     .collect();
+                self.pattern_depth -= 1;
                 TPattern::Enum {
                     enum_name: info.enum_name,
                     variant: info.variant,
@@ -2395,6 +2473,7 @@ impl<'a> Analyzer<'a> {
                         self.error(pattern.span, format!("unknown field `{path}.{name}`"));
                     }
                 }
+                self.pattern_depth += 1;
                 let typed_fields = declared_fields
                     .iter()
                     .map(|(name, ty)| TPatternField {
@@ -2404,6 +2483,7 @@ impl<'a> Analyzer<'a> {
                             .map_or(TPattern::Wildcard, |field| self.type_pattern(field, ty)),
                     })
                     .collect();
+                self.pattern_depth -= 1;
                 TPattern::Struct {
                     struct_name: expected_name,
                     fields: typed_fields,
@@ -2575,6 +2655,7 @@ impl<'a> Analyzer<'a> {
                 borrowed_from: None,
                 owns_loan: false,
                 captured: true,
+                place: false,
             };
             if self.env.insert(capture.name.clone(), binding).is_err() {
                 self.error(
@@ -2608,6 +2689,7 @@ impl<'a> Analyzer<'a> {
                 borrowed_from: None,
                 owns_loan: false,
                 captured: false,
+                place: false,
             };
             self.refuse_function_shadow(&param.name, &parameter_type, param.span);
             if self.env.insert(param.name.clone(), binding).is_err() {
@@ -2934,12 +3016,15 @@ impl<'a> Analyzer<'a> {
             }
             _ => self.expr(&args[0], None),
         };
-        if matches!(arg.ty, Type::Ref { mutable: true, .. }) {
-            self.error(arg.span, "cannot clone a mutable reference");
-        }
         // `clone` crosses a borrow (`D-091`). Returning the borrow it was handed
         // made the call a no-op, and left the language with no way at all to
         // turn a `(& String)` into a `String`.
+        //
+        // It crosses an exclusive one too since `D-120`: a field bound by a
+        // `(&mut ...)` match is read the same way a shared one is, and
+        // `(set count (+ (clone count) 1))` is the shape every counter in the
+        // library now has. Refusing it was right while nothing could hold an
+        // exclusive borrow long enough to read it.
         let borrowed = matches!(arg.ty, Type::Ref { .. });
         let result = arg.ty.strip_ref().clone();
         // Only an *owned* scalar has nothing to clone (`D-100`). A borrowed one
@@ -4602,6 +4687,19 @@ fn unify_type(
         | (
             Type::Ref {
                 mutable: true,
+                inner: left,
+            },
+            Type::Ref {
+                mutable: true,
+                inner: right,
+            },
+        )
+        // The same weakening `weakens_to` allows, one level in: a generic
+        // parameter inferred from a `(&mut T)` handed to a `(& K)` is `T`
+        // (`D-120`).
+        | (
+            Type::Ref {
+                mutable: false,
                 inner: left,
             },
             Type::Ref {
