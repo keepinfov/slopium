@@ -54,8 +54,15 @@ pub fn call_symbol(module: &MirModule, callee: &str) -> String {
 /// words in. This is an ABI fact rather than a convenience, which is why it is
 /// written down once and tested rather than spelled twice in two backends.
 pub const RUNTIME_POINTER_OFFSET: i64 = 16;
-/// Where the length sits inside a borrowed `Slice`.
+/// Where the length sits inside a borrowed `Slice`, a `List` or an `Array`.
 pub const RUNTIME_LENGTH_OFFSET: i64 = 0;
+/// Where the element pointer sits inside a `List` or an `Array`.
+///
+/// `SlList` is `{len, cap, elem_size, ptr, drop_element, clone_element}`, so it
+/// keeps its pointer a word further in than the two structs above. It is one
+/// more ABI fact written down once and tested rather than spelled twice
+/// (`D-124`).
+pub const RUNTIME_LIST_POINTER_OFFSET: i64 = 24;
 
 /// Where one machine word of an `extern` call's argument list comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -138,6 +145,30 @@ fn extern_arguments(declaration: &MirExtern, args: &[LocalId]) -> Vec<(ExternWor
                     ExternWord::Indirect {
                         base: arg,
                         offset: RUNTIME_POINTER_OFFSET,
+                    },
+                    ExternClass::Integer,
+                ));
+                words.push((
+                    ExternWord::Indirect {
+                        base: arg,
+                        offset: RUNTIME_LENGTH_OFFSET,
+                    },
+                    ExternClass::Integer,
+                ));
+            }
+            // A buffer C fills (`D-124`). The same two words a `Slice` becomes,
+            // read a word further in, because the collection that owns its
+            // elements carries a capacity and an element size the view does
+            // not. What C is told is where the elements are and how many there
+            // are; it may not resize the collection, and the borrow ends when
+            // the call returns.
+            Type::Ref { inner, .. }
+                if matches!(inner.as_ref(), Type::List(_) | Type::Array { .. }) =>
+            {
+                words.push((
+                    ExternWord::Indirect {
+                        base: arg,
+                        offset: RUNTIME_LIST_POINTER_OFFSET,
                     },
                     ExternClass::Integer,
                 ));

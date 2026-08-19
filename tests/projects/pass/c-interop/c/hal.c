@@ -59,3 +59,35 @@ uint8_t *hal_buffer(void) {
 
 int64_t hal_peek(const uint8_t *at) { return (int64_t)*at; }
 
+
+/* --- What `D-124` opened: C writes -------------------------------------- */
+
+/* A buffer the caller owns, borrowed exclusively, arriving as a pointer and a
+ * count. Every element is a machine word whatever the element type is, so this
+ * writes `int64_t`s and a byte-at-a-time API needs a shim of its own. C may
+ * fill the elements it was given and may not resize the collection. */
+void hal_fill(int64_t *values, int64_t len) {
+    for (int64_t index = 0; index < len; index++) {
+        values[index] = (index + 1) * 10;
+    }
+}
+
+/* An out-parameter. The slot is a whole machine word, which is why the
+ * vocabulary stops at the word-width scalars: `int32_t *` here would leave the
+ * upper half of the caller's slot holding whatever was in it. */
+int64_t hal_divmod(int64_t value, int64_t by, int64_t *rest) {
+    *rest = value % by;
+    return value / by;
+}
+
+double hal_fraction(double value, double *whole) {
+    double units = (double)(int64_t)value;
+    *whole = units;
+    return value - units;
+}
+
+/* A function pointer: C calls back into Slopium, with the Slopium calling
+ * convention, which is System V with every argument one word wide. */
+int64_t hal_apply_twice(int64_t (*step)(int64_t), int64_t value) {
+    return step(step(value));
+}

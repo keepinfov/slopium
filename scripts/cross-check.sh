@@ -501,6 +501,31 @@ int64_t probe_slice(const int64_t *values, int64_t len) {
 }
 
 SlString *probe_string(void) { return sl_rt_string_new("from C", 6); }
+
+/* The three rows `D-124` added, on both targets: a buffer C fills, an
+ * out-parameter it writes through, and a call back into Slopium. The first two
+ * are two more words read out of a runtime struct at fixed offsets, and the
+ * third is the calling convention in the inward direction, so all three are
+ * exactly the kind of thing the two backends could disagree about. */
+void probe_fill(int64_t *values, int64_t len) {
+    for (int64_t index = 0; index < len; index++) {
+        values[index] = (index + 1) * 3;
+    }
+}
+
+int64_t probe_out(int64_t value, int64_t *rest) {
+    *rest = value % 7;
+    return value / 7;
+}
+
+double probe_out_double(double value, double *half) {
+    *half = value / 2.0;
+    return value * 2.0;
+}
+
+int64_t probe_apply(int64_t (*step)(int64_t), int64_t value) {
+    return step(step(value));
+}
 EOF
 
 cat >"$ffi_dir/ffi.slp" <<'EOF'
@@ -522,6 +547,14 @@ cat >"$ffi_dir/ffi.slp" <<'EOF'
 
 (extern "probe_string" (probe-string) -> String)
 
+(extern "probe_fill" (probe-fill (into (&mut (List i64)))) -> unit)
+(extern "probe_fill" (probe-fill-array (into (&mut (Array i64 3)))) -> unit)
+(extern "probe_out" (probe-out (value i64) (rest (&mut i64))) -> i64)
+(extern "probe_out_double" (probe-out-double (value f64) (half (&mut f64))) -> f64)
+(extern "probe_apply" (probe-apply (step (Fn (i64) i64)) (value i64)) -> i64)
+
+(fn tripled ((value i64)) -> i64 (* value 3))
+
 (fn main () -> i32
   (println-i64 (probe-ten 1 2 3 4 5 6 7 8 9 10))
   (let total (probe-ten-doubles 1.5 2.5 3.5 4.5 5.5 6.5 7.5 8.5 9.5 10.5))
@@ -535,6 +568,19 @@ cat >"$ffi_dir/ffi.slp" <<'EOF'
   (println-i64 (probe-slice (& view)))
   (let greeting (probe-string))
   (println (& greeting))
+  (let mut buffer (list 0 0 0))
+  (probe-fill (&mut buffer))
+  (println-i64 (+ (+ (get (& buffer) 0) (get (& buffer) 1)) (get (& buffer) 2)))
+  (let mut fixed-buffer (array 0 0 0))
+  (probe-fill-array (&mut fixed-buffer))
+  (println-i64 (get (& fixed-buffer) 2))
+  (let mut rest 0)
+  (println-i64 (+ (* (probe-out 45 (&mut rest)) 100) rest))
+  (let mut half 0.0)
+  (let twice (probe-out-double 3.5 (&mut half)))
+  (println-bool (= half 1.75))
+  (println-bool (= twice 7.0))
+  (println-i64 (probe-apply tripled 2))
   0)
 EOF
 
@@ -546,6 +592,12 @@ cat >"$ffi_dir/expected.stdout" <<'EOF'
 8
 200
 from C
+18
+9
+603
+1
+1
+18
 exit status: 0
 EOF
 

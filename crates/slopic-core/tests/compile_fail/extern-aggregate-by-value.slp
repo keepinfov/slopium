@@ -1,0 +1,6 @@
+(struct Point ((x i64) (y i64)))
+
+(extern "c_place" (c-place (at Point)) -> unit)
+
+(fn main () -> i32
+  0)

@@ -612,8 +612,14 @@ fn verify_volatile_accesses(
     }
 }
 
-/// The argument types an extern call may carry: the `D-065` vocabulary, which
-/// is every type that is either `Copy` or already a borrow.
+/// The argument types an extern call may carry: the `D-065` vocabulary as
+/// `D-124` widened it, which is every type that is either `Copy` or already a
+/// borrow.
+///
+/// `sema` decides this about a declaration and this decides it about a call, so
+/// the two agree by saying the same thing twice about different things: a
+/// declaration is source and a call is MIR, and a pass that invented an
+/// argument would not be caught by the first.
 fn crossable_argument(ty: &Type) -> bool {
     match ty {
         Type::F64 | Type::Bool => true,
@@ -621,12 +627,18 @@ fn crossable_argument(ty: &Type) -> bool {
         // A raw pointer is `Copy` and borrows nothing, so it satisfies the
         // rule this vocabulary is stated in (`D-067`).
         Type::Ptr(_) => true,
-        Type::Ref {
-            mutable: false,
-            inner,
-        } => {
-            matches!(inner.as_ref(), Type::String | Type::Slice(_))
-        }
+        Type::Ref { mutable, inner } => match inner.as_ref() {
+            Type::String | Type::Slice(_) => !*mutable,
+            // What C fills, borrowed exclusively (`D-124`).
+            Type::List(_) | Type::Array { .. } => *mutable,
+            // A C out-parameter, whose slot is a whole machine word.
+            scalar => {
+                *mutable && matches!(scalar, Type::I64 | Type::U64 | Type::F64 | Type::Ptr(_))
+            }
+        },
+        // A bare function's address. The block a `Fn` value would be never
+        // reaches here: `FnPointer` lowers to the symbol alone.
+        Type::Fn { .. } => true,
         _ => false,
     }
 }

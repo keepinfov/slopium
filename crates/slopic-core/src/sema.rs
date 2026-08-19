@@ -161,6 +161,17 @@ pub enum TExprKind {
         type_args: Vec<Type>,
     },
 
+    /// A top-level `fn` handed to C as a function pointer (`D-124`).
+    ///
+    /// `FnRef` builds a function *value*, which is a block with a header and an
+    /// environment; C is given the code address instead, which is what a
+    /// `void (*)(...)` is. Sema produces this only at an `extern` call site
+    /// whose declaration says the parameter is a `(Fn ...)`, so nothing else in
+    /// the language can name an address.
+    FnPointer {
+        name: String,
+    },
+
     /// A call through a local of `Fn` type.
     ///
     /// The callee is a binding rather than a name, which is the whole
@@ -1072,7 +1083,7 @@ impl<'a> Analyzer<'a> {
                 self.validate_type(&param.ty, param.span);
                 let ty = self.normalize_type(&param.ty, param.span);
                 if !extern_parameter_is_expressible(&ty) {
-                    let diagnostic = Diagnostic::error(
+                    let mut diagnostic = Diagnostic::error(
                         codes::NAME_OR_TYPE,
                         self.file,
                         param.span,
@@ -1082,6 +1093,9 @@ impl<'a> Analyzer<'a> {
                         ),
                     )
                     .with_help(EXTERN_PARAMETER_HELP);
+                    if let Some(note) = extern_parameter_note(&ty) {
+                        diagnostic = diagnostic.with_note(note);
+                    }
                     self.diagnostics.push(diagnostic);
                 }
             }
@@ -2880,6 +2894,14 @@ impl<'a> Analyzer<'a> {
         for (index, arg) in args.iter().enumerate() {
             typed_args.push(self.expr(arg, signature.params.get(index)));
         }
+        if signature.is_extern {
+            for (index, typed) in typed_args.iter_mut().enumerate() {
+                if !matches!(signature.params.get(index), Some(Type::Fn { .. })) {
+                    continue;
+                }
+                self.extern_callback_argument(callee, typed);
+            }
+        }
         self.typed(
             expr,
             signature.result,
@@ -2888,6 +2910,53 @@ impl<'a> Analyzer<'a> {
                 args: typed_args,
             },
         )
+    }
+
+    /// Turns the argument at a `(Fn ...)` parameter of an `extern` into an
+    /// address, or says why it cannot be one (`D-124`).
+    ///
+    /// C is handed a code address, so the argument has to name a function this
+    /// program defines. A `lambda` is refused by name: its block holds captured
+    /// values that a `void (*)(...)` has nowhere to carry, and the refusal is
+    /// the whole reason a closure crossing the boundary is not a question about
+    /// lifetimes. A local of `Fn` type is refused for the same reason one
+    /// instruction later — nothing knows at compile time which block it holds.
+    fn extern_callback_argument(&mut self, callee: &str, typed: &mut TExpr) {
+        match &typed.kind {
+            TExprKind::FnRef { name, type_args } if type_args.is_empty() => {
+                typed.kind = TExprKind::FnPointer { name: name.clone() };
+            }
+            TExprKind::FnRef { .. } => {
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        codes::NAME_OR_TYPE,
+                        self.file,
+                        typed.span,
+                        format!("a generic function cannot cross the C boundary to `{callee}`"),
+                    )
+                    .with_help("wrap the instance you mean in a `fn` of its own and pass that"),
+                );
+            }
+            other => {
+                let note = if matches!(other, TExprKind::Lambda { .. }) {
+                    "a `lambda` is a block holding what it captured, and a C function pointer \
+                     has nowhere to carry an environment"
+                } else {
+                    "a function value is a block chosen at run time, and the address C is \
+                     handed is chosen at compile time"
+                };
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        codes::NAME_OR_TYPE,
+                        self.file,
+                        typed.span,
+                        format!("`{callee}` takes a named function here, not a function value"),
+                    )
+                    .with_help("name a top-level `fn`: C is handed its address")
+                    .with_note(note),
+                );
+            }
+        }
     }
 
     /// A `lambda`, and the moves that fill its environment (`D-102`).
@@ -4373,6 +4442,9 @@ impl<'a> Analyzer<'a> {
                     *argument = self.normalize_type(argument, expression.span);
                 }
             }
+            // A function pointer names a concrete function and carries no type
+            // arguments: a generic one is refused where the node is made.
+            TExprKind::FnPointer { .. } => {}
             TExprKind::Convert { value } => self.materialize_typed_expr(value),
             TExprKind::Try {
                 value,
@@ -4946,19 +5018,49 @@ fn contains_parameter(ty: &Type, parameters: &HashSet<String>) -> bool {
 }
 
 const EXTERN_PARAMETER_HELP: &str =
-    "an `extern` parameter is an integer type, `f64`, `bool`, `(Ptr T)`, `(& String)` \
-     or `(& (Slice T))`";
+    "an `extern` parameter is an integer type, `f64`, `bool`, `(Ptr T)`, `(& String)`, \
+     `(& (Slice T))`, `(&mut (List T))`, `(&mut (Array T N))`, a `(&mut ...)` of a \
+     word-width scalar, or a `(Fn ...)` over scalars";
 
 const EXTERN_RESULT_HELP: &str =
     "an `extern` returns `unit`, an integer type, `f64`, `bool`, `(Ptr T)` or an owned `String`";
 
-/// Whether a parameter type is one the C boundary can carry (`D-065`).
+const EXTERN_CALLBACK_HELP: &str =
+    "a `(Fn ...)` an `extern` takes is entered from C, so each parameter and the \
+     result is an integer type, `f64`, `bool` or `(Ptr T)`, and the result may be \
+     `unit`";
+
+/// Whether a scalar occupies exactly one machine word.
+///
+/// The out-parameter row of `D-124` is restricted to these, and the reason is
+/// `D-113`: an integer is held canonical in a full word, so C writing four
+/// bytes through an `int32_t *` would leave the upper half of the slot holding
+/// whatever was there and the next read of it would be a different number.
+fn is_word_scalar(ty: &Type) -> bool {
+    matches!(ty, Type::I64 | Type::U64 | Type::F64 | Type::Ptr(_))
+}
+
+/// Whether a `(Fn ...)` is one C can be handed and can call (`D-124`).
+///
+/// It is entered with the Slopium calling convention, where every argument is
+/// one machine word, so its own vocabulary is the scalars and nothing else: a
+/// `(& String)` parameter would arrive as a pointer to a runtime string where
+/// C would have passed a `char *`, and an owned result would move ownership
+/// out of a function C called, which `D-065` refuses in the other direction
+/// for the same reason.
+fn extern_callback_is_expressible(params: &[Type], result: &Type) -> bool {
+    let scalar = |ty: &Type| ty.is_integer() || matches!(ty, Type::F64 | Type::Bool | Type::Ptr(_));
+    params.iter().all(&scalar) && (matches!(result, Type::Unit) || scalar(result))
+}
+
+/// Whether a parameter type is one the C boundary can carry (`D-065`, widened
+/// by `D-124`).
 ///
 /// The list grew by the widths C actually has when `D-107` gave the language
-/// eight integer types, and is still closed on purpose: a type that is not here
-/// has no agreed C spelling, and guessing one is how an FFI starts lying. What
-/// stays out is every aggregate — a `String` or a `Slice` crosses as a borrow
-/// or not at all.
+/// eight integer types, and by three rows when `D-124` let C write. It is still
+/// closed on purpose: a type that is not here has no agreed C spelling, and
+/// guessing one is how an FFI starts lying. What stays out is every aggregate
+/// by value — a `String` or a `List` crosses as a borrow or not at all.
 fn extern_parameter_is_expressible(ty: &Type) -> bool {
     match ty {
         Type::F64 | Type::Bool => true,
@@ -4970,13 +5072,62 @@ fn extern_parameter_is_expressible(ty: &Type) -> bool {
         // A borrow is the only way a non-scalar crosses: an `extern` may not
         // take ownership, because the drop glue would then run where the
         // compiler cannot see it.
-        Type::Ref {
-            mutable: false,
-            inner,
-        } => {
-            matches!(inner.as_ref(), Type::String | Type::Slice(_))
-        }
+        Type::Ref { mutable, inner } => match inner.as_ref() {
+            // Reading is a view and stays shared. C is handed the bytes and a
+            // length and may not keep either.
+            Type::String | Type::Slice(_) => !*mutable,
+            // Writing is what you own, borrowed exclusively (`D-124`). The
+            // exclusivity is stated in the type, so it survives being passed
+            // through a Slopium signature — which is what a `Slice` cannot say,
+            // since it does not record the borrow it was made from.
+            Type::List(_) | Type::Array { .. } => *mutable,
+            // A C out-parameter. The slot is a machine word and C is told so.
+            scalar => *mutable && is_word_scalar(scalar),
+        },
+        // A bare `fn` as a C function pointer (`D-124`). A closure cannot
+        // cross: it is a block with an environment, not an address, and the
+        // call site refuses one by name.
+        Type::Fn { params, result } => extern_callback_is_expressible(params, result),
         _ => false,
+    }
+}
+
+/// The sentence a near miss deserves, where the general help would not say why.
+///
+/// Each of these is a type somebody reasonably expected to cross, and the
+/// answer is a fact about the representation rather than about the table.
+fn extern_parameter_note(ty: &Type) -> Option<&'static str> {
+    match ty {
+        Type::Ref {
+            mutable: true,
+            inner,
+        } => match inner.as_ref() {
+            Type::Slice(_) => Some(
+                "a `(Slice T)` does not record whether it was made from a shared or an \
+                 exclusive borrow, so C writing through one could write through a shared \
+                 loan; hand it the `(&mut (List T))` or `(&mut (Array T N))` it is a view of",
+            ),
+            Type::String => Some(
+                "a `String` carries a length and a capacity that C cannot maintain; take \
+                 `(& String)` to read one, and return a fresh one to replace it",
+            ),
+            scalar if scalar.is_integer() || matches!(scalar, Type::Bool) => Some(
+                "an out-parameter's slot is a whole machine word, so C is handed \
+                 `int64_t *`, `uint64_t *`, `double *` or `T **` and nothing narrower",
+            ),
+            _ => None,
+        },
+        Type::String | Type::List(_) | Type::Array { .. } | Type::Slice(_) => Some(
+            "an aggregate does not cross by value: every field is a machine word and the \
+             value is a heap block, which is not what C means by a struct",
+        ),
+        Type::Named(_) | Type::Apply { .. } => Some(
+            "a struct or an enum does not cross the boundary in either direction: a record \
+             with C's layout is a different kind of type, and it arrives with the target \
+             that needs it",
+        ),
+        Type::Fn { .. } => Some(EXTERN_CALLBACK_HELP),
+        _ => None,
     }
 }
 
@@ -5342,6 +5493,8 @@ fn specialize_expr(
             *result = substitute_type(result, substitutions);
             specialize_expr(body, substitutions, queue);
         }
+        // Nothing to specialize: the node exists only for a concrete function.
+        TExprKind::FnPointer { .. } => {}
         TExprKind::FnRef { name, type_args } => {
             if !type_args.is_empty() {
                 let concrete = type_args

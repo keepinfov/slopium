@@ -14,6 +14,12 @@ rather than everything it touched.
 ## [Unreleased]
 
 ### Added
+- The C boundary carries three more shapes: C can fill a `(&mut (List T))` or a
+  `(&mut (Array T N))`, write through a `(&mut ...)` out-parameter of a
+  word-width scalar, and call back into a named `fn` passed as a `(Fn ...)`.
+  Aggregates by value, an exclusively borrowed `(Slice T)`, a narrow
+  out-parameter and a closure as a callback are refused by name, each with a
+  note saying why.
 - `docs/decisions.md`: the project's decision log, `D-001` onwards, so that the
   identifiers cited across the documentation and the commit history resolve to
   something a clone contains.

@@ -1338,6 +1338,23 @@ impl Builder {
                     })
                 }
             }
+            // The address, and nothing around it (`D-124`). `FnRef` boxes the
+            // same symbol into a block because a function *value* is owned;
+            // what C is handed is a `void (*)(...)`, so there is no block, no
+            // drop and no clone helper — which is also why this node is only
+            // ever an argument to an `extern`.
+            TExprKind::FnPointer { name } => {
+                let dst = self.temp(expr.ty.clone());
+                self.emit(Instruction::FnAddr {
+                    dst,
+                    symbol: crate::lowering::function_symbol(name, false),
+                });
+                Some(Value {
+                    local: dst,
+                    ty: expr.ty.clone(),
+                    owned_temporary: false,
+                })
+            }
             TExprKind::FnRef { name, .. } => {
                 // `type_args` is empty here: `specialize_expr` has already
                 // folded a generic instance into the name.

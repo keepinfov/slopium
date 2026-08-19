@@ -1,0 +1,6 @@
+extern-narrow-out-parameter.slp:1:28: error[SL0200]: `&mut i32` cannot cross the C boundary as the parameter `out`
+  |
+ 1 | (extern "c_count" (c-count (out (&mut i32))) -> unit)
+  |                            ^^^^^^^^^^^^^^^^
+  = help: an `extern` parameter is an integer type, `f64`, `bool`, `(Ptr T)`, `(& String)`, `(& (Slice T))`, `(&mut (List T))`, `(&mut (Array T N))`, a `(&mut ...)` of a word-width scalar, or a `(Fn ...)` over scalars
+  = note: an out-parameter's slot is a whole machine word, so C is handed `int64_t *`, `uint64_t *`, `double *` or `T **` and nothing narrower

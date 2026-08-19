@@ -66,7 +66,9 @@ command-line protocol is internal and versioned.
    of the expression it came from, and every block is terminated by
    construction.
 8. The release profile runs an optimization pipeline to a fixpoint: bounded
-   inlining, cross-block constant propagation, control-flow simplification, and
+   inlining, cross-block constant propagation — which stops tracking a local
+   the moment its address is taken, because a C `extern` with an out-parameter
+   writes through that address (`D-124`) — control-flow simplification, and
    dead code elimination. Two behaviours are preserved by construction —
    arithmetic that would trap is never folded away or removed, and drops are
    never deleted or moved across a branch. Inlining does not cross a module
