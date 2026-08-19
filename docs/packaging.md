@@ -5,6 +5,9 @@ where they are kept. This document is the specification: an implementation that
 disagrees with it is wrong, and two implementations that agree with it produce
 identical archives.
 
+Every `D-nnn` cited below is an entry in [`decisions.md`](decisions.md), the
+project's decision log.
+
 ## The archive
 
 A package archive is a **ustar** tar file with every source of variation removed
