@@ -1,0 +1,65 @@
+name: Bug report
+description: Something the toolchain does that it should not
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A report becomes a fixture when it carries a program that reproduces it.
+        Everything asked for below is what turning it into one needs.
+
+  - type: input
+    id: version
+    attributes:
+      label: Toolchain version
+      description: The output of `slopium --version`, or the commit you built.
+      placeholder: slopium 0.9.2
+    validations:
+      required: true
+
+  - type: dropdown
+    id: target
+    attributes:
+      label: Target
+      options:
+        - x86_64-unknown-linux-gnu
+        - aarch64-unknown-linux-gnu
+        - x86_64-unknown-none (freestanding)
+        - not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: profile
+    attributes:
+      label: Profile
+      options: [dev, release, both]
+    validations:
+      required: true
+
+  - type: textarea
+    id: program
+    attributes:
+      label: A program that reproduces it
+      description: The smallest `.slp` that still shows the problem.
+      render: lisp
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What was expected, and what happened
+      description: >
+        Include the command you ran and the output verbatim, diagnostic codes
+        included.
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: >
+        Whether it reproduces on the other backend or the other profile is the
+        single most useful extra fact.

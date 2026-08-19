@@ -51,13 +51,16 @@ Outside the workspace:
   runtime;
 - `editors/nvim` — the shipped Neovim plugin. This is project code, not the
   user's editor configuration;
-- `scripts/` — the check suite; `scripts/verify.sh` runs all of it;
+- `scripts/` — the check suite; `scripts/verify.sh` runs all of it, and
+  `scripts/release-check.sh` decides the version invariants of §7;
 - `tests/projects` — end-to-end fixtures; `tests/registry` and `tests/consumer`
   — a published registry and its consumer, generated and committed (see
   `tests/README.md`);
 - `docs/` — `architecture.md`, `language.md`, `diagnostics.md`, `packaging.md`,
   `security.md`. English;
 - `README.md` — the user-facing guide. Russian, deliberately;
+- `CHANGELOG.md` — what each release changed, in the form §7 keeps it;
+- `CONTRIBUTING.md` — the short path from a clone to a reviewable pull request;
 - `CLAUDE.md` — a symlink to this file, so a tool that looks only for that name
   still reads the contract.
 
@@ -171,8 +174,9 @@ While you work:
   `SLOPIUM_UPDATE_FIXTURES=1 scripts/publish-check.sh` writes into
   `tests/registry` and `tests/consumer` and must never run while another
   regeneration or another agent's checks are in flight.
-- If `main` moved while you worked, stop and ask. Do not rebase, merge, or
-  transplant your work onto it on your own.
+- If `main` moved while you worked, merge it into your branch. Do not rebase a
+  branch you have already pushed, and do not transplant somebody else's commits
+  onto it.
 
 When several agents work in parallel, give each one its own `git worktree` and
 its own branch, and assign file ownership up front. Two writers in one worktree
@@ -180,25 +184,48 @@ is not a workflow. Coordinate through `.notes/messages/` when notes are present;
 otherwise say plainly in your report which files you claimed and which you left
 alone, so the next worker can read it.
 
-## 5. Task flow
+## 5. How a change lands
 
-Work directly in the working tree for a single focused change. For anything that
-touches three or more of {compiler, manager, manifest layer, runtime, standard
-library, editor plugin}, or that combines a format change with a behavior
-change, present a plan first: goals, the order of the work, and what "done"
-means. Use a local branch when the work will take several attempts; delete it
-after landing.
+Every change reaches `main` through a pull request. Nothing is pushed to `main`
+directly, nothing is force-pushed, and no published history is rewritten.
 
-Whatever the route, one unit of work lands as **exactly one commit on `main`**.
-WIP and fixup commits are fine while working and must not survive. If `main`
-moved underneath you, stop and ask rather than rebasing or transplanting on your
-own.
+**Start from an issue** for anything larger than a typo — a bug report or a
+proposal, on the tracker, before the code exists. The issue is where the shape
+of a change is argued and the pull request is where the change is read; keeping
+them apart is what stops a review from re-deciding the design. A pull request
+that closes one says `Fixes #N` in its body.
+
+**Cut a branch from current `main`**, named `type/short-kebab`, `type` being one
+of the commit types in §6. Lowercase ASCII, digits and hyphens, at most 48
+characters. For anything that touches three or more of {compiler, manager,
+manifest layer, runtime, standard library, editor plugin}, or that combines a
+format change with a behavior change, present a plan first: goals, the order of
+the work, and what "done" means.
+
+WIP and fixup commits are fine while the branch is yours alone, and must not
+survive it. A pull request lands **one commit, or a few that each stand on
+their own**; anything else is squashed before it is marked ready.
+
+**A pull request merges as a merge commit** — never a squash, never a rebase.
+The merge commit's subject is the pull request's title, which is why the title
+obeys §6 like any other subject, and its body is empty, because the prose
+belongs to the commit underneath it and a review checklist is not history. The
+result reads with `git log --first-parent`: one line per pull request, and the
+detail one level down.
+
+Open it as a draft while it settles and mark it ready when §9 is green locally.
+The description says what changed, why, how it was verified, and what could not
+be verified here. It is written for a reviewer and it obeys §6's rule about
+addressing no one, because a description outlives the review that prompted it.
+
+Merging needs green CI and §11. The branch is deleted afterwards. If `main`
+moved while you worked, merge it into your branch rather than rebasing commits
+that are already pushed.
 
 ## 6. Commit contract
 
 This is the part a contributor cannot guess from the code, so it is spelled out
-completely. Read `git log` for calibration; the last twenty commits are all in
-this form.
+completely. Read `git log --first-parent` for calibration.
 
 ### Subject
 
@@ -223,8 +250,10 @@ type(scope): imperative lowercase description
   fix(slopium): resolve a shared dependency under every namespace
   ```
 
-- Never `feat(slopium): update sema.rs`, never `various fixes`, never a version
-  number in the subject.
+- Never `feat(slopium): update sema.rs`, never `various fixes`, and never a
+  version number — `chore(release): vX.Y.Z` in §7 is the single exception.
+- A pull request's title is a subject in this form, because the merge commit
+  takes it verbatim, together with the ` (#N)` the forge appends.
 
 ### Body
 
@@ -241,21 +270,35 @@ type(scope): imperative lowercase description
   bug, a hole nothing had ever exercised, a consequence that fell out of the
   design. This is the paragraph that makes the history worth reading; write it
   when it is honest, omit it when there is nothing to report.
-- No trailers. `Fixes #...` or `Refs #...` only for an issue the user gave you.
-  `BREAKING CHANGE:` requires approval before the work starts, together with a
-  `!` in the subject.
+- **A message addresses nobody.** No "you", no "as discussed", no "as
+  requested", no "I decided", no crediting or thanking a person, no answering a
+  question. It is written about the software, for a stranger reading `git log`
+  in five years who was in no conversation and cannot tell whose idea anything
+  was. Where the reason for a change came out of a discussion, state the reason
+  and never its source.
+- **Point only at what a clone contains.** A path into `.notes/`, a planning
+  file, a chat log: the reader can open none of them, so the substance is
+  written out instead. A decision identifier such as `D-106` may be cited as a
+  label, and the sentence around it has to make sense without following it.
+- The only trailers are `Fixes #N` and `Refs #N`, for an issue that exists, and
+  `BREAKING CHANGE:` alongside a `!` in the subject, agreed before the work
+  starts. No `Signed-off-by`, no `Co-authored-by`, and no AI or agent
+  attribution — not once, not even when a default tells you to.
+
+A merge commit is the exception to all of the above: its subject is the pull
+request's title and its body is empty, so there is nothing there to write.
 
 If the explanation does not fit in two paragraphs, it is not a longer commit
 message. It is a `docs/` change when a user of the language needs it, and a
-`.notes/DECISIONS.md` or handoff entry when it is project reasoning.
+`.notes/` entry when it is project reasoning.
 
 ### Checked, not merely stated
 
 `scripts/commit-check.sh` decides the half of this contract a machine can
 decide — the subject's shape, mood and width, the blank second line, a prose
-body wrapped at 80 in at most two paragraphs, no trailer of any kind, and the
-version rule of §7. What it cannot decide is whether the paragraphs are worth
-reading; that stays yours.
+body wrapped at 80 in at most two paragraphs, the trailers, the forms of
+address, and the version rule of §7. What it cannot decide is whether the
+paragraphs are worth reading; that stays yours.
 
 ```sh
 scripts/install-hooks.sh                 # once per clone: the commit-msg hook
@@ -263,26 +306,51 @@ scripts/commit-check.sh                  # origin/main..HEAD
 scripts/commit-check.sh --message .git/COMMIT_EDITMSG
 ```
 
-CI runs it over the commits a push or a pull request adds. History before v0.4
-predates the contract and does not satisfy it, which is why the check is given a
-range rather than let loose on the whole log.
+CI runs it over the commits a pull request adds. History before v0.4 predates
+the contract and does not satisfy it, which is why the check is given a range
+rather than let loose on the whole log.
 
-## 7. Version and tag
+## 7. Versioning and releases
 
-Every `feat` commit that lands is a release:
+The version in `Cargo.toml` is a property of the last release rather than of the
+last commit, and the manifest is the only place it is written down: `flake.nix`
+reads it from there, and so does everything that repeats it.
 
-- bump `workspace.package.version` in `Cargo.toml` and let `Cargo.lock` follow,
-  in the same commit as the work;
-- pre-1.0 semantics: minor for a language or toolchain capability, patch for a
-  behavior fix inside an existing capability;
-- the tag is **lightweight**, named `vX.Y.Z`, placed on that commit.
+**No ordinary commit touches `workspace.package.version`.** A `feat` used to be
+a release here, bumping the version in its own commit and taking a tag. That
+cannot survive more than one branch at a time: two pull requests would both
+claim the next number, whichever merged second would be claiming a version that
+already existed, and both would have regenerated
+`tests/consumer/Slopium.lock`, which carries the version and the bundled
+library's checksums, into a conflict. What a change owes instead is a line under
+`[Unreleased]` in `CHANGELOG.md`, whenever somebody using the language or the
+toolchain would notice it.
 
-A `docs`, `ci`, `chore`, or standalone `fix` commit does not bump the version
-and is not tagged.
+Pre-1.0 semantics, decided at the release out of what the changelog collected:
+minor for a language or toolchain capability, patch for a behaviour fix inside
+an existing capability.
 
-Creating the tag is a release action: propose the version and the rationale and
-wait for approval. Pushing the commit or the tag is a remote mutation — confirm
-the remote and the refspec first.
+A release is its own pull request, and it moves more than the manifest:
+
+1. cut `release/vX.Y.Z` from current `main`;
+2. set `workspace.package.version` and let `Cargo.lock` follow;
+3. regenerate the committed registry and consumer with
+   `SLOPIUM_UPDATE_FIXTURES=1 scripts/publish-check.sh`, because the bundled
+   library's digest moves with the version;
+4. rename `[Unreleased]` to `[X.Y.Z] - <date>` and open an empty one above it;
+5. run `scripts/release-check.sh --check-release vX.Y.Z`, then §9 in full;
+6. commit as `chore(release): vX.Y.Z` and merge the pull request;
+7. tag the merge commit `vX.Y.Z`, annotated, and push the tag.
+
+Pushing the tag is what publishes. `.github/workflows/release.yml` re-checks
+that the tag, the manifest and the changelog agree, runs the suite, builds the
+toolchain, and leaves a **draft** release with the artifacts and their checksums
+attached. A person presses publish, because a release is the one thing in this
+repository that another commit cannot undo.
+
+Proposing a release is yours; performing one is not. Do not set a version, cut a
+release branch, or create a tag without being asked to. Tags up to `v0.9.2` are
+lightweight; every tag from now on is annotated.
 
 ## 8. What must change together
 
@@ -302,6 +370,8 @@ reason a contributor without notes can still land a correct commit.
 | Anything trust-related — signing, verification, offline behavior | `docs/security.md` |
 | A CLI flag or subcommand | the clap definition, generated completions, and `README.md` |
 | Anything a user of the language sees | `README.md` (Russian) |
+| Anything a user of the language or the toolchain would notice | a line under `[Unreleased]` in `CHANGELOG.md` |
+| The commit contract, the branch and pull-request flow, or the release steps | `scripts/commit-check.sh`, `scripts/release-check.sh`, `CONTRIBUTING.md`, the templates under `.github/` |
 
 Regenerate the committed registry and consumer with:
 
@@ -329,7 +399,7 @@ It runs `cargo fmt --all -- --check`, `cargo test --workspace`,
 
 Rules:
 
-- A failing required check blocks the commit. If the failure is demonstrably
+- A failing required check blocks the merge. If the failure is demonstrably
   pre-existing, show before-and-after evidence and ask.
 - Without valgrind, gdb, qemu, or the AArch64 toolchain, thirteen places in the
   suite print a line and pass. `SLOPIUM_STRICT=1 scripts/verify.sh` turns every
@@ -341,8 +411,9 @@ Rules:
   is enough.
 - CI runs the whole of `scripts/verify.sh` inside `nix develop` with
   `SLOPIUM_STRICT=1`, so nothing is skipped there, plus faster fmt/test/clippy
-  and `project-tests.sh` jobs for early signal. Passing locally is still the
-  standard; CI is the backstop.
+  and `project-tests.sh` jobs for early signal, the commit contract over the
+  commits the pull request adds, and `scripts/release-check.sh --check`.
+  Passing locally is still the standard; CI is the backstop.
 - The dev shell is where the suite is whole: `nix develop` carries valgrind,
   gdb, qemu, and a cross toolchain named `aarch64-unknown-linux-gnu-*`, which
   is the prefix `core-check.sh` and `object-check.sh` look for.
@@ -363,18 +434,21 @@ Rules:
 - Do not commit build output: `target/`, `*.o`, `*.s`, `*.out`, `nvim.log`, and
   lockfiles under `tests/projects` and `examples` are ignored for a reason.
 
-## 11. Before you commit
+## 11. Definition of done
 
-- [ ] `scripts/verify.sh` is green, or the exact subset you ran and why is in
-      your report.
+- [ ] `scripts/verify.sh` is green, or the exact subset that ran, and why, is in
+      the pull request.
+- [ ] The companions in §8 are updated.
+- [ ] `CHANGELOG.md` has a line under `[Unreleased]`, unless nobody using the
+      language or the toolchain would notice the change.
 - [ ] `git status` and `git diff --cached --name-only` reviewed in their own
-      right — every path is one you touched, and none is `.notes`, build
+      right — every path is one you touched, and none is `.notes/`, build
       output, or a stray fixture.
 - [ ] The commit names its paths: `git commit -F <message-file> -- <paths>`.
-- [ ] The companions in §8 are updated.
-- [ ] The version is bumped if this is a `feat`, and untouched otherwise.
-- [ ] Subject: conventional, imperative, lowercase, ≤ 95 characters, about
+- [ ] The version is untouched — only the release pull request of §7 moves it.
+- [ ] Subject: conventional, imperative, lowercase, at most 95 characters, about
       behavior rather than files.
-- [ ] Body: one or two paragraphs, wrapped at 80, no lists, no trailers, no AI
-      attribution — `scripts/commit-check.sh` agrees.
-- [ ] Nothing pushed and nothing tagged unless the user asked for it.
+- [ ] Body: one or two paragraphs, wrapped at 80, no lists, no trailer beyond
+      `Fixes #N`, addressing nobody, pointing at nothing outside the clone —
+      `scripts/commit-check.sh` agrees.
+- [ ] Nothing pushed, merged or tagged that was not asked for.
