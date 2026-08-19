@@ -104,6 +104,14 @@ check_subject() {
 check_message() {
   local -a lines=()
   mapfile -t lines <<<"$1"
+
+  # Git writes this itself when a branch is brought up to date with another,
+  # and the `commit-msg` hook sees it before there is a commit to ask how many
+  # parents it has. It is housekeeping either way, and `check_commit` skips the
+  # same message once the merge exists.
+  if [[ ${lines[0]-} =~ ^Merge\ (branch|remote-tracking\ branch|commit|tag)\  ]]; then
+    return 0
+  fi
   while [ "${#lines[@]}" -gt 0 ] && [ -z "${lines[-1]}" ]; do
     unset 'lines[-1]'
   done
