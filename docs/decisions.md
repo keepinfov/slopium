@@ -137,6 +137,7 @@ of what was believed at the time is the part worth keeping.
 - [D-122 — an annotation is a list before the name, and a warning belongs to a compilation](#d-122--an-annotation-is-a-list-before-the-name-and-a-warning-belongs-to-a-compilation)
 - [D-123 — the version belongs to the release, and the decision log is public](#d-123--the-version-belongs-to-the-release-and-the-decision-log-is-public)
 - [D-124 — the C boundary opens by three rows, and none of them is a slice](#d-124--the-c-boundary-opens-by-three-rows-and-none-of-them-is-a-slice)
+- [D-125 — `format` is reserved at the freeze, and nothing is built](#d-125--format-is-reserved-at-the-freeze-and-nothing-is-built)
 
 ## D-001 — a native compiler, without LLVM
 
@@ -2299,3 +2300,49 @@ unreachable rather than absent, and it was reachable the moment C could write.
 The cross-backend suite caught it on the first release build that had one, which
 is `D-026` doing exactly what it is for: the dev build agreed with the release
 build about everything else, and the two disagreed here.
+
+## D-125 — `format` is reserved at the freeze, and nothing is built
+
+Status: approved · 2026-08-19 · implementation deferred to the freeze
+
+The first report from somebody writing a real program rather than a fixture
+named string building as the second-heaviest friction in the language: `concat`
+takes exactly two arguments, so a line of output is a stack of nested calls and
+a column of intermediate bindings. The answer taken for it is a `StringBuilder`
+over a `(List u8)`, which is where the cost actually is — a template is sugar
+over a buffer, and building the sugar first would build it twice.
+
+**But not reserving the word would decide more than that.** Three rules meet
+here and leave no third way. A new form cannot be added after the freeze, which
+is `D-122`'s rule and the reason every declaration form already carries an
+annotation slot. A variadic library function cannot exist: there are no variadic
+functions and, without traits (`D-088`), no way to write one argument list that
+takes an `i64` here and a `String` there. And a pattern macro cannot do it
+either, because `D-109` admits only pattern macros over `SExpr` and formatting
+dispatches on the *static type* of each argument, which a pattern has no way to
+ask about. So the choice at the freeze is between reserving the word and
+deciding that interpolation never arrives — and the second is a decision that
+should be taken deliberately if it is taken at all.
+
+The word is therefore reserved, and the shape is written down with it, because a
+reservation that does not say what it is holding open is not one:
+
+```lisp
+(format "task #{}: {}" id title)
+```
+
+The template is a **literal**, so the holes are counted and the expansion
+decided at compile time; `{}` is a hole and `{{` is a brace; each argument is
+converted by its static type through the library's own conversions and appended
+to a builder; the result is an owned `String`. A template whose hole count
+disagrees with its argument count is a diagnostic rather than a run-time
+surprise, and an argument whose type has no conversion is refused by name the
+way the C boundary refuses a type it cannot spell (`D-065`).
+
+Reserving costs one identifier. `format` appears nowhere in the bundled library,
+the fixtures or the examples, so nothing in the tree has to move, and after the
+freeze a declaration or a binding may not take the name — which is what makes
+adding the form later a change nobody's program can notice.
+
+`StringBuilder` needs no reservation: it is a library type and a library
+function, and both are additive at any time.
