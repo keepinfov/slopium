@@ -5,17 +5,18 @@ name: release
 # asset list and presses the button, because a release is the one thing in this
 # repository that another commit cannot undo.
 #
-# `workflow_dispatch` rehearses the whole of it against an existing tag and
-# publishes nothing, which is how a change to this file is tested.
+# `workflow_dispatch` rehearses it against the ref it is started from and
+# publishes nothing, which is how a change to this file is tested. It cannot
+# rehearse against an existing tag: this job checks out the tree being released,
+# and every tag up to `v0.9.2` predates `scripts/release-check.sh` and
+# `CHANGELOG.md`, so the first attempt failed with `No such file or directory`.
+# Verifying a release with the code being released is the behaviour worth
+# keeping, so the rehearsal moved rather than the checkout.
 
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Tag to rehearse against. Builds everything, publishes nothing.'
-        required: true
 
 permissions:
   contents: read
@@ -36,24 +37,35 @@ jobs:
       prerelease: ${{ steps.v.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
 
       - id: v
         name: the tag, the manifest and the changelog agree
         # A ${{ }} expression is pasted in before the shell parses the script,
         # so a tag name would be shell source rather than data. It goes through
         # the environment instead, here and below.
+        #
+        # A rehearsal asks for `--check` rather than `--check-release`, because
+        # the release-only half is a statement about a release commit — the tag
+        # names this version, its changelog section is dated, `[Unreleased]` has
+        # been emptied into it — and none of that is true of a branch that is
+        # still collecting entries. What the rehearsal is for is everything
+        # below this job, which no pull request runs.
         env:
-          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          EVENT: ${{ github.event_name }}
+          TAG: ${{ github.ref_name }}
         run: |
           set -eu
-          scripts/release-check.sh --check-release "$TAG"
+          if [ "$EVENT" = push ]; then
+            scripts/release-check.sh --check-release "$TAG"
+            case "$TAG" in
+              *-*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;;
+              *) echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
+            esac
+          else
+            scripts/release-check.sh --check
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
           echo "version=$(scripts/release-check.sh)" >> "$GITHUB_OUTPUT"
-          case "$TAG" in
-            *-*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;;
-            *) echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
-          esac
 
       - name: the lockfile matches the manifests
         run: cargo metadata --locked --format-version 1 > /dev/null
@@ -67,8 +79,6 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
       - uses: cachix/install-nix-action@v31
       - env:
           SLOPIUM_STRICT: "1"
@@ -81,8 +91,6 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
 
       - run: cargo build --release --workspace --locked
@@ -146,8 +154,6 @@ jobs:
       attestations: write
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.ref }}
 
       - uses: actions/download-artifact@v4
         with:
