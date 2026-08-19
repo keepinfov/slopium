@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security problem
+    url: https://github.com/keepinfov/slopium/blob/main/docs/security.md
+    about: Trust, signing and verification are documented there, together with how to report a vulnerability privately.
+  - name: How the compiler is put together
+    url: https://github.com/keepinfov/slopium/blob/main/docs/architecture.md
+    about: Read this before reporting that a stage does something surprising.
+  - name: The language reference
+    url: https://github.com/keepinfov/slopium/blob/main/docs/language.md
+    about: What the language is defined to do, form by form.
