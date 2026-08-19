@@ -40,7 +40,8 @@ which parts you could not run rather than leaving the question open.
   fixture.
 - New to the codebase? `docs/architecture.md` is the compiler end to end,
   `docs/language.md` is the language, and `tests/README.md` says how the
-  fixtures work.
+  fixtures work. `docs/decisions.md` is why any of it is the way it is — read
+  the entry before reopening a question it already answers.
 
 ## Make the change
 

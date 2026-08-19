@@ -12,7 +12,8 @@ When sources disagree, follow this order:
 1. the user's latest direct instruction;
 2. this file;
 3. `.notes/` when it is present, in its own documented order (§2);
-4. tracked documentation — `docs/`, `tests/README.md`, `editors/nvim/README.md`,
+4. tracked documentation — `docs/decisions.md` for why something is the way it
+   is, then the rest of `docs/`, `tests/README.md`, `editors/nvim/README.md`,
    `README.md`;
 5. the code itself.
 
@@ -56,8 +57,8 @@ Outside the workspace:
 - `tests/projects` — end-to-end fixtures; `tests/registry` and `tests/consumer`
   — a published registry and its consumer, generated and committed (see
   `tests/README.md`);
-- `docs/` — `architecture.md`, `language.md`, `diagnostics.md`, `packaging.md`,
-  `security.md`. English;
+- `docs/` — `decisions.md`, `architecture.md`, `language.md`, `diagnostics.md`,
+  `packaging.md`, `security.md`. English, apart from `security.md`;
 - `README.md` — the user-facing guide. Russian, deliberately;
 - `CHANGELOG.md` — what each release changed, in the form §7 keeps it;
 - `CONTRIBUTING.md` — the short path from a clone to a reviewable pull request;
@@ -67,34 +68,36 @@ Outside the workspace:
 Everything else — code, comments, diagnostics, documentation under `docs/`,
 commit messages — is written in English.
 
-## 2. Planning notes
+## 2. Decisions and planning notes
 
-Project planning lives in `.notes/`, which is gitignored and excluded from the
-Nix source filter and from release archives.
+**Decisions are tracked.** `docs/decisions.md` holds every design decision this
+project has taken, numbered `D-001` upwards, each with its status, its date and
+the reasoning that produced it. It is where a `D-042` in a commit body or a
+document resolves, and it is read before a design question is reopened: a
+decision recorded as `deferred` or `rejected` is not implemented without a new
+entry superseding it. A decision taken while working is added there in the same
+pull request as the work, in the form the file already uses — what was decided,
+why, and what follows — addressed to nobody and pointing at nothing outside the
+clone.
 
-If `.notes/` is present, before changing anything:
+**Planning is not.** `.notes/` is gitignored and excluded from the Nix source
+filter and from release archives. It holds `STATUS.md`, `ROADMAP.md`, the plans
+under `plans/`, the dated handoffs under `handoffs/`, coordination under
+`messages/`, and drafts of decisions not yet taken.
 
-1. read `.notes/STATUS.md`, `.notes/DECISIONS.md`, and `.notes/ROADMAP.md`;
-2. read the active file under `.notes/plans/` for the task;
-3. do not implement a design recorded as `proposed`, `deferred`, or `rejected`.
+If `.notes/` is present, read `STATUS.md`, `ROADMAP.md` and the active plan
+before changing anything, update `STATUS.md` when the active state changes, mark
+acceptance criteria in the active plan, and add a dated file under `handoffs/`
+after substantial work rather than rewriting an old one.
 
-While working there: update `STATUS.md` when the active state changes, mark
-acceptance criteria in the active plan, record accepted or rejected design
-choices in `DECISIONS.md`, add a dated file under `handoffs/` after substantial
-work rather than rewriting an old one, and put directed coordination under
-`messages/`.
-
-If `.notes/` is absent — a fresh public clone, CI, a worktree — work from the
-tracked documentation and the user's instruction. Do not recreate private
-project history from guesses, do not invent a decision log, and do not implement
-a design you cannot find authority for in tracked docs or the user's words. Ask
-instead.
+If `.notes/` is absent — a fresh clone, CI, a worktree — work from the tracked
+documentation and the instruction you were given. Do not recreate private
+project history from guesses, and do not implement a design you cannot find
+authority for in `docs/decisions.md`, the rest of the tracked docs, or what you
+were asked for. Ask instead.
 
 Never `git add -f .notes`, never copy note contents into tracked files, and
-never store credentials, flags, tokens, or private registry URLs there. A commit
-body may *cite* a decision identifier such as `D-106`, because that is how this
-history refers to its own reasoning, but the message must stand on its own for a
-reader who has no notes.
+never store credentials, flags, tokens, or private registry URLs there.
 
 ## 3. Non-negotiable constraints
 
@@ -279,8 +282,9 @@ type(scope): imperative lowercase description
   and never its source.
 - **Point only at what a clone contains.** A path into `.notes/`, a planning
   file, a chat log: the reader can open none of them, so the substance is
-  written out instead. A decision identifier such as `D-106` may be cited as a
-  label, and the sentence around it has to make sense without following it.
+  written out instead. A decision identifier such as `D-106` may be cited,
+  because `docs/decisions.md` is in the clone, and the sentence around it still
+  has to make sense without following it.
 - The only trailers are `Fixes #N` and `Refs #N`, for an issue that exists, and
   `BREAKING CHANGE:` alongside a `!` in the subject, agreed before the work
   starts. No `Signed-off-by`, no `Co-authored-by`, and no AI or agent
@@ -369,6 +373,7 @@ reason a contributor without notes can still land a correct commit.
 | The standard library | `scripts/core-check.sh` and the `std` fixtures under `tests/projects` |
 | Manifests, resolution, lockfiles, registries, archives, signatures | `docs/packaging.md`, the matching `scripts/{package,registry,publish,git}-check.sh`, and regenerated fixtures |
 | Anything trust-related — signing, verification, offline behavior | `docs/security.md` |
+| A design question you had to decide to finish the work | a new entry in `docs/decisions.md` |
 | A CLI flag or subcommand | the clap definition, generated completions, and `README.md` |
 | Anything a user of the language sees | `README.md` (Russian) |
 | Anything a user of the language or the toolchain would notice | a line under `[Unreleased]` in `CHANGELOG.md` |

@@ -3,6 +3,9 @@
 Compiler diagnostics are emitted as human-readable text by default and as one
 JSON object per stderr line with `--diagnostic-format json`.
 
+Every `D-nnn` cited below is an entry in [`decisions.md`](decisions.md), the
+project's decision log.
+
 Every diagnostic contains the compatibility fields `severity`, `message`,
 `file`, `span`, and `help`, plus a stable `code`. Optional `labels`, `notes`,
 and `suggestions` enrich newer consumers without breaking clients that ignore

@@ -13,6 +13,11 @@ rather than everything it touched.
 
 ## [Unreleased]
 
+### Added
+- `docs/decisions.md`: the project's decision log, `D-001` onwards, so that the
+  identifiers cited across the documentation and the commit history resolve to
+  something a clone contains.
+
 ## [0.9.2] - 2026-08-19
 
 ### Added

@@ -2,6 +2,9 @@
 
 Slopium deliberately separates the project manager from the compiler.
 
+Every `D-nnn` cited below is an entry in [`decisions.md`](decisions.md), the
+project's decision log.
+
 ```text
 Slopium.toml → package DAG → slopic → module objects → cc → ELF
 ```

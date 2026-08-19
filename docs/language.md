@@ -1,5 +1,8 @@
 # Slopium language v0.2
 
+Every `D-nnn` cited below is an entry in [`decisions.md`](decisions.md), the
+project's decision log.
+
 Slopium source consists of S-expressions. `;` starts a line comment. Integer,
 floating-point, boolean (`true`, `false`), and escaped string literals are
 supported.
