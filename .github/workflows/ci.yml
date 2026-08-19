@@ -1,10 +1,32 @@
 name: ci
 
+# `main` is only ever updated through a pull request, so a branch is checked on
+# the pull request and `main` is checked again after the merge. Pushing a branch
+# without one runs nothing, which is deliberate: a branch nobody has proposed is
+# not asking a question.
+
 on:
   push:
+    branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  # The version invariants of AGENTS.md §7: the manifest, the lockfile, the
+  # flake and the committed consumer's lock all say the same number. Seconds,
+  # and it is the check whose failure is only ever discovered at a release.
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/release-check.sh --check
+
   cargo:
     runs-on: ubuntu-latest
     steps:
@@ -45,6 +67,8 @@ jobs:
 
   # The commit contract of AGENTS.md, over the commits this event adds and no
   # others: the history before v0.4 predates the contract and would fail it.
+  # Merges are included — the one that lands a pull request carries its title,
+  # which is a subject like any other.
   commits:
     runs-on: ubuntu-latest
     steps:

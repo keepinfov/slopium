@@ -237,8 +237,9 @@ type(scope): imperative lowercase description
   `chore`, `revert`.
 - Scopes in use: `slopium` (the language and the toolchain — the default for
   compiler, manager, standard library, and runtime work), `slopic` for work that
-  is the compiler's alone, `manifest`, and `docs`. Ask before inventing a new
-  one, and add it to `scripts/commit-check.sh` in the same commit.
+  is the compiler's alone, `manifest`, `docs`, and `release` for the one commit
+  §7 describes. Ask before inventing a new one, and add it to
+  `scripts/commit-check.sh` in the same commit.
 - English, imperative, lowercase after the colon, no trailing period.
 - Aim for 72 characters, hard limit 95.
 - Say what the language or the toolchain now does, not which files moved. The
@@ -391,7 +392,8 @@ The gate for a code change is the full suite, from the repository root:
 scripts/verify.sh
 ```
 
-It runs `cargo fmt --all -- --check`, `cargo test --workspace`,
+It runs `release-check.sh --check`, `cargo fmt --all -- --check`,
+`cargo test --workspace`,
 `cargo clippy --workspace --all-targets -- -D warnings`, then
 `project-tests.sh`, `package-check.sh`, `git-check.sh`, `registry-check.sh`,
 `publish-check.sh`, `runtime-check.sh`, `core-check.sh`, `debug-check.sh`,
