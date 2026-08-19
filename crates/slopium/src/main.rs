@@ -1,6 +1,7 @@
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
 use serde::Deserialize;
+use slopic_core::ast::{Annotation, AnnotationArg, Expr, ExprKind};
 use slopic_core::codegen::{Environment, DEFAULT_TARGET, TARGETS};
 use slopic_core::syntax::{format_source, FormatOptions};
 use slopium_manifest::archive::{package_archive, ARCHIVE_EXTENSION};
@@ -1105,6 +1106,7 @@ fn module_interface(file: &str, source: &str) -> Result<(String, bool), String> 
     for function in &program.functions {
         interface.push_str("fn|");
         interface.push_str(&function.name);
+        interface.push_str(&interface_annotations(&function.annotations));
         interface.push('|');
         interface.push_str(&function.type_params.join(","));
         for parameter in &function.params {
@@ -1123,6 +1125,7 @@ fn module_interface(file: &str, source: &str) -> Result<(String, bool), String> 
     for declaration in &program.externs {
         interface.push_str("extern|");
         interface.push_str(&declaration.name);
+        interface.push_str(&interface_annotations(&declaration.annotations));
         interface.push('|');
         interface.push_str(&declaration.symbol);
         for parameter in &declaration.params {
@@ -1138,6 +1141,7 @@ fn module_interface(file: &str, source: &str) -> Result<(String, bool), String> 
     for structure in &program.structs {
         interface.push_str("struct|");
         interface.push_str(&structure.name);
+        interface.push_str(&interface_annotations(&structure.annotations));
         interface.push('|');
         interface.push_str(&structure.type_params.join(","));
         for field in &structure.fields {
@@ -1151,6 +1155,7 @@ fn module_interface(file: &str, source: &str) -> Result<(String, bool), String> 
     for enumeration in &program.enums {
         interface.push_str("enum|");
         interface.push_str(&enumeration.name);
+        interface.push_str(&interface_annotations(&enumeration.annotations));
         interface.push('|');
         interface.push_str(&enumeration.type_params.join(","));
         for variant in &enumeration.variants {
@@ -1162,6 +1167,22 @@ fn module_interface(file: &str, source: &str) -> Result<(String, bool), String> 
                 interface.push('=');
                 interface.push_str(&field.ty.to_string());
             }
+        }
+        interface.push('\n');
+    }
+    // A `const` is inlined wherever it is used (`D-121`), so its value is
+    // interface in the strongest sense there is: a dependent that does not
+    // rebuild keeps the old number compiled into it. Until this line the
+    // interface did not mention constants at all.
+    for constant in &program.consts {
+        interface.push_str("const|");
+        interface.push_str(&constant.name);
+        interface.push_str(&interface_annotations(&constant.annotations));
+        interface.push('|');
+        interface.push_str(&const_value(&constant.value));
+        if let Some(ty) = &constant.ty {
+            interface.push(':');
+            interface.push_str(&ty.to_string());
         }
         interface.push('\n');
     }
@@ -1183,6 +1204,55 @@ fn module_interface(file: &str, source: &str) -> Result<(String, bool), String> 
             .iter()
             .any(|item| !item.type_params.is_empty());
     Ok((interface, has_generics))
+}
+
+/// The annotations of a declaration that belong in its module's interface.
+///
+/// Which ones those are is `slopic_core::ast`'s table to say, not a second
+/// list here that could disagree with it: an annotation a *caller* can observe
+/// — `deprecated`, whose warning is raised at the call — has to rebuild what
+/// depends on the module, and one that only changes this module's own object —
+/// `inline` — must not.
+fn interface_annotations(annotations: &[Annotation]) -> String {
+    let mut rendered = String::new();
+    for annotation in annotations
+        .iter()
+        .filter(|annotation| annotation.is_interface())
+    {
+        rendered.push_str("|@");
+        rendered.push_str(&annotation.name);
+        for argument in &annotation.args {
+            rendered.push('=');
+            match argument {
+                AnnotationArg::Text(text) => rendered.push_str(text),
+                AnnotationArg::Name(name) => rendered.push_str(name),
+            }
+        }
+    }
+    rendered
+}
+
+/// A `const`'s literal, rendered for the interface it is part of.
+///
+/// A hexadecimal literal is not the same as the decimal one of equal magnitude
+/// — `D-112` makes it a bit pattern rather than a number — so the base is part
+/// of the value here.
+fn const_value(value: &Expr) -> String {
+    match &value.kind {
+        ExprKind::Unit => "unit".to_owned(),
+        ExprKind::Bool(value) => value.to_string(),
+        ExprKind::Int(literal) => format!(
+            "{}{}{}",
+            if literal.negative { "-" } else { "" },
+            literal.magnitude,
+            if literal.bits { "b" } else { "" }
+        ),
+        ExprKind::Float(value) => format!("{value:?}"),
+        ExprKind::String(bytes) => String::from_utf8_lossy(bytes).into_owned(),
+        // `ast` refuses a `const` that is not a literal, so reaching here means
+        // a diagnostic has already been reported about this declaration.
+        _ => String::new(),
+    }
 }
 
 fn encode_file_name(name: &str) -> String {

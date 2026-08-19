@@ -62,6 +62,9 @@ pub struct MirTest {
 pub struct MirFunction {
     pub name: String,
     pub emit: bool,
+    /// The `inline` annotation, carried to the optimizer and nowhere else
+    /// (`D-122`).
+    pub inline_hint: bool,
     pub params: Vec<LocalId>,
     pub return_type: Type,
     pub locals: Vec<MirLocal>,
@@ -427,7 +430,12 @@ pub fn lower(program: &TypedProgram) -> MirModule {
         layouts.extend(lowered.layouts);
     };
     for function in &program.functions {
-        collect(lower_function(function));
+        let mut lowered = lower_function(function);
+        // The hint belongs to the function somebody wrote, and to nothing a
+        // `lambda` inside it was lifted into: an annotation is written on a
+        // declaration, and a lifted body is not one.
+        lowered.function.inline_hint = function.inline;
+        collect(lowered);
     }
     for (index, test) in program.tests.iter().enumerate() {
         let (test, lowered) = lower_test(index, test);
@@ -590,6 +598,7 @@ fn lower_body(mut builder: Builder, body: &TExpr) -> Lowered {
 fn lower_test(index: usize, test: &TypedTest) -> (MirTest, Lowered) {
     let function = TypedFunction {
         name: format!("__slop_test_{index}"),
+        inline: false,
         type_params: Vec::new(),
         params: Vec::new(),
         return_type: Type::Bool,
@@ -774,6 +783,7 @@ impl Builder {
         MirFunction {
             name: self.name,
             emit: true,
+            inline_hint: false,
             params: self.params,
             return_type: self.return_type,
             locals: self.locals,

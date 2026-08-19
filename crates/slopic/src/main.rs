@@ -223,16 +223,30 @@ fn main() {
         runtimes: cli.runtimes,
         cc: cli.cc,
     };
-    if let Err(diagnostics) = compile(&request) {
-        for diagnostic in diagnostics {
-            let diagnostic_source = if diagnostic.file == input_name {
-                source.clone()
-            } else {
-                std::fs::read_to_string(&diagnostic.file).unwrap_or_default()
-            };
-            render(&diagnostic, &diagnostic_source, cli.diagnostic_format);
+    match compile(&request) {
+        // A warning is reported and the compilation still succeeded, which is
+        // the whole difference between the two halves here (`D-122`).
+        Ok(compiled) => report(
+            &compiled.warnings,
+            &input_name,
+            &source,
+            cli.diagnostic_format,
+        ),
+        Err(diagnostics) => {
+            report(&diagnostics, &input_name, &source, cli.diagnostic_format);
+            std::process::exit(1);
         }
-        std::process::exit(1);
+    }
+}
+
+fn report(diagnostics: &[Diagnostic], input_name: &str, source: &str, format: DiagnosticFormat) {
+    for diagnostic in diagnostics {
+        let diagnostic_source = if diagnostic.file == input_name {
+            source.to_owned()
+        } else {
+            std::fs::read_to_string(&diagnostic.file).unwrap_or_default()
+        };
+        render(diagnostic, &diagnostic_source, format);
     }
 }
 

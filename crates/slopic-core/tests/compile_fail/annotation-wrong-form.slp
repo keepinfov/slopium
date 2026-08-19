@@ -1,0 +1,7 @@
+; Every declaration carries the slot, so that `repr` and `interrupt` cost no
+; grammar when the target that wants them arrives (`D-110`). What decides
+; whether an annotation may sit there is the annotation, and `deprecated` warns
+; at a use the compiler resolves by name — a `fn`, an `extern` or a `const`.
+(struct (deprecated) Legacy ((value i64)))
+
+(fn main () -> i32 0)

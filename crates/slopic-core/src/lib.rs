@@ -271,13 +271,7 @@ pub fn compile_to_mir(
     source: &str,
     options: &CompileOptions,
 ) -> CompileResult<MirModule> {
-    let program = compile_to_hir(file, source, options)?;
-    let mut module = mir::lower(&program);
-    verify::check(file, &module, "lowering")?;
-    if options.optimize {
-        opt::optimize(file, &mut module)?;
-    }
-    Ok(module)
+    lower_and_optimize(file, &compile_to_hir(file, source, options)?, options, None)
 }
 
 pub fn compile_package_to_mir(
@@ -285,18 +279,66 @@ pub fn compile_package_to_mir(
     options: &CompileOptions,
 ) -> CompileResult<MirModule> {
     let program = package::compile_package_to_hir(input, options)?;
-    let mut module = mir::lower(&program);
-    verify::check(&input.name, &module, "lowering")?;
+    lower_and_optimize(&input.name, &program, options, Some(input))
+}
+
+/// Everything between a checked program and the MIR a backend is handed.
+///
+/// One function rather than two because the file and the package paths differ
+/// in exactly one step — the partition a codegen module asks for — and both of
+/// them are reached twice: once by the library's own entry points and once by
+/// the request path, which carries a compilation's warnings with it (`D-122`).
+fn lower_and_optimize(
+    name: &str,
+    program: &TypedProgram,
+    options: &CompileOptions,
+    input: Option<&package::PackageInput>,
+) -> CompileResult<MirModule> {
+    let mut module = mir::lower(program);
+    verify::check(name, &module, "lowering")?;
     // `partition_codegen` only flips `emit` flags, so it cannot invalidate any
     // verified invariant and is not worth a second pass — this runs once per
     // owner module per build.
-    if let Some(selected) = &options.codegen_module {
+    if let (Some(input), Some(selected)) = (input, &options.codegen_module) {
         partition_codegen(&mut module, input, selected);
     }
     if options.optimize {
-        opt::optimize(&input.name, &mut module)?;
+        opt::optimize(name, &mut module)?;
     }
     Ok(module)
+}
+
+/// What a backend is told about the program it is emitting.
+///
+/// `line_tables` is false for an object, because the object writer builds none
+/// (`D-028`) and a debug build never reaches it; the caller checks that first.
+fn codegen_options(
+    file: &str,
+    options: &CompileOptions,
+    input: Option<&package::PackageInput>,
+    line_tables: bool,
+) -> CodegenOptions {
+    // The root module emits the entrypoint, and only in an environment that
+    // has something to be entered from (`D-081`).
+    let emits_entrypoint = request_environment(options).emits_entrypoint()
+        && input.is_none_or(|input| {
+            options
+                .codegen_module
+                .as_ref()
+                .is_none_or(|module| module == &input.entry_module)
+        });
+    CodegenOptions {
+        target: options.target.clone(),
+        // A lone file's harness does not depend on the entrypoint: there is no
+        // module that could be the one to emit it.
+        test_harness: options.test_harness && input.is_none_or(|_| emits_entrypoint),
+        emit_entrypoint: emits_entrypoint,
+        debug: (options.debug && line_tables).then(|| match input {
+            Some(input) => package::source_map(input),
+            None => SourceMap::single(file),
+        }),
+        panic_abort: options.panic_abort,
+    }
 }
 
 pub fn compile_to_assembly(
@@ -305,17 +347,7 @@ pub fn compile_to_assembly(
     options: &CompileOptions,
 ) -> CompileResult<String> {
     let mir = compile_to_mir(file, source, options)?;
-    codegen::emit_assembly(
-        file,
-        &mir,
-        &CodegenOptions {
-            target: options.target.clone(),
-            test_harness: options.test_harness,
-            emit_entrypoint: request_environment(options).emits_entrypoint(),
-            debug: options.debug.then(|| SourceMap::single(file)),
-            panic_abort: options.panic_abort,
-        },
-    )
+    codegen::emit_assembly(file, &mir, &codegen_options(file, options, None, true))
 }
 
 pub fn compile_to_object(
@@ -324,17 +356,7 @@ pub fn compile_to_object(
     options: &CompileOptions,
 ) -> CompileResult<Vec<u8>> {
     let mir = compile_to_mir(file, source, options)?;
-    codegen::emit_object(
-        file,
-        &mir,
-        &CodegenOptions {
-            target: options.target.clone(),
-            test_harness: options.test_harness,
-            emit_entrypoint: request_environment(options).emits_entrypoint(),
-            debug: None,
-            panic_abort: options.panic_abort,
-        },
-    )
+    codegen::emit_object(file, &mir, &codegen_options(file, options, None, false))
 }
 
 pub fn compile_package_to_assembly(
@@ -342,23 +364,10 @@ pub fn compile_package_to_assembly(
     options: &CompileOptions,
 ) -> CompileResult<String> {
     let mir = compile_package_to_mir(input, options)?;
-    // The root module emits the entrypoint, and only in an environment that
-    // has something to be entered from (`D-081`).
-    let emits_entrypoint = request_environment(options).emits_entrypoint()
-        && options
-            .codegen_module
-            .as_ref()
-            .is_none_or(|module| module == &input.entry_module);
     codegen::emit_assembly(
         &input.name,
         &mir,
-        &CodegenOptions {
-            target: options.target.clone(),
-            test_harness: options.test_harness && emits_entrypoint,
-            emit_entrypoint: emits_entrypoint,
-            debug: options.debug.then(|| package::source_map(input)),
-            panic_abort: options.panic_abort,
-        },
+        &codegen_options(&input.name, options, Some(input), true),
     )
 }
 
@@ -367,25 +376,10 @@ pub fn compile_package_to_object(
     options: &CompileOptions,
 ) -> CompileResult<Vec<u8>> {
     let mir = compile_package_to_mir(input, options)?;
-    // The root module emits the entrypoint, and only in an environment that
-    // has something to be entered from (`D-081`).
-    let emits_entrypoint = request_environment(options).emits_entrypoint()
-        && options
-            .codegen_module
-            .as_ref()
-            .is_none_or(|module| module == &input.entry_module);
     codegen::emit_object(
         &input.name,
         &mir,
-        &CodegenOptions {
-            target: options.target.clone(),
-            test_harness: options.test_harness && emits_entrypoint,
-            emit_entrypoint: emits_entrypoint,
-            // The object writer builds no line tables (`D-028`), so a debug
-            // build never reaches it; the caller checks this first.
-            debug: None,
-            panic_abort: options.panic_abort,
-        },
+        &codegen_options(&input.name, options, Some(input), false),
     )
 }
 
@@ -456,7 +450,27 @@ fn partition_codegen(module: &mut MirModule, input: &package::PackageInput, sele
     }
 }
 
-pub fn compile(request: &CompileRequest) -> CompileResult<Option<PathBuf>> {
+/// What a compilation produced, and what it has to say about the program it
+/// compiled (`D-122`).
+///
+/// A warning is not an error, so it cannot travel in the `Err` half; and it
+/// belongs to the compilation rather than to the program, because which
+/// warnings a run reports depends on what it was asked to build.
+pub struct Compiled {
+    pub output: Option<PathBuf>,
+    pub warnings: Vec<Diagnostic>,
+}
+
+pub fn compile(request: &CompileRequest) -> CompileResult<Compiled> {
+    let mut warnings = Vec::new();
+    let output = compile_output(request, &mut warnings)?;
+    Ok(Compiled { output, warnings })
+}
+
+fn compile_output(
+    request: &CompileRequest,
+    warnings: &mut Vec<Diagnostic>,
+) -> CompileResult<Option<PathBuf>> {
     let file = request.input.display().to_string();
     let source = fs::read_to_string(&request.input).map_err(|error| {
         vec![Diagnostic::error(
@@ -469,23 +483,23 @@ pub fn compile(request: &CompileRequest) -> CompileResult<Option<PathBuf>> {
 
     match request.emit {
         EmitKind::Check => {
-            compile_request_to_hir(request, &file, &source)?;
+            compile_request_to_hir(request, &file, &source, warnings)?;
             Ok(None)
         }
         EmitKind::Hir => {
-            let hir = compile_request_to_hir(request, &file, &source)?;
+            let hir = compile_request_to_hir(request, &file, &source, warnings)?;
             write_json(request, &hir)
         }
         EmitKind::Mir => {
-            let mir = compile_request_to_mir(request, &file, &source)?;
+            let mir = compile_request_to_mir(request, &file, &source, warnings)?;
             write_json(request, &mir)
         }
         EmitKind::MirText => {
-            let mir = compile_request_to_mir(request, &file, &source)?;
+            let mir = compile_request_to_mir(request, &file, &source, warnings)?;
             write_text(request, &mir_print::render_module(&mir))
         }
         EmitKind::Assembly => {
-            let assembly = compile_request_to_assembly(request, &file, &source)?;
+            let assembly = compile_request_to_assembly(request, &file, &source, warnings)?;
             let output = request
                 .output
                 .clone()
@@ -493,56 +507,131 @@ pub fn compile(request: &CompileRequest) -> CompileResult<Option<PathBuf>> {
             write_output(&file, &output, assembly.as_bytes())?;
             Ok(Some(output))
         }
-        EmitKind::Object | EmitKind::Executable => native_artifact(request, &file, &source),
+        EmitKind::Object | EmitKind::Executable => {
+            native_artifact(request, &file, &source, warnings)
+        }
     }
+}
+
+/// One request's front end: what it is compiling, and what it has to say
+/// about it (`D-122`).
+///
+/// The pieces travel together because everything after the front end wants
+/// more than the program — the codegen module to partition on, the source map
+/// to build line tables from — and reading a package's inputs twice to get
+/// them back would read every dependency's sources twice.
+struct Analyzed {
+    name: String,
+    program: TypedProgram,
+    options: CompileOptions,
+    input: Option<package::PackageInput>,
+}
+
+fn analyze_request(
+    request: &CompileRequest,
+    file: &str,
+    source: &str,
+    warnings: &mut Vec<Diagnostic>,
+) -> CompileResult<Analyzed> {
+    let options = request_options(request);
+    let input = package_input(request)?;
+    let (name, program, diagnostics) = match &input {
+        Some(input) => {
+            let analysis = package::analyze_package(input, &options);
+            (input.name.clone(), analysis.program, analysis.diagnostics)
+        }
+        None => {
+            let analysis = analysis::analyze_source(file, source, &options);
+            (file.to_owned(), analysis.program, analysis.diagnostics)
+        }
+    };
+    let Some(program) = program else {
+        return Err(diagnostics);
+    };
+    // A compilation that succeeded has diagnostics exactly when it has
+    // warnings, and which of them this run reports was decided in
+    // `package::analyze_package`.
+    warnings.extend(diagnostics);
+    Ok(Analyzed {
+        name,
+        program,
+        options,
+        input,
+    })
 }
 
 fn compile_request_to_hir(
     request: &CompileRequest,
     file: &str,
     source: &str,
+    warnings: &mut Vec<Diagnostic>,
 ) -> CompileResult<TypedProgram> {
-    let options = request_options(request);
-    match package_input(request)? {
-        Some(input) => package::compile_package_to_hir(&input, &options),
-        None => compile_to_hir(file, source, &options),
-    }
+    Ok(analyze_request(request, file, source, warnings)?.program)
 }
 
 fn compile_request_to_mir(
     request: &CompileRequest,
     file: &str,
     source: &str,
+    warnings: &mut Vec<Diagnostic>,
 ) -> CompileResult<MirModule> {
-    let options = request_options(request);
-    match package_input(request)? {
-        Some(input) => compile_package_to_mir(&input, &options),
-        None => compile_to_mir(file, source, &options),
-    }
+    let analyzed = analyze_request(request, file, source, warnings)?;
+    lower_and_optimize(
+        &analyzed.name,
+        &analyzed.program,
+        &analyzed.options,
+        analyzed.input.as_ref(),
+    )
 }
 
 fn compile_request_to_object(
     request: &CompileRequest,
     file: &str,
     source: &str,
+    warnings: &mut Vec<Diagnostic>,
 ) -> CompileResult<Vec<u8>> {
-    let options = request_options(request);
-    match package_input(request)? {
-        Some(input) => compile_package_to_object(&input, &options),
-        None => compile_to_object(file, source, &options),
-    }
+    let analyzed = analyze_request(request, file, source, warnings)?;
+    let module = lower_and_optimize(
+        &analyzed.name,
+        &analyzed.program,
+        &analyzed.options,
+        analyzed.input.as_ref(),
+    )?;
+    codegen::emit_object(
+        &analyzed.name,
+        &module,
+        &codegen_options(
+            &analyzed.name,
+            &analyzed.options,
+            analyzed.input.as_ref(),
+            false,
+        ),
+    )
 }
 
 fn compile_request_to_assembly(
     request: &CompileRequest,
     file: &str,
     source: &str,
+    warnings: &mut Vec<Diagnostic>,
 ) -> CompileResult<String> {
-    let options = request_options(request);
-    match package_input(request)? {
-        Some(input) => compile_package_to_assembly(&input, &options),
-        None => compile_to_assembly(file, source, &options),
-    }
+    let analyzed = analyze_request(request, file, source, warnings)?;
+    let module = lower_and_optimize(
+        &analyzed.name,
+        &analyzed.program,
+        &analyzed.options,
+        analyzed.input.as_ref(),
+    )?;
+    codegen::emit_assembly(
+        &analyzed.name,
+        &module,
+        &codegen_options(
+            &analyzed.name,
+            &analyzed.options,
+            analyzed.input.as_ref(),
+            true,
+        ),
+    )
 }
 
 fn request_options(request: &CompileRequest) -> CompileOptions {
@@ -900,6 +989,7 @@ fn native_artifact(
     request: &CompileRequest,
     file: &str,
     source: &str,
+    warnings: &mut Vec<Diagnostic>,
 ) -> CompileResult<Option<PathBuf>> {
     let output = request
         .output
@@ -918,7 +1008,7 @@ fn native_artifact(
     let scratch = Scratch::new(file)?;
     let internal = writes_its_own_object(request);
     let input_path = if internal {
-        let object = compile_request_to_object(request, file, source)?;
+        let object = compile_request_to_object(request, file, source, warnings)?;
         if request.emit == EmitKind::Object {
             write_output(file, &output, &object)?;
             return Ok(Some(output));
@@ -927,7 +1017,7 @@ fn native_artifact(
         write_new(file, &path, &object)?;
         path
     } else {
-        let assembly = compile_request_to_assembly(request, file, source)?;
+        let assembly = compile_request_to_assembly(request, file, source, warnings)?;
         let path = scratch.path().join("program.s");
         write_new(file, &path, assembly.as_bytes())?;
         path

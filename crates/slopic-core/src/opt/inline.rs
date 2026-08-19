@@ -21,6 +21,17 @@
 //! from, and `D-073` makes it a rule instead — a declared extern is refused by
 //! name, so nothing a later change does to `collect_candidates` can start
 //! inlining across the C boundary.
+//!
+//! # What the `inline` annotation moves, and what it does not
+//!
+//! An `inline` hint (`D-122`) raises the two size ceilings for that callee and
+//! changes nothing else. Every rule above still decides: a recursive function,
+//! an `extern`, a callee in another module and a body that can fall off the
+//! end are refused with the annotation exactly as they are without it, and
+//! `MAX_CALLER_GROWTH` still bounds what one caller may become. So the
+//! annotation cannot make a program wrong or a module's object depend on
+//! another module's body — which is why it is not part of a module's
+//! interface, and why adding one rebuilds nothing but the module it is in.
 
 use crate::mir::{
     BasicBlock, BlockId, Instruction, LocalId, MirFunction, MirLocal, MirModule, Statement,
@@ -34,6 +45,14 @@ const MAX_CALLEE_STATEMENTS: usize = 12;
 /// Largest callee body worth inlining, in blocks. Keeping this small avoids
 /// duplicating loops.
 const MAX_CALLEE_BLOCKS: usize = 3;
+
+/// The same two ceilings for a callee somebody annotated `inline` (`D-122`).
+///
+/// Raised rather than removed: a hint says a body is worth copying, not that
+/// the compiler should stop counting, and a caller that grows without bound
+/// costs the instruction cache what the call saved.
+const MAX_HINTED_CALLEE_STATEMENTS: usize = 48;
+const MAX_HINTED_CALLEE_BLOCKS: usize = 8;
 
 /// Ceiling on how much a single caller may grow, in statements.
 const MAX_CALLER_GROWTH: usize = 96;
@@ -68,6 +87,7 @@ fn placeholder() -> MirFunction {
     MirFunction {
         name: String::new(),
         emit: false,
+        inline_hint: false,
         params: Vec::new(),
         return_type: crate::ast::Type::Unit,
         locals: Vec::new(),
@@ -92,9 +112,14 @@ fn collect_candidates(module: &MirModule) -> HashMap<String, MirFunction> {
         .functions
         .iter()
         .filter(|function| {
+            let (blocks, statements) = if function.inline_hint {
+                (MAX_HINTED_CALLEE_BLOCKS, MAX_HINTED_CALLEE_STATEMENTS)
+            } else {
+                (MAX_CALLEE_BLOCKS, MAX_CALLEE_STATEMENTS)
+            };
             !recursive.contains(&function.name)
-                && function.blocks.len() <= MAX_CALLEE_BLOCKS
-                && body_size(function) <= MAX_CALLEE_STATEMENTS
+                && function.blocks.len() <= blocks
+                && body_size(function) <= statements
                 // A callee whose body can fall off the end has no single
                 // return value to bind; leave those alone.
                 && function

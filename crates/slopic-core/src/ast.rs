@@ -351,6 +351,141 @@ pub struct Program {
     pub consts: Vec<ConstDecl>,
 }
 
+/// One annotation written on a declaration (`D-122`).
+///
+/// The name is not a reserved word: it means something only in annotation
+/// position, which is a list written between a declaration's keyword and its
+/// name. What a name accepts and which declarations it may sit on is one
+/// table, `ANNOTATIONS`, so all six declaration forms refuse alike.
+#[derive(Clone, Debug, Serialize)]
+pub struct Annotation {
+    pub name: String,
+    pub args: Vec<AnnotationArg>,
+    pub span: Span,
+}
+
+impl Annotation {
+    /// The message this annotation carries, when it carries one.
+    pub fn text(&self) -> Option<&str> {
+        match self.args.first() {
+            Some(AnnotationArg::Text(text)) => Some(text),
+            _ => None,
+        }
+    }
+
+    /// Whether changing this annotation changes what a *caller* compiles to or
+    /// reports, so that the manager has to rebuild what depends on it.
+    pub fn is_interface(&self) -> bool {
+        annotation_spec(&self.name).is_some_and(|spec| spec.interface)
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub enum AnnotationArg {
+    /// A string literal, which is what `deprecated` takes.
+    Text(String),
+    /// A bare atom, which is what a later `(repr C)` wants (`D-110`).
+    Name(String),
+}
+
+/// The declaration forms an annotation may sit on.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AnnotationTarget {
+    Function,
+    Extern,
+    Struct,
+    Enum,
+    Const,
+    Test,
+}
+
+impl AnnotationTarget {
+    /// The keyword a reader wrote, with its article, for the refusal that
+    /// names it.
+    fn described(self) -> &'static str {
+        match self {
+            AnnotationTarget::Function => "a `fn`",
+            AnnotationTarget::Extern => "an `extern`",
+            AnnotationTarget::Struct => "a `struct`",
+            AnnotationTarget::Enum => "an `enum`",
+            AnnotationTarget::Const => "a `const`",
+            AnnotationTarget::Test => "a `test`",
+        }
+    }
+}
+
+/// What an annotation takes after its name.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AnnotationArgs {
+    Nothing,
+    /// Zero or one string literal.
+    OptionalText,
+}
+
+struct AnnotationSpec {
+    name: &'static str,
+    args: AnnotationArgs,
+    targets: &'static [AnnotationTarget],
+    /// Whether this annotation belongs in the interface the project manager
+    /// caches a module's dependents against.
+    interface: bool,
+}
+
+/// Every annotation the language has (`D-122`).
+///
+/// The mechanism is the point of this table rather than its two rows: a form
+/// that carries the slot needs no grammar when `repr` and `interrupt` arrive
+/// with the target that wants them (`D-110`).
+const ANNOTATIONS: &[AnnotationSpec] = &[
+    AnnotationSpec {
+        name: "inline",
+        args: AnnotationArgs::Nothing,
+        targets: &[AnnotationTarget::Function],
+        // Nothing inlines across a module boundary — that is the whole subject
+        // of `opt::inline`'s file comment — so a hint changes this module's
+        // object and no other, and rebuilding a dependent for it would be work
+        // nobody asked for.
+        interface: false,
+    },
+    AnnotationSpec {
+        name: "deprecated",
+        args: AnnotationArgs::OptionalText,
+        targets: &[
+            AnnotationTarget::Function,
+            AnnotationTarget::Extern,
+            AnnotationTarget::Const,
+        ],
+        // The caller is what warns, so a dependent that does not rebuild is a
+        // warning nobody ever sees.
+        interface: true,
+    },
+];
+
+fn annotation_spec(name: &str) -> Option<&'static AnnotationSpec> {
+    ANNOTATIONS.iter().find(|spec| spec.name == name)
+}
+
+/// The annotation names, for a diagnostic that has to list them.
+fn annotation_names() -> String {
+    let names = ANNOTATIONS
+        .iter()
+        .map(|spec| format!("`{}`", spec.name))
+        .collect::<Vec<_>>();
+    join_with(&names, "and")
+}
+
+fn join_with_or(items: &[String]) -> String {
+    join_with(items, "or")
+}
+
+fn join_with(items: &[String], conjunction: &str) -> String {
+    match items.split_last() {
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} {conjunction} {last}", rest.join(", ")),
+        None => String::new(),
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct ExportDecl {
     pub items: Vec<ImportItem>,
@@ -374,6 +509,7 @@ pub struct ImportItem {
 #[derive(Clone, Debug, Serialize)]
 pub struct Function {
     pub name: String,
+    pub annotations: Vec<Annotation>,
     pub type_params: Vec<String>,
     pub params: Vec<Param>,
     pub return_type: Type,
@@ -391,6 +527,7 @@ pub struct Function {
 #[derive(Clone, Debug, Serialize)]
 pub struct ConstDecl {
     pub name: String,
+    pub annotations: Vec<Annotation>,
     /// The type written after the value as `: T`, when the literal could not
     /// choose for itself.
     pub ty: Option<Type>,
@@ -410,6 +547,7 @@ pub struct ExternDecl {
     pub symbol: String,
     /// The name calls in this package use.
     pub name: String,
+    pub annotations: Vec<Annotation>,
     pub params: Vec<Param>,
     pub return_type: Type,
     pub span: Span,
@@ -428,6 +566,7 @@ pub struct Param {
 #[derive(Clone, Debug, Serialize)]
 pub struct Test {
     pub name: String,
+    pub annotations: Vec<Annotation>,
     pub body: Expr,
     pub span: Span,
 }
@@ -435,6 +574,7 @@ pub struct Test {
 #[derive(Clone, Debug, Serialize)]
 pub struct StructDecl {
     pub name: String,
+    pub annotations: Vec<Annotation>,
     pub type_params: Vec<String>,
     pub fields: Vec<Param>,
     pub span: Span,
@@ -443,6 +583,7 @@ pub struct StructDecl {
 #[derive(Clone, Debug, Serialize)]
 pub struct EnumDecl {
     pub name: String,
+    pub annotations: Vec<Annotation>,
     pub type_params: Vec<String>,
     pub variants: Vec<EnumVariant>,
     pub span: Span,
@@ -790,22 +931,133 @@ impl AstBuilder<'_> {
         }
     }
 
+    /// The annotations a declaration carries, and where the declaration
+    /// proper begins (`D-122`).
+    ///
+    /// Every list written between the keyword and the name is one. The slot
+    /// ends at the first element that is not a list, which is the
+    /// declaration's own name — an atom for `fn`, `struct`, `enum` and
+    /// `const`, a string for `extern` and `test` — so nothing any declaration
+    /// could already write became ambiguous.
+    fn annotations(
+        &mut self,
+        items: &[SExpr],
+        target: AnnotationTarget,
+    ) -> (Vec<Annotation>, usize) {
+        let mut annotations: Vec<Annotation> = Vec::new();
+        let mut index = 1;
+        while let Some(item) = items.get(index) {
+            let SExprKind::List(parts) = &item.kind else {
+                break;
+            };
+            index += 1;
+            let Some(head) = parts.first() else {
+                self.error(item.span, "an annotation begins with its name");
+                continue;
+            };
+            let Some(name) = self.required_atom(head, "an annotation name") else {
+                continue;
+            };
+            let name = name.to_owned();
+            let Some(spec) = annotation_spec(&name) else {
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        codes::INVALID_SYNTAX,
+                        self.file,
+                        head.span,
+                        format!("unknown annotation `{name}`"),
+                    )
+                    .with_help(format!("the annotations are {}", annotation_names())),
+                );
+                continue;
+            };
+            if !spec.targets.contains(&target) {
+                let allowed = spec
+                    .targets
+                    .iter()
+                    .map(|target| target.described().to_owned())
+                    .collect::<Vec<_>>();
+                self.error(
+                    head.span,
+                    format!(
+                        "`{name}` does not apply to {}; it applies to {}",
+                        target.described(),
+                        join_with_or(&allowed)
+                    ),
+                );
+                continue;
+            }
+            if annotations.iter().any(|earlier| earlier.name == name) {
+                self.error(head.span, format!("`{name}` is written more than once"));
+                continue;
+            }
+            let Some(args) = self.annotation_args(spec, item.span, &parts[1..]) else {
+                continue;
+            };
+            annotations.push(Annotation {
+                name,
+                args,
+                span: item.span,
+            });
+        }
+        (annotations, index)
+    }
+
+    fn annotation_args(
+        &mut self,
+        spec: &AnnotationSpec,
+        span: Span,
+        args: &[SExpr],
+    ) -> Option<Vec<AnnotationArg>> {
+        match (spec.args, args) {
+            (AnnotationArgs::Nothing, []) => Some(Vec::new()),
+            (AnnotationArgs::Nothing, _) => {
+                self.error(span, format!("`{}` takes no arguments", spec.name));
+                None
+            }
+            (AnnotationArgs::OptionalText, []) => Some(Vec::new()),
+            (AnnotationArgs::OptionalText, [only]) => match &only.kind {
+                SExprKind::String(text) => Some(vec![AnnotationArg::Text(self.text_literal(
+                    text,
+                    only.span,
+                    "an annotation message",
+                )?)]),
+                _ => {
+                    self.error(
+                        only.span,
+                        format!(
+                            "`{}` takes a message written as a string literal",
+                            spec.name
+                        ),
+                    );
+                    None
+                }
+            },
+            (AnnotationArgs::OptionalText, _) => {
+                self.error(span, format!("`{}` takes at most one message", spec.name));
+                None
+            }
+        }
+    }
+
     fn function(&mut self, span: Span, items: &[SExpr]) -> Option<Function> {
-        if items.len() < 6 {
+        let (annotations, start) = self.annotations(items, AnnotationTarget::Function);
+        let items = &items[start..];
+        if items.len() < 5 {
             self.error(
                 span,
                 "function syntax is `(fn name ((arg type) ...) -> type body...)`",
             );
             return None;
         }
-        let name = self.required_atom(&items[1], "function name")?.to_owned();
-        let has_generics = items.len() >= 7
-            && self.type_params_if_present(&items[2]).is_some()
-            && matches!(items[3].kind, SExprKind::List(_));
+        let name = self.required_atom(&items[0], "function name")?.to_owned();
+        let has_generics = items.len() >= 6
+            && self.type_params_if_present(&items[1]).is_some()
+            && matches!(items[2].kind, SExprKind::List(_));
         let (type_params, params_index) = if has_generics {
-            (self.type_params(&items[2])?, 3)
+            (self.type_params(&items[1])?, 2)
         } else {
-            (Vec::new(), 2)
+            (Vec::new(), 1)
         };
         let params = self.params(&items[params_index])?;
         if atom(&items[params_index + 1]) != Some("->") {
@@ -819,6 +1071,7 @@ impl AstBuilder<'_> {
         let body = self.body(&items[params_index + 3..], span)?;
         Some(Function {
             name,
+            annotations,
             type_params,
             params,
             return_type,
@@ -829,21 +1082,23 @@ impl AstBuilder<'_> {
 
     fn extern_decl(&mut self, span: Span, items: &[SExpr]) -> Option<ExternDecl> {
         const SYNTAX: &str = "extern syntax is `(extern \"symbol\" (name (arg type) ...) -> type)`";
-        if items.len() != 5 {
+        let (annotations, start) = self.annotations(items, AnnotationTarget::Extern);
+        let items = &items[start..];
+        if items.len() != 4 {
             self.error(span, SYNTAX);
             return None;
         }
-        let SExprKind::String(symbol) = &items[1].kind else {
-            self.error(items[1].span, "the C symbol must be a string literal");
+        let SExprKind::String(symbol) = &items[0].kind else {
+            self.error(items[0].span, "the C symbol must be a string literal");
             return None;
         };
         if symbol.is_empty() {
-            self.error(items[1].span, "the C symbol cannot be empty");
+            self.error(items[0].span, "the C symbol cannot be empty");
             return None;
         }
-        let signature = self.list(&items[2], "extern signature")?;
+        let signature = self.list(&items[1], "extern signature")?;
         let Some((head, rest)) = signature.split_first() else {
-            self.error(items[2].span, SYNTAX);
+            self.error(items[1].span, SYNTAX);
             return None;
         };
         let name = self.required_atom(head, "extern name")?.to_owned();
@@ -863,77 +1118,86 @@ impl AstBuilder<'_> {
             }
         }
         let params = self.param_pairs(rest)?;
-        if atom(&items[3]) != Some("->") {
-            self.error(items[3].span, "expected `->` before the return type");
+        if atom(&items[2]) != Some("->") {
+            self.error(items[2].span, "expected `->` before the return type");
             return None;
         }
-        let return_type = self.ty(&items[4])?;
-        let symbol = self.text_literal(symbol, items[1].span, "a C symbol")?;
+        let return_type = self.ty(&items[3])?;
+        let symbol = self.text_literal(symbol, items[0].span, "a C symbol")?;
         Some(ExternDecl {
             symbol,
             name,
+            annotations,
             params,
             return_type,
             span,
-            symbol_span: items[1].span,
+            symbol_span: items[0].span,
         })
     }
 
     fn test(&mut self, span: Span, items: &[SExpr]) -> Option<Test> {
-        if items.len() < 3 {
+        let (annotations, start) = self.annotations(items, AnnotationTarget::Test);
+        let items = &items[start..];
+        if items.len() < 2 {
             self.error(span, "test syntax is `(test \"name\" expression...)`");
             return None;
         }
-        let SExprKind::String(name) = &items[1].kind else {
-            self.error(items[1].span, "test name must be a string literal");
+        let SExprKind::String(name) = &items[0].kind else {
+            self.error(items[0].span, "test name must be a string literal");
             return None;
         };
-        let name = self.text_literal(name, items[1].span, "a test name")?;
+        let name = self.text_literal(name, items[0].span, "a test name")?;
         Some(Test {
             name,
-            body: self.body(&items[2..], span)?,
+            annotations,
+            body: self.body(&items[1..], span)?,
             span,
         })
     }
 
     fn struct_decl(&mut self, span: Span, items: &[SExpr]) -> Option<StructDecl> {
-        if !matches!(items.len(), 3 | 4) {
+        let (annotations, start) = self.annotations(items, AnnotationTarget::Struct);
+        let items = &items[start..];
+        if !matches!(items.len(), 2 | 3) {
             self.error(
                 span,
                 "struct syntax is `(struct Name (T ...) ((field type) ...))`",
             );
             return None;
         }
-        let has_generics = items.len() == 4;
+        let has_generics = items.len() == 3;
         Some(StructDecl {
-            name: self.required_atom(&items[1], "struct name")?.to_owned(),
+            name: self.required_atom(&items[0], "struct name")?.to_owned(),
+            annotations,
             type_params: if has_generics {
-                self.type_params(&items[2])?
+                self.type_params(&items[1])?
             } else {
                 Vec::new()
             },
-            fields: self.params(&items[if has_generics { 3 } else { 2 }])?,
+            fields: self.params(&items[if has_generics { 2 } else { 1 }])?,
             span,
         })
     }
 
     fn enum_decl(&mut self, span: Span, items: &[SExpr]) -> Option<EnumDecl> {
-        if items.len() < 3 {
+        let (annotations, start) = self.annotations(items, AnnotationTarget::Enum);
+        let items = &items[start..];
+        if items.len() < 2 {
             self.error(
                 span,
                 "enum syntax is `(enum Name Variant (Variant ((field type) ...)) ...)`",
             );
             return None;
         }
-        let name = self.required_atom(&items[1], "enum name")?.to_owned();
-        let has_generics = items.len() >= 4 && self.type_params_if_present(&items[2]).is_some();
+        let name = self.required_atom(&items[0], "enum name")?.to_owned();
+        let has_generics = items.len() >= 3 && self.type_params_if_present(&items[1]).is_some();
         let type_params = if has_generics {
-            self.type_params(&items[2])?
+            self.type_params(&items[1])?
         } else {
             Vec::new()
         };
         let mut variants = Vec::new();
-        for item in &items[if has_generics { 3 } else { 2 }..] {
+        for item in &items[if has_generics { 2 } else { 1 }..] {
             match &item.kind {
                 SExprKind::Atom(variant) => variants.push(EnumVariant {
                     name: variant.clone(),
@@ -963,6 +1227,7 @@ impl AstBuilder<'_> {
         }
         Some(EnumDecl {
             name,
+            annotations,
             type_params,
             variants,
             span,
@@ -1417,16 +1682,18 @@ impl AstBuilder<'_> {
     }
 
     fn const_decl(&mut self, span: Span, items: &[SExpr]) -> Option<ConstDecl> {
-        if items.len() < 3 {
+        let (annotations, start) = self.annotations(items, AnnotationTarget::Const);
+        let items = &items[start..];
+        if items.len() < 2 {
             self.error(
                 span,
                 "`const` syntax is `(const name value)` or `(const name value : Type)`",
             );
             return None;
         }
-        let name = self.required_atom(&items[1], "constant name")?.to_owned();
-        let value = self.expr(&items[2])?;
-        let ty = self.ascription(span, &items[3..], "const")?;
+        let name = self.required_atom(&items[0], "constant name")?.to_owned();
+        let value = self.expr(&items[1])?;
+        let ty = self.ascription(span, &items[2..], "const")?;
         // A literal and nothing else (`D-121`). Arithmetic here would be a
         // constant evaluator, and every program that would want one can write
         // the number; allowing it later is additive, and taking it back is not.
@@ -1443,6 +1710,7 @@ impl AstBuilder<'_> {
         }
         Some(ConstDecl {
             name,
+            annotations,
             ty,
             value,
             span,

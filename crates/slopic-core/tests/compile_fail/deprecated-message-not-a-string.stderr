@@ -1,0 +1,4 @@
+deprecated-message-not-a-string.slp:3:17: error[SL0100]: `deprecated` takes a message written as a string literal
+  |
+ 3 | (fn (deprecated 3) parse ((s i64)) -> i64 s)
+  |                 ^

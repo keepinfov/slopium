@@ -992,6 +992,7 @@ mod tests {
         MirFunction {
             name: "probe".into(),
             emit: true,
+            inline_hint: false,
             params: Vec::new(),
             return_type: Type::I64,
             locals: (0..locals)

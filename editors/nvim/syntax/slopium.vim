@@ -26,6 +26,12 @@ syntax match slopiumFunction "[A-Za-z_][A-Za-z0-9_-]*" contained
 syntax keyword slopiumTypeKeyword struct enum nextgroup=slopiumTypeName skipwhite
 syntax match slopiumTypeName "[A-Z][A-Za-z0-9_-]*" contained
 syntax keyword slopiumTestKeyword test
+" An annotation is a list written between a declaration's keyword and its name.
+" These two words are special only there — nothing reserves them elsewhere — so
+" this highlights them wherever they appear, the way a reader reads them. A
+" declaration that carries one does not highlight its name, because `nextgroup`
+" is looking for the name and finds a `(`.
+syntax keyword slopiumAnnotation inline deprecated
 
 syntax keyword slopiumBindingKeyword let nextgroup=slopiumModifier,slopiumVariableDefinition skipwhite
 " A module-level name for a literal. It binds like `let` and is declared like a
@@ -77,6 +83,7 @@ highlight default link slopiumFunctionKeyword @keyword.function
 highlight default link slopiumLambdaKeyword @keyword.function
 highlight default link slopiumTypeKeyword @keyword.type
 highlight default link slopiumTestKeyword @keyword
+highlight default link slopiumAnnotation @attribute
 highlight default link slopiumFunction @function
 highlight default link slopiumTypeName @type.definition
 highlight default link slopiumBindingKeyword @keyword

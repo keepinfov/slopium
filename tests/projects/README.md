@@ -21,6 +21,7 @@ scripts/project-tests.sh
 | `collections` | Copy/owned lists, all list operations, `Option`, arrays, slices, clone/drop |
 | `loops` | `while`, `loop`, `break`, `continue` |
 | `everyday-forms` | A module-level `const` across a module boundary, a `let` that carries its value's type, a `loop` that produces a value, `match` guards, and a name bound twice in one scope |
+| `annotations` | A declaration's annotation slot, `deprecated` warning at a use across a module boundary, and an `inline` hint that reaches the optimizer |
 | `generics-std` | Generic functions/structs/enums, bundled `Option`/`Result`, successful and propagated `try` |
 | `modules` | Nested path modules, exports, `take` aliases, re-exports, qualified calls, separate objects |
 | `path-dependencies` | Direct and transitive path dependencies, each under its package name |
@@ -33,6 +34,11 @@ scripts/project-tests.sh
 package to run: it has its own phase in the runner, which asserts that a command
 without `-p` or `--workspace` fails, that `members = ["crates/*"]` expands, that
 `exclude` keeps a directory out of the lock, and that `-p` builds one member.
+
+A passing project may also carry an `expected.stderr`, whose lines must all
+appear in what `check` wrote to standard error. That is where a warning is
+asserted: a program the compiler has something to say about still compiles, so
+there is no exit status to read it from (`D-122`).
 
 Every passing project must pass `fmt --check`, `check`, `run`, and `test`.
 Selected projects also build and run under the release profile.

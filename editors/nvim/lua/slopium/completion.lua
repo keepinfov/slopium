@@ -19,6 +19,8 @@ local static_items = {
   { label = "take", kind = kinds.Snippet, detail = "module import aliases", insertText = "take ${1:module} ${0:Name}", insertTextFormat = 2 },
   { label = "extern", kind = kinds.Snippet, detail = "declare a C function", insertText = 'extern "${1:c_name}" (${2:name} (${3:arg} ${4:i64})) -> ${0:i64}', insertTextFormat = 2 },
   { label = "const", kind = kinds.Snippet, detail = "module-level literal", insertText = "const ${1:name} ${0:value}", insertTextFormat = 2 },
+  { label = "inline", kind = kinds.Snippet, detail = "annotation: worth copying into its callers", insertText = "inline", insertTextFormat = 2 },
+  { label = "deprecated", kind = kinds.Snippet, detail = "annotation: warn at every use", insertText = 'deprecated "${0:use this instead}"', insertTextFormat = 2 },
   { label = "let", kind = kinds.Snippet, detail = "immutable binding", insertText = "let ${1:name} ${0:value}", insertTextFormat = 2 },
   { label = "let mut", kind = kinds.Snippet, detail = "mutable binding", insertText = "let mut ${1:name} ${0:value}", insertTextFormat = 2 },
   { label = "set", kind = kinds.Snippet, detail = "assign a mutable binding or a field bound by a `&mut` match", insertText = "set ${1:name} ${0:value}", insertTextFormat = 2 },

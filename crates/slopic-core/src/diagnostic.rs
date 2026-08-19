@@ -30,6 +30,14 @@ pub mod codes {
     pub const OUTPUT_IO: &str = "SL0601";
     pub const TOOLCHAIN: &str = "SL0602";
     pub const INTERNAL: &str = "SL0700";
+    /// A use of a declaration annotated `deprecated` (`D-122`).
+    ///
+    /// The first of the `SL08xx` family, which is warnings: a program that
+    /// compiles, about which the compiler has something to say. Every other
+    /// family is a refusal, and the split is worth a family of its own because
+    /// a reader looking a code up wants to know which of the two it is before
+    /// they read a word of the message.
+    pub const DEPRECATED: &str = "SL0800";
 
     pub const ALL: &[(&str, &str)] = &[
         (UNKNOWN_ESCAPE, "unknown string escape"),
@@ -56,6 +64,7 @@ pub mod codes {
         (OUTPUT_IO, "compiler output error"),
         (TOOLCHAIN, "external toolchain error"),
         (INTERNAL, "internal compiler error"),
+        (DEPRECATED, "use of a deprecated declaration"),
     ];
 }
 
@@ -190,6 +199,23 @@ impl Diagnostic {
         }
     }
 
+    /// A diagnostic about a program that compiles anyway (`D-122`).
+    ///
+    /// It travels the same path an error does and is told apart by `severity`,
+    /// which is why the field has been in the contract since v0.1.1 with
+    /// nothing to put in it.
+    pub fn warning(
+        code: impl Into<String>,
+        file: impl Into<String>,
+        span: Span,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            severity: Severity::Warning,
+            ..Self::error(code, file, span, message)
+        }
+    }
+
     pub fn with_help(mut self, help: impl Into<String>) -> Self {
         self.help = Some(help.into());
         self
@@ -235,8 +261,12 @@ impl Diagnostic {
             " ".repeat(self.span.column.saturating_sub(1)),
             "^".repeat(width.min(line.len().max(1)))
         );
+        let severity = match self.severity {
+            Severity::Error => "error",
+            Severity::Warning => "warning",
+        };
         let mut rendered = format!(
-            "{}:{}:{}: error[{}]: {}\n  |\n{:>2} | {}\n  | {}",
+            "{}:{}:{}: {severity}[{}]: {}\n  |\n{:>2} | {}\n  | {}",
             self.file,
             self.span.line,
             self.span.column,

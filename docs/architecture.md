@@ -17,11 +17,23 @@ command-line protocol is internal and versioned.
    for formatting and editor features.
 2. The semantic lexer and balanced S-expression parser produce a structural
    tree with byte and line/column spans.
-3. AST construction validates declaration and expression shapes.
+3. AST construction validates declaration and expression shapes. It is also
+   where a declaration's annotations are read and checked: the list between a
+   keyword and a name is an annotation, and one table decides which names
+   exist, what each takes and which declarations each may sit on, so all six
+   declaration forms refuse alike (`D-122`).
 4. Package analysis derives module identities, resolves collected exports,
    imports, privacy, dependency namespaces, and rejects cycles.
 5. Semantic analysis checks types, generics, nested match exhaustiveness, and
-   affine ownership with control-flow-shortened borrows. It is also where a
+   affine ownership with control-flow-shortened borrows. It is where a use of a
+   `deprecated` declaration becomes a warning, at the use rather than at the
+   declaration, and warnings leave the compiler through a sink the caller
+   passes in — because a warning belongs to the *compilation* rather than to
+   the program, and which of them a run reports depends on what it was asked to
+   build (`D-122`). Package analysis answers that: a warning about a
+   dependency's own source is the dependency's, and a run building one codegen
+   module reports that module's alone, or `slopium` would print every warning
+   in the package once per object. It is also where a
    module-level `const` disappears: the declaration's literal is typed once and
    a use is a copy of it, so nothing after this pass knows the name existed
    (`D-121`).
@@ -56,7 +68,11 @@ command-line protocol is internal and versioned.
    arithmetic that would trap is never folded away or removed, and drops are
    never deleted or moved across a branch. Inlining does not cross a module
    boundary, because a module's object is cached on its own body and would go
-   stale if it contained a copy of another module's code.
+   stale if it contained a copy of another module's code. An `inline`
+   annotation raises the two size ceilings for one callee and changes nothing
+   else: every rule that makes inlining sound still decides, which is why the
+   annotation is not part of a module's interface and adding one rebuilds
+   nothing but the module it is written in (`D-122`).
 9. A verifier checks the result of each pass: identifier ranges, parameter
    layout, call arity, operand types, and that every read has a reaching
    definition. A call through a function value is checked against the `Fn` type
@@ -331,6 +347,13 @@ Object cache keys include the selected module body plus every module
 interface. A body-only change keeps independent objects fresh; an interface
 change invalidates consumers. Generic owner modules additionally include
 consumer bodies because their reachable concrete instance set can change.
+
+A module's interface is everything a *consumer's object* can depend on, which
+is more than its signatures. A `const` is inlined at every use (`D-121`), so
+its value is interface: a dependent that does not rebuild keeps the old number
+compiled into it. A `deprecated` annotation is interface too, because the
+caller is what warns. An `inline` annotation is not, because nothing inlines
+across a module boundary (`D-122`).
 Objects live under `objects/<package>/`, because two members can compile a
 module of the same name.
 

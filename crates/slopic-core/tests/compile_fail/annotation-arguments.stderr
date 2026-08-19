@@ -1,0 +1,4 @@
+annotation-arguments.slp:3:5: error[SL0100]: `inline` takes no arguments
+  |
+ 3 | (fn (inline "always") hot ((x i64)) -> i64 (* x x))
+  |     ^^^^^^^^^^^^^^^^^

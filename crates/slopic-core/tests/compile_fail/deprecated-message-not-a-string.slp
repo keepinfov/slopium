@@ -1,0 +1,5 @@
+; The message a `deprecated` carries is text, because it is read by a person
+; at the call site the warning names.
+(fn (deprecated 3) parse ((s i64)) -> i64 s)
+
+(fn main () -> i32 0)

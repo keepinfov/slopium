@@ -1,5 +1,6 @@
 use crate::ast::{
-    Capture, Expr, ExprKind, Function, LogicalOp, Param, Pattern, PatternKind, Program, Type,
+    Annotation, Capture, Expr, ExprKind, Function, LogicalOp, Param, Pattern, PatternKind, Program,
+    Type,
 };
 use crate::diagnostic::{codes, CompileResult, Diagnostic, Span};
 use serde::Serialize;
@@ -50,6 +51,12 @@ pub struct TypedVariant {
 #[derive(Clone, Debug, Serialize)]
 pub struct TypedFunction {
     pub name: String,
+    /// Whether this function was annotated `inline` (`D-122`).
+    ///
+    /// It is a hint and nothing else: everything that makes inlining sound is
+    /// decided by `opt::inline`, and what this moves is the size at which a
+    /// body stops being worth copying.
+    pub inline: bool,
     pub type_params: Vec<String>,
     pub params: Vec<TypedParam>,
     pub return_type: Type,
@@ -264,6 +271,28 @@ struct Signature {
     /// machine word at the boundary (a borrowed `Slice` is pointer and length),
     /// so a `Fn` type would describe a shape the call does not have.
     is_extern: bool,
+    deprecated: Option<Deprecation>,
+}
+
+/// What a `deprecated` annotation said about a declaration (`D-122`).
+///
+/// The message is optional because the annotation is: `(deprecated)` says the
+/// name is going away and `(deprecated "use `parse-line`")` says where to go
+/// instead, and a warning that names the declaration is worth having either
+/// way.
+#[derive(Clone, Debug)]
+struct Deprecation {
+    message: Option<String>,
+}
+
+/// The `deprecated` a declaration carries, if it carries one.
+fn deprecation(annotations: &[Annotation]) -> Option<Deprecation> {
+    annotations
+        .iter()
+        .find(|annotation| annotation.name == "deprecated")
+        .map(|annotation| Deprecation {
+            message: annotation.text().map(str::to_owned),
+        })
 }
 
 #[derive(Clone, Debug)]
@@ -511,16 +540,30 @@ impl Environment {
 }
 
 pub fn analyze(file: &str, program: &Program) -> CompileResult<TypedProgram> {
-    analyze_with_options(file, program, &crate::LanguageItems::default(), true)
+    analyze_with_options(
+        file,
+        program,
+        &crate::LanguageItems::default(),
+        true,
+        &mut Vec::new(),
+    )
 }
 
+/// Checks a program, appending to `warnings` what it has to say about one that
+/// compiles (`D-122`).
+///
+/// The sink is a parameter rather than a field of the result because a warning
+/// belongs to the *compilation* and not to the program: which of them a run
+/// reports depends on what it was asked to build, and that is a decision only
+/// the caller can make.
 pub fn analyze_with_options(
     file: &str,
     program: &Program,
     language_items: &crate::LanguageItems,
     validate_entry_point: bool,
+    warnings: &mut Vec<Diagnostic>,
 ) -> CompileResult<TypedProgram> {
-    Analyzer::new(file, program, language_items, validate_entry_point).analyze(program)
+    Analyzer::new(file, program, language_items, validate_entry_point).analyze(program, warnings)
 }
 
 struct Analyzer<'a> {
@@ -553,6 +596,9 @@ struct Analyzer<'a> {
     /// Each is the literal the declaration held, already typed, so a use is a
     /// clone of it rather than a lookup anything downstream performs.
     consts: HashMap<String, TExpr>,
+    /// The `deprecated` a `const` carries, kept beside `consts` rather than in
+    /// it: a use of an ordinary constant should not pay a word for it.
+    deprecated_consts: HashMap<String, Deprecation>,
     /// One entry per `when` guard being typed, holding the first binding id
     /// that did not exist when the guard started (`D-121`).
     ///
@@ -570,6 +616,8 @@ struct Analyzer<'a> {
     /// inside of does not travel into it.
     unsafe_depth: usize,
     diagnostics: Vec<Diagnostic>,
+    /// What the compiler has to say about a program that compiles anyway.
+    warnings: Vec<Diagnostic>,
     next_binding: BindingId,
     /// Where each binding was consumed, so a loop can point at the move that
     /// its next iteration would repeat.
@@ -720,9 +768,11 @@ impl<'a> Analyzer<'a> {
             current_return_type: None,
             loops: Vec::new(),
             consts: HashMap::new(),
+            deprecated_consts: HashMap::new(),
             guards: Vec::new(),
             unsafe_depth: 0,
             diagnostics: Vec::new(),
+            warnings: Vec::new(),
             next_binding: 0,
             move_sites: HashMap::new(),
             pattern_borrow: None,
@@ -754,6 +804,10 @@ impl<'a> Analyzer<'a> {
                 self.normalize_type(ty, constant.span)
             });
             let value = self.expr(&constant.value, written.as_ref());
+            if let Some(deprecation) = deprecation(&constant.annotations) {
+                self.deprecated_consts
+                    .insert(constant.name.clone(), deprecation);
+            }
             if self.consts.insert(constant.name.clone(), value).is_some() {
                 self.error(
                     constant.span,
@@ -764,7 +818,11 @@ impl<'a> Analyzer<'a> {
         self.env.pop();
     }
 
-    fn analyze(mut self, program: &Program) -> CompileResult<TypedProgram> {
+    fn analyze(
+        mut self,
+        program: &Program,
+        warnings: &mut Vec<Diagnostic>,
+    ) -> CompileResult<TypedProgram> {
         self.collect_signatures(program);
         self.collect_consts(program);
         self.validate_declarations(program);
@@ -871,6 +929,7 @@ impl<'a> Analyzer<'a> {
             .collect();
 
         if self.diagnostics.is_empty() {
+            warnings.append(&mut self.warnings);
             Ok(TypedProgram {
                 functions,
                 externs,
@@ -906,6 +965,7 @@ impl<'a> Analyzer<'a> {
                     params,
                     result,
                     is_extern: false,
+                    deprecated: deprecation(&function.annotations),
                 },
             );
         }
@@ -936,6 +996,7 @@ impl<'a> Analyzer<'a> {
                     params,
                     result,
                     is_extern: true,
+                    deprecated: deprecation(&declaration.annotations),
                 },
             );
         }
@@ -1319,6 +1380,10 @@ impl<'a> Analyzer<'a> {
         self.env.pop();
         Some(TypedFunction {
             name: function.name.clone(),
+            inline: function
+                .annotations
+                .iter()
+                .any(|annotation| annotation.name == "inline"),
             type_params: function.type_params.clone(),
             params,
             return_type,
@@ -1540,6 +1605,9 @@ impl<'a> Analyzer<'a> {
                 .map(str::to_owned)
                 .or_else(|| self.consts.contains_key(name).then(|| name.to_owned()));
             if let Some(constant) = constant {
+                if let Some(deprecation) = self.deprecated_consts.get(&constant).cloned() {
+                    self.deprecated_use(name, expr.span, &deprecation);
+                }
                 let mut value = self.consts[&constant].clone();
                 // The literal is stamped with the span of the *use*, not of the
                 // declaration. A line table that sent a debugger to the `const`
@@ -1685,6 +1753,9 @@ impl<'a> Analyzer<'a> {
             .get(name)
             .cloned()
             .expect("the caller checked the name is a signature");
+        if let Some(deprecation) = signature.deprecated.clone() {
+            self.deprecated_use(written, expr.span, &deprecation);
+        }
         if signature.is_extern {
             self.diagnostics.push(
                 Diagnostic::error(
@@ -2787,6 +2858,11 @@ impl<'a> Analyzer<'a> {
             self.error(expr.span, format!("unknown function `{callee}`"));
             return self.typed(expr, Type::Unit, TExprKind::Unit);
         };
+        // Before the arity check and before `generic_call` takes over, so that
+        // every call to the name warns exactly once however it is checked.
+        if let Some(deprecation) = signature.deprecated.clone() {
+            self.deprecated_use(callee, expr.span, &deprecation);
+        }
         if args.len() != signature.params.len() {
             self.error(
                 expr.span,
@@ -4450,6 +4526,30 @@ impl<'a> Analyzer<'a> {
 
     fn error(&mut self, span: Span, message: impl Into<String>) {
         self.error_with_code(codes::NAME_OR_TYPE, span, message);
+    }
+
+    /// A use of a declaration somebody marked `deprecated` (`D-122`).
+    ///
+    /// The span is the use rather than the declaration, because the use is
+    /// what the reader has to change, and the annotation's message — when it
+    /// carries one — is a note rather than the message, so that every one of
+    /// these warnings reads the same at its first line.
+    fn deprecated_use(&mut self, name: &str, span: Span, deprecation: &Deprecation) {
+        // The name a module resolver made canonical is not the name anybody
+        // wrote, and the span already says which module this is. So the
+        // message carries the last segment, which is the text under the
+        // caret in every spelling but the qualified one.
+        let written = name.rsplit(':').next().unwrap_or(name);
+        let mut warning = Diagnostic::warning(
+            codes::DEPRECATED,
+            self.file,
+            span,
+            format!("`{written}` is deprecated"),
+        );
+        if let Some(message) = &deprecation.message {
+            warning = warning.with_note(message.clone());
+        }
+        self.warnings.push(warning);
     }
 
     /// Refuses a local of `Fn` type that has the name of a top-level `fn`.

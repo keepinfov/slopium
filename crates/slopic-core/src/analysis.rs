@@ -123,17 +123,23 @@ pub fn analyze_source(file: &str, source: &str, options: &CompileOptions) -> Ana
             };
         }
     };
+    let mut warnings = Vec::new();
     match sema::analyze_with_options(
         file,
         &ast,
         &options.language_items,
         options.validate_entry_point,
+        &mut warnings,
     ) {
         Ok(program) => {
             let (symbols, occurrences) =
                 SymbolIndexBuilder::new(source, &syntax.tokens, &ast).build(&program);
+            // A warning leaves a compilation that succeeded, so `diagnostics`
+            // is no longer empty exactly when `program` is `Some` (`D-122`).
+            // Every caller already decides failure by the program rather than
+            // by this list, which is what makes that safe.
             Analysis {
-                diagnostics: Vec::new(),
+                diagnostics: warnings,
                 syntax,
                 program: Some(program),
                 symbols,

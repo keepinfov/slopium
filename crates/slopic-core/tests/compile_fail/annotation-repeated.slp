@@ -1,0 +1,5 @@
+; Writing one twice says nothing the first did not, and a mechanism that
+; accepted it would owe an answer about which of the two won.
+(fn (inline) (inline) hot ((x i64)) -> i64 (* x x))
+
+(fn main () -> i32 0)

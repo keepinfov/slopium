@@ -357,6 +357,24 @@ done
 # just be non-empty.
 assert_patterns <(printf '%s\n' 'bb0:' 'return' '// ') "$emit_dir/basics.mir.txt"
 
+# An `inline` annotation has to change what `--emit mir` shows, or it is a word
+# with no effect (`D-122`). `blend` is over the size the optimizer copies on its
+# own, so the call in `mixed` is there without the hint and gone with it.
+annotations_project="$projects_dir/pass/annotations"
+"$compiler" "$annotations_project/src/main.slp" \
+  --source-root "$annotations_project/src" --toolchain-dependency std \
+  --optimize --emit mir-text --output "$emit_dir/annotations.mir.txt" \
+  2>"$emit_dir/annotations.mir.stderr"
+assert_patterns <(printf '%s\n' '#inline fn main:blend') "$emit_dir/annotations.mir.txt"
+if sed -n '/^fn main:mixed/,/^}/p' "$emit_dir/annotations.mir.txt" | grep --quiet 'blend('; then
+  echo "project-tests: the inline annotation did not reach the optimizer" >&2
+  sed -n '/^fn main:mixed/,/^}/p' "$emit_dir/annotations.mir.txt" >&2
+  exit 1
+fi
+# The same run is where a warning reaches a person: `slopic` prints it and
+# still exits 0.
+assert_patterns "$annotations_project/expected.stderr" "$emit_dir/annotations.mir.stderr"
+
 # The manager turns debug information on for `dev` and off for `release`, which
 # is what makes a plain `slopium build` debuggable without asking for anything.
 # The linked section is the check rather than a `.loc` directive, because that
@@ -500,6 +518,12 @@ while IFS= read -r -d '' project; do
     "$manifest" fmt --check
   run_manager_logged "pass/$name check" "$prefix.check.stdout" "$prefix.check.stderr" \
     "$manifest" check
+  # A fixture whose point is what the compiler *says* about a program that
+  # compiles: `clean` ran above, so nothing is cached and every warning is
+  # printed exactly once.
+  if [[ -f "$project/expected.stderr" ]]; then
+    assert_patterns "$project/expected.stderr" "$prefix.check.stderr"
+  fi
 
   run_command=("$manager" --manifest-path "$manifest" run)
   if ((${#args[@]} > 0)); then
@@ -561,6 +585,28 @@ if [[ "$main_after_body" == "$main_after_interface" ]]; then
   exit 1
 fi
 echo "project-tests: module object cache ... ok"
+
+# A `const` is inlined wherever it is used, so its value is interface: a
+# dependent that is not rebuilt keeps the old number compiled into it. Until
+# v0.9.2 the module interface did not mention constants at all, and a program
+# went on printing the old value forever (`D-122`).
+const_project="$result_dir/const-cache-project"
+cp -R "$projects_dir/pass/annotations" "$const_project"
+const_manifest="$const_project/Slopium.toml"
+run_manager "$const_manifest" clean >/dev/null
+run_manager "$const_manifest" run >"$result_dir/const-before.stdout" 2>/dev/null
+if grep --quiet --line-regexp 55 "$result_dir/const-before.stdout"; then
+  echo "project-tests: the const cache fixture already prints the new value" >&2
+  exit 1
+fi
+sed -i 's/retry-limit 3)/retry-limit 55)/' "$const_project/src/legacy.slp"
+run_manager "$const_manifest" run >"$result_dir/const-after.stdout" 2>/dev/null
+if ! grep --quiet --line-regexp 55 "$result_dir/const-after.stdout"; then
+  echo "project-tests: a changed const did not reach the module that uses it" >&2
+  diff -u "$result_dir/const-before.stdout" "$result_dir/const-after.stdout" >&2 || true
+  exit 1
+fi
+echo "project-tests: a changed const rebuilds its consumers ... ok"
 
 dependency_count=0
 while IFS= read -r -d '' manifest; do

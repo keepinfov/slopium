@@ -46,6 +46,19 @@ fn not_emitted(emit: bool) -> &'static str {
     }
 }
 
+/// The `inline` annotation, printed where it was written (`D-122`).
+///
+/// A hint that is invisible in `--emit mir` is a hint nobody can check, and
+/// what it changes in the output — a call that is no longer there — is only
+/// legible next to the annotation that asked for it.
+fn inline_hint(hint: bool) -> &'static str {
+    if hint {
+        "#inline "
+    } else {
+        ""
+    }
+}
+
 fn render_struct(out: &mut String, structure: &MirStruct) {
     let _ = writeln!(
         out,
@@ -96,7 +109,8 @@ fn render_function_into(out: &mut String, function: &MirFunction, test_name: Opt
         .join(", ");
     let _ = writeln!(
         out,
-        "fn {}({params}) -> {} {{{}",
+        "{}fn {}({params}) -> {} {{{}",
+        inline_hint(function.inline_hint),
         function.name,
         function.return_type,
         not_emitted(function.emit)

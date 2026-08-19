@@ -1,0 +1,9 @@
+; A `deprecated` warns at every use, and the message it carries is a note
+; rather than the message, so that every one of these reads alike at its first
+; line (`D-122`).
+(fn (deprecated "call `parse-line` instead") parse ((s i64)) -> i64 s)
+
+(fn (deprecated) retired () -> i64 7)
+
+(fn main () -> i64
+  (+ (parse 3) (retired)))

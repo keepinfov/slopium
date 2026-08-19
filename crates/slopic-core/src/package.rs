@@ -270,14 +270,16 @@ pub fn analyze_package(input: &PackageInput, options: &CompileOptions) -> Packag
             modules: summaries(&units, &exports),
         };
     }
+    let mut warnings = Vec::new();
     match sema::analyze_with_options(
         &input.name,
         &merged,
         &language_items,
         options.validate_entry_point,
+        &mut warnings,
     ) {
         Ok(program) => PackageAnalysis {
-            diagnostics: Vec::new(),
+            diagnostics: reported_warnings(warnings, &units, options),
             program: Some(program),
             modules: summaries(&units, &exports),
         },
@@ -1351,15 +1353,47 @@ fn shift_program(program: &mut Program, base: usize) {
     }
 }
 
-fn remap_diagnostic(mut diagnostic: Diagnostic, units: &[ModuleUnit]) -> Diagnostic {
-    let index = units
-        .iter()
-        .position(|unit| {
-            diagnostic.span.start >= unit.base
-                && diagnostic.span.start <= unit.base + unit.source_len
+/// Which of a compilation's warnings this compilation is the one to report
+/// (`D-122`).
+///
+/// Two rules, and both of them exist because `sema` is handed the whole
+/// package however little of it is being built. A warning about a dependency's
+/// own source is the dependency's business, the same reading that already
+/// keeps a dependency's tests out of this package's harness. And when a
+/// codegen module is named — which is how `slopium` builds, one `slopic` per
+/// object — only that module's warnings belong to this run, or every warning
+/// in the package would be printed once per object.
+fn reported_warnings(
+    warnings: Vec<Diagnostic>,
+    units: &[ModuleUnit],
+    options: &CompileOptions,
+) -> Vec<Diagnostic> {
+    warnings
+        .into_iter()
+        .filter_map(|warning| {
+            let unit = owning_unit(&warning, units)?;
+            if unit.namespace.is_some() {
+                return None;
+            }
+            if let Some(selected) = &options.codegen_module {
+                if &unit.module != selected {
+                    return None;
+                }
+            }
+            Some(remap_diagnostic(warning, units))
         })
-        .unwrap_or(0);
-    let unit = &units[index];
+        .collect()
+}
+
+/// The module whose source a merged span came from.
+fn owning_unit<'a>(diagnostic: &Diagnostic, units: &'a [ModuleUnit]) -> Option<&'a ModuleUnit> {
+    units.iter().find(|unit| {
+        diagnostic.span.start >= unit.base && diagnostic.span.start <= unit.base + unit.source_len
+    })
+}
+
+fn remap_diagnostic(mut diagnostic: Diagnostic, units: &[ModuleUnit]) -> Diagnostic {
+    let unit = owning_unit(&diagnostic, units).unwrap_or(&units[0]);
     diagnostic.file = unit.path.clone();
     diagnostic.span.start = diagnostic.span.start.saturating_sub(unit.base);
     diagnostic.span.end = diagnostic.span.end.saturating_sub(unit.base);

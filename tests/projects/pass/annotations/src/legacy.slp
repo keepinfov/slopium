@@ -1,0 +1,11 @@
+; The declarations another module is warned about for using (`D-122`). They are
+; in a module of their own on purpose: a `deprecated` is interface, so the
+; manager has to rebuild what depends on this file when one is added or taken
+; away, and a warning that only ever appeared in the module it was written in
+; would prove nothing about that.
+(export widen retry-limit)
+
+(fn (deprecated "call `widen-checked` instead") widen ((value i32)) -> i64
+  (as i64 value))
+
+(const (deprecated "read the limit from the manifest") retry-limit 3)

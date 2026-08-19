@@ -73,6 +73,48 @@ value when the literal cannot choose one for itself (`D-121`).
 (const greeting "hello")
 ```
 
+### Annotations
+
+A declaration carries an **annotation** in the list written between its
+keyword and its name, and it may carry more than one. The slot ends at the
+name, which is an atom for `fn`, `struct`, `enum` and `const` and a string for
+`extern` and `test`, so nothing a declaration could already write became
+ambiguous (`D-122`). `export` and `take` have no slot: neither introduces a
+name.
+
+```lisp
+(fn (inline) blend ((a i64) (b i64)) -> i64 (* (+ a b) 2))
+(fn (deprecated "call `parse-line` instead") parse ((s (& String))) -> i64 0)
+(const (deprecated) retry-limit 3)
+(fn (inline) (deprecated) legacy () -> i64 0)
+```
+
+There are two annotations, and each one says which declarations it applies to.
+Writing one where it does not apply is refused by name, as is an unknown name,
+a wrong argument and the same annotation written twice.
+
+| Annotation | Arguments | Applies to | Meaning |
+| --- | --- | --- | --- |
+| `inline` | none | `fn` | this body is worth copying into its callers |
+| `deprecated` | zero or one string | `fn`, `extern`, `const` | every use warns, with the string as a note |
+
+`inline` is a hint and only a hint: whether inlining is *sound* — across a
+module boundary, into a recursive function, through the C boundary — is the
+optimizer's to decide and the annotation moves none of it. What it moves is the
+size at which a body stops being worth copying.
+
+A use of a `deprecated` declaration is a warning rather than an error, so the
+program still compiles; `SL0800` is the code, and `docs/diagnostics.md`
+describes the family. The name of an annotation is reserved nowhere else: a
+binding, a function or a field may be called `inline`, because the word means
+something only in the slot.
+
+Every declaration form carries the slot, including the ones no annotation
+applies to yet. That is the point of the mechanism rather than an oversight —
+a foreign record's `repr` and an interrupt handler's calling convention arrive
+with the target that needs them (`D-110`), and after the freeze at v0.10 a new
+form cannot be added while a new annotation can.
+
 Generic applications use S-expressions, for example `(Box String)` and
 `(Result i64 Error)`. Type arguments are inferred at calls and constructors.
 The compiler monomorphizes only reachable concrete instances. A generic

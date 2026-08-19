@@ -19,7 +19,19 @@ Code families are stable:
 - `SL04xx`: pattern matching and entry/test rules;
 - `SL05xx`: target and ABI backend;
 - `SL06xx`: compiler I/O and external toolchain;
-- `SL07xx`: internal compiler errors.
+- `SL07xx`: internal compiler errors;
+- `SL08xx`: **warnings** — a program that compiles, about which the compiler
+  has something to say. `SL0800` is a use of a declaration somebody annotated
+  `deprecated` (`D-122`).
+
+Every family but the last is a refusal. A warning carries `severity` of
+`warning` rather than `error`, renders as `warning[SL08xx]`, and leaves the
+compilation successful: `slopic` prints it and exits `0`. Which compilation
+reports a given warning is decided by what it was asked to build — a warning
+about a dependency's own source belongs to the dependency, and when `slopium`
+builds one object per module, only the module being compiled reports its own.
+So a build prints each warning once, and a module whose object was already
+fresh prints nothing.
 
 `SL10xx` belongs to the project manager rather than the compiler, and is plain
 text rather than JSON — `slopium` reports one error and exits.

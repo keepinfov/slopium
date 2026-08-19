@@ -1,0 +1,7 @@
+; An annotation is a list between a declaration's keyword and its name
+; (`D-122`), and the names it may carry are a closed table. A misspelling is a
+; refusal about the annotation rather than about the declaration under it,
+; which is the whole reason the mechanism has a position of its own.
+(fn (inlien) hot ((x i64)) -> i64 (* x x))
+
+(fn main () -> i32 0)

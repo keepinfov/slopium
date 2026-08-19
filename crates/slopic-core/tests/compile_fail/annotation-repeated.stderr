@@ -1,0 +1,4 @@
+annotation-repeated.slp:3:15: error[SL0100]: `inline` is written more than once
+  |
+ 3 | (fn (inline) (inline) hot ((x i64)) -> i64 (* x x))
+  |               ^^^^^^

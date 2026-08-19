@@ -1,0 +1,4 @@
+warning[SL0800]: `widen` is deprecated
+= note: call `widen-checked` instead
+warning[SL0800]: `retry-limit` is deprecated
+= note: read the limit from the manifest

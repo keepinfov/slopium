@@ -1,0 +1,5 @@
+deprecated-const.slp:5:20: warning[SL0800]: `com1-data` is deprecated
+  |
+ 5 | (fn port () -> u16 com1-data)
+  |                    ^^^^^^^^^
+  = note: read the port from the manifest

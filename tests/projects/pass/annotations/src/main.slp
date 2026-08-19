@@ -1,0 +1,58 @@
+; How a declaration is annotated (`D-122`): a list written between a
+; declaration's keyword and its name. The slot ends at the name, so nothing a
+; declaration could already write became ambiguous, and every future annotation
+; — `repr` on a foreign record, `interrupt` on a handler — costs no grammar.
+(take std:io println println-i64)
+(take std:string from-i64 concat)
+(take legacy widen retry-limit)
+
+; `inline` is a hint to the optimizer and nothing more: a body worth copying
+; into its callers. Everything that decides whether inlining is *sound* — the
+; module boundary, recursion, the C boundary — is still the optimizer's, so the
+; annotation cannot make this program mean anything else.
+(fn (inline) blend ((a i64) (b i64)) -> i64
+  (let one (+ a b))
+  (let two (* one 3))
+  (let three (- two a))
+  (let four (+ three b))
+  (let five (* four 2))
+  (let six (- five 1))
+  (let seven (+ six a))
+  (let eight (* seven 2))
+  (- eight b))
+
+(fn mixed ((n i64)) -> i64
+  (+ (blend n 3) (blend n 4)))
+
+; A hinted body that owns what it builds, so the release profile copies drop
+; elaboration into its caller rather than only arithmetic: a body inlined
+; wrong here is a double free or a leak, and neither is a type error.
+(fn (inline) decorated ((n i64)) -> String
+  (let mark "#")
+  (let digits (from-i64 n))
+  (let one (concat (& mark) (& digits)))
+  (let two (concat (& one) (& mark)))
+  (let three (concat (& two) (& digits)))
+  (let four (concat (& three) (& mark)))
+  (let five (concat (& four) (& digits)))
+  (concat (& five) (& mark)))
+
+(fn label ((n i64)) -> String
+  (decorated n))
+
+; An annotation name reserves nothing: `inline` is special in the slot and is
+; an ordinary name everywhere else, which is what this binding is here to say.
+(fn ordinary-names () -> i64
+  (let inline 4)
+  (let deprecated 5)
+  (+ inline deprecated))
+
+; Two uses of one deprecated function, so the warning is per use rather than
+; per declaration, and one use of a deprecated `const`.
+(fn main () -> unit
+  (println-i64 (mixed 2))
+  (println-i64 (ordinary-names))
+  (println-i64 (+ (widen 20) (widen 22)))
+  (println-i64 retry-limit)
+  (let name (label 8))
+  (println (& name)))

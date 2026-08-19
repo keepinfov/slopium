@@ -1,0 +1,10 @@
+deprecated-call.slp:9:6: warning[SL0800]: `parse` is deprecated
+  |
+ 9 |   (+ (parse 3) (retired)))
+  |      ^^^^^^^^^
+  = note: call `parse-line` instead
+
+deprecated-call.slp:9:16: warning[SL0800]: `retired` is deprecated
+  |
+ 9 |   (+ (parse 3) (retired)))
+  |                ^^^^^^^^^

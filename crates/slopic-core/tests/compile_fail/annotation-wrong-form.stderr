@@ -1,0 +1,4 @@
+annotation-wrong-form.slp:5:10: error[SL0100]: `deprecated` does not apply to a `struct`; it applies to a `fn`, an `extern` or a `const`
+  |
+ 5 | (struct (deprecated) Legacy ((value i64)))
+  |          ^^^^^^^^^^

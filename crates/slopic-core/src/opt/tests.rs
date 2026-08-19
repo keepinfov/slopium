@@ -231,6 +231,57 @@ fn inlines_a_small_leaf_function() {
     );
 }
 
+/// A body over the ordinary ceiling, so that the annotation is the only thing
+/// that can decide it (`D-122`).
+const BIG_CALLEE: &str = r#"
+        (fn blend ((a i64) (b i64)) -> i64
+          (let one (+ a b))
+          (let two (* one 3))
+          (let three (- two a))
+          (let four (+ three b))
+          (let five (* four 2))
+          (let six (- five 1))
+          (let seven (+ six a))
+          (let eight (* seven 2))
+          (- eight b))
+        (fn probe ((n i64)) -> i64 (blend n 3))
+        (fn main () -> i32 0)
+    "#;
+
+#[test]
+fn a_body_over_the_ceiling_is_left_alone() {
+    let module = release(BIG_CALLEE);
+    assert!(
+        calls(function(&module, "probe"), "blend"),
+        "the ceiling is what the annotation moves, so it has to hold without one"
+    );
+}
+
+#[test]
+fn an_inline_annotation_moves_the_ceiling() {
+    let module = release(&BIG_CALLEE.replace("(fn blend", "(fn (inline) blend"));
+    let probe = function(&module, "probe");
+    assert!(
+        !calls(probe, "blend"),
+        "the hint should have inlined the call: {:#?}",
+        instructions(probe)
+    );
+}
+
+#[test]
+fn an_inline_annotation_does_not_inline_a_recursive_function() {
+    // The hint moves one number. Everything that makes inlining sound — and
+    // termination is the loudest of them — is still the pass's to decide.
+    let source = r#"
+        (fn (inline) countdown ((n i64)) -> i64
+          (if (< n 1) 0 (countdown (- n 1))))
+        (fn probe ((n i64)) -> i64 (countdown n))
+        (fn main () -> i32 0)
+    "#;
+    let module = release(source);
+    assert!(calls(function(&module, "probe"), "countdown"));
+}
+
 #[test]
 fn does_not_inline_an_extern_even_when_a_body_appears_under_its_name() {
     // Opacity today rests on an extern having no `MirFunction`. Planting one

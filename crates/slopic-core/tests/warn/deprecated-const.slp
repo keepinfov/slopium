@@ -1,0 +1,7 @@
+; A `const` is inlined at its use (`D-121`), and the use is still where the
+; warning belongs: it is what a reader has to change.
+(const (deprecated "read the port from the manifest") com1-data 0x3F8 : u16)
+
+(fn port () -> u16 com1-data)
+
+(fn main () -> i32 0)
