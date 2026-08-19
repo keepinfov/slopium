@@ -1,12 +1,43 @@
 name: ci
 
+# `main` is only ever updated through a pull request, so a branch is checked on
+# the pull request and `main` is checked again after the merge. Pushing a branch
+# without one runs nothing, which is deliberate: a branch nobody has proposed is
+# not asking a question.
+
 on:
   push:
+    branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  # The version invariants of AGENTS.md §7: the manifest, the lockfile, the
+  # flake and the committed consumer's lock all say the same number. Seconds,
+  # and it is the check whose failure is only ever discovered at a release.
+  version:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/release-check.sh --check
+
+  # Early signal, and nothing that has to wait on a network. `runtime-check.sh`
+  # runs its ASan half here and skips the valgrind one, because valgrind is not
+  # on the runner image and `apt-get` is a dependency this job does not need:
+  # the `verify` job below runs the same script inside `nix develop`, where
+  # valgrind comes from the flake and `SLOPIUM_STRICT=1` refuses to skip it.
+  # Installing it twice cost this job the three minutes it is supposed to save,
+  # and hung for half an hour the first time a mirror was slow.
   cargo:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -15,13 +46,13 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo test --workspace
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: sudo apt-get update && sudo apt-get install -y valgrind
       - run: scripts/runtime-check.sh
         env:
           SLOPIUM_ASAN_DETECT_LEAKS: "1"
 
   projects:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -45,8 +76,11 @@ jobs:
 
   # The commit contract of AGENTS.md, over the commits this event adds and no
   # others: the history before v0.4 predates the contract and would fail it.
+  # Merges are included — the one that lands a pull request carries its title,
+  # which is a subject like any other.
   commits:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
         with:

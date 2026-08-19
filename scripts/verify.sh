@@ -12,6 +12,10 @@ set -euo pipefail
 workspace_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$workspace_dir"
 
+# The cheapest check in the suite, and the one whose failure invalidates a
+# release rather than a build, so it runs before anything is compiled.
+"$workspace_dir/scripts/release-check.sh" --check
+
 cargo fmt --all -- --check
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings

@@ -1,0 +1,191 @@
+name: release
+
+# What a `v*` tag does. `AGENTS.md` §7 says pushing the tag publishes the
+# release; this is that, and it publishes a **draft**: a person looks at the
+# asset list and presses the button, because a release is the one thing in this
+# repository that another commit cannot undo.
+#
+# `workflow_dispatch` rehearses the whole of it against an existing tag and
+# publishes nothing, which is how a change to this file is tested.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to rehearse against. Builds everything, publishes nothing.'
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Cheap, and everything else depends on it. A tag that disagrees with the
+  # manifest, or a version with nothing written under it in the changelog, is a
+  # release that should not start rather than one to cancel half-built.
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - id: v
+        name: the tag, the manifest and the changelog agree
+        # A ${{ }} expression is pasted in before the shell parses the script,
+        # so a tag name would be shell source rather than data. It goes through
+        # the environment instead, here and below.
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -eu
+          scripts/release-check.sh --check-release "$TAG"
+          echo "version=$(scripts/release-check.sh)" >> "$GITHUB_OUTPUT"
+          case "$TAG" in
+            *-*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;;
+            *) echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: the lockfile matches the manifests
+        run: cargo metadata --locked --format-version 1 > /dev/null
+
+  # The same suite `main` is held to, at the commit being released. It is the
+  # slow job and it gates the publish rather than the build, so an artifact is
+  # ready to look at while it finishes.
+  suite:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: cachix/install-nix-action@v31
+      - env:
+          SLOPIUM_STRICT: "1"
+          SLOPIUM_ASAN_DETECT_LEAKS: "1"
+        run: nix develop --command scripts/verify.sh
+
+  build:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+
+      - run: cargo build --release --workspace --locked
+
+      # Three programs and the completions they generate. The C runtime and the
+      # bundled library are compiled into the binaries rather than shipped
+      # beside them, so an archive of `bin/` is a working toolchain.
+      - name: stage the archive
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -eux
+          name="slopium-$VERSION-x86_64-linux"
+          mkdir -p "staging/$name/bin" "staging/$name/completions"
+          cp target/release/slopic target/release/slopium \
+             target/release/slopium-lsp "staging/$name/bin/"
+          for shell in bash zsh fish; do
+            target/release/slopium completions "$shell" \
+              > "staging/$name/completions/slopium.$shell"
+          done
+          cp LICENSE README.md CHANGELOG.md "staging/$name/"
+          tar -C staging -czf "$name.tar.gz" "$name"
+          echo "ARCHIVE=$name.tar.gz" >> "$GITHUB_ENV"
+
+      # An archive that cannot compile a program is a failure that looks like a
+      # success, and it has to be caught here rather than by whoever downloads
+      # it first.
+      - name: the staged toolchain builds and runs a program
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -eux
+          root="$PWD/staging/slopium-$VERSION-x86_64-linux"
+          work="$(mktemp -d)"
+          cd "$work"
+          "$root/bin/slopium" new hello
+          cd hello
+          output="$("$root/bin/slopium" run)"
+          echo "$output"
+          echo "$output" | grep -q .
+
+      - name: checksums
+        run: sha256sum "$ARCHIVE" > SHA256SUMS && cat SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-assets
+          path: |
+            *.tar.gz
+            SHA256SUMS
+          if-no-files-found: error
+
+  publish:
+    needs: [verify, suite, build]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: dist
+
+      - name: the release notes are the changelog's own section
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -eu
+          awk -v version="$VERSION" '
+            $0 == "## [" version "]" || index($0, "## [" version "] - ") == 1 { inside = 1; next }
+            /^## \[/ { inside = 0 }
+            inside { print }
+          ' CHANGELOG.md > notes.md
+          test -s notes.md
+          cat notes.md
+
+      # For a toolchain people install and run, provenance is not decoration:
+      # `gh attestation verify <file> --repo keepinfov/slopium` answers where an
+      # archive came from.
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/*.tar.gz
+
+      - name: draft the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.verify.outputs.version }}
+          PRERELEASE: ${{ needs.verify.outputs.prerelease }}
+        run: |
+          set -eu
+          flags="--draft"
+          [ "$PRERELEASE" = "true" ] && flags="$flags --prerelease"
+          # shellcheck disable=SC2086
+          gh release create "$TAG" $flags \
+            --title "slopium $VERSION" \
+            --notes-file notes.md \
+            dist/*.tar.gz dist/SHA256SUMS
