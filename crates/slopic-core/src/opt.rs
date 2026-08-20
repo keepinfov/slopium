@@ -19,7 +19,7 @@
 //! wrapping.
 
 use crate::cfg::{defs, successors, terminator_uses, uses, Cfg};
-use crate::diagnostic::CompileResult;
+use crate::diagnostic::{codes, CompileResult, Diagnostic};
 use crate::mir::{
     BasicBlock, BinaryOp, BlockId, Instruction, LocalId, MirFunction, MirModule, Statement,
     Terminator,
@@ -34,11 +34,36 @@ mod inline;
 /// mistake in one of them from hanging the compiler instead of failing a test.
 const MAX_ROUNDS: usize = 8;
 
+/// Upper bound on the iterations of one constant-propagation dataflow.
+///
+/// Deliberately not shared with [`MAX_ROUNDS`], because the two bounds mean
+/// opposite things. That one bounds a pipeline of passes each of which is
+/// sound on its own, so stopping early costs optimization. This one bounds a
+/// lattice that is *optimistic* until it converges: a local still reads
+/// `Known` where a predecessor not yet visited would have made it `Varying`.
+/// Reaching this bound is not a missed optimization, it is a result that may
+/// not be used.
+const MAX_DATAFLOW_ROUNDS: usize = MAX_ROUNDS * 4;
+
 /// Runs the release optimization pipeline.
 ///
 /// Returns the diagnostics from MIR verification if a pass produced invalid
 /// MIR, naming the pass responsible.
 pub fn optimize(file: &str, module: &mut MirModule) -> CompileResult<()> {
+    optimize_within(file, module, MAX_ROUNDS)
+}
+
+/// [`optimize`] with the pipeline bound spelled out, so a test can reach it.
+///
+/// Stopping early here is safe by construction and that is worth stating: each
+/// pass preserves observable behaviour on its own, so a module that is still
+/// improving when the rounds run out is a correct module that was optimized
+/// less. The bound exists so that a mistake in one pass hangs a test rather
+/// than the compiler.
+fn optimize_within(file: &str, module: &mut MirModule, rounds: usize) -> CompileResult<()> {
+    // Before any pass touches it, and in every profile: see `check_after`.
+    verify::check_block_targets(file, module, None)?;
+
     // Inlining runs first and once: it enlarges function bodies, and the
     // per-function passes are what clean up the result.
     inline::run(module);
@@ -49,11 +74,11 @@ pub fn optimize(file: &str, module: &mut MirModule) -> CompileResult<()> {
     // really do reach the device (`D-114`).
     let mut volatile = volatile_counts(module);
 
-    for round in 0..MAX_ROUNDS {
+    for _ in 0..rounds {
         let mut changed = false;
 
         for function in functions_mut(module) {
-            changed |= propagate_constants(function);
+            changed |= propagate_constants(file, function)?;
         }
         check_after(file, module, "constant propagation")?;
         check_volatile(&volatile, module, "constant propagation", Bound::Exact);
@@ -77,15 +102,27 @@ pub fn optimize(file: &str, module: &mut MirModule) -> CompileResult<()> {
         if !changed {
             break;
         }
-        debug_assert!(
-            round + 1 < MAX_ROUNDS,
-            "optimization did not reach a fixpoint"
-        );
     }
+    // Falling out of the loop still improving is a legitimate outcome: a
+    // program can simply be large enough to keep paying off after eight
+    // rounds. Every pass here preserves observable behaviour on its own, so
+    // the bound costs optimization and never correctness, and it keeps what
+    // the rounds it got achieved. It used to be a `debug_assert!`, which
+    // aborted a debug or CI build for the program being big.
     Ok(())
 }
 
+/// The gate after each pass.
+///
+/// Two checks, because they answer in different profiles. [`verify::check`] is
+/// the whole verifier and runs when [`verify::enabled`] says so, which a
+/// release build does not — and release is the only profile this pipeline runs
+/// in. [`verify::check_block_targets`] is the one invariant whose failure is a
+/// panic rather than a wrong answer, because `simplify_cfg` indexes
+/// `function.blocks` by a terminator's target and renumbers blocks through a
+/// table indexed the same way, so it runs in every profile.
 fn check_after(file: &str, module: &MirModule, pass: &str) -> CompileResult<()> {
+    verify::check_block_targets(file, module, Some(pass))?;
     verify::check(file, module, pass)
 }
 
@@ -203,7 +240,24 @@ fn meet_states(into: &mut State, from: &State) -> bool {
 ///
 /// This replaces the intra-block folder, which reset its state at every block
 /// boundary and so could not see through a branch or a loop preheader.
-fn propagate_constants(function: &mut MirFunction) -> bool {
+fn propagate_constants(file: &str, function: &mut MirFunction) -> CompileResult<bool> {
+    propagate_constants_within(file, function, MAX_DATAFLOW_ROUNDS)
+}
+
+/// [`propagate_constants`] with the bound spelled out, so a test can reach it.
+///
+/// Returns an internal diagnostic, and folds nothing at all, when the lattice
+/// has not converged by `max_rounds`. That is the whole point: the states are
+/// too optimistic until the loop settles, and rewriting a `Branch` into a
+/// `Goto` on one of them is a miscompile rather than a missed optimization.
+/// The bound being reachable on a real program would mean the bound is wrong,
+/// which is a thing to find out from a failing build rather than from output
+/// that does not match the source.
+fn propagate_constants_within(
+    file: &str,
+    function: &mut MirFunction,
+    max_rounds: usize,
+) -> CompileResult<bool> {
     let cfg = Cfg::new(function);
     let locals = function.locals.len();
     let blocks = function.blocks.len();
@@ -241,13 +295,25 @@ fn propagate_constants(function: &mut MirFunction) -> bool {
                 }
             }
         }
-        rounds += 1;
-        if !changed || rounds >= MAX_ROUNDS * 4 {
+        if !changed {
             break;
+        }
+        rounds += 1;
+        if rounds >= max_rounds {
+            return Err(vec![Diagnostic::error(
+                codes::INTERNAL,
+                file,
+                function.span,
+                format!(
+                    "internal compiler error: constant propagation did not settle in `{}` \
+                     after {max_rounds} rounds, so nothing was folded; this is a compiler bug",
+                    function.name
+                ),
+            )]);
         }
     }
 
-    rewrite_with_constants(function, &entry)
+    Ok(rewrite_with_constants(function, &entry))
 }
 
 /// Runs a block's statements over `state`, returning the state at its exit.

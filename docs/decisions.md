@@ -144,6 +144,7 @@ of what was believed at the time is the part worth keeping.
 - [D-129 — hexadecimal is two functions and an uppercase table](#d-129--hexadecimal-is-two-functions-and-an-uppercase-table)
 - [D-130 — failing on purpose, and a failing test that says what it compared](#d-130--failing-on-purpose-and-a-failing-test-that-says-what-it-compared)
 - [D-131 — the release page is generated from the titles that were merged](#d-131--the-release-page-is-generated-from-the-titles-that-were-merged)
+- [D-132 — an optimistic analysis that did not settle is an error, not a result](#d-132--an-optimistic-analysis-that-did-not-settle-is-an-error-not-a-result)
 - [D-133 — a deferred expression runs before the scope's drops, and may not move](#d-133--a-deferred-expression-runs-before-the-scopes-drops-and-may-not-move)
 
 ## D-001 — a native compiler, without LLVM
@@ -2590,6 +2591,40 @@ than something the tag delivers. And the job that builds the page needs the
 whole history and every tag, where every other job in that workflow is happy
 with a shallow clone: a walk from the previous tag has neither end of it
 otherwise.
+
+## D-132 — an optimistic analysis that did not settle is an error, not a result
+
+Status: approved · 2026-08-20
+
+The release pipeline carried two iteration bounds written as if they meant the
+same thing, and they do not. The pipeline's bound is over passes each of which
+preserves observable behaviour on its own, so stopping early leaves a correct
+module that was optimized less; it was nonetheless a `debug_assert!`, which
+aborted a debug or continuous-integration build whenever a program was merely
+large enough to still be paying off after eight rounds. Constant propagation's
+bound is over a dataflow whose lattice starts at the top and is lowered as
+predecessors are visited, so an unfinished run leaves states that are too
+optimistic — a local reading `Known` where a predecessor not yet propagated
+would have made it `Varying` — and the rewrite then folded on them and turned a
+`Branch` into a `Goto`. Bailing out of a pessimistic analysis is a missed
+optimization; bailing out of an optimistic one and trusting the result is a
+miscompile, and it was reachable only under `optimize`, which is the profile MIR
+verification is off in.
+
+So the two bounds are spelled differently now. The pipeline's is quiet and
+keeps what the rounds it got achieved. The dataflow's folds nothing at all and
+reports `SL0700` naming the function, because a bound that is actually reached
+means the bound is wrong, and that is a thing to learn from a failing build
+rather than from a program whose output does not match its source.
+
+The same argument decides a third thing. The passes index `function.blocks` by
+a terminator's target and renumber blocks through a table indexed the same way,
+so a target past the end is an out-of-bounds index rather than a bad program —
+a panic, which is the one failure mode `D-031` does not allow the compiler.
+The verifier already refuses it and does not run in a release build, so that
+one check is split out and runs in every profile, while everything else the
+verifier says stays where it was: being wrong about a type produces a bad
+program, which is what the gated pass is for.
 
 ## D-133 — a deferred expression runs before the scope's drops, and may not move
 
