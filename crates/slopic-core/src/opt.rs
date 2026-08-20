@@ -18,6 +18,7 @@
 //! the fold is known not to trap — [`fold_binary`] returns `None` rather than
 //! wrapping.
 
+use crate::ast::Type;
 use crate::cfg::{defs, successors, terminator_uses, uses, Cfg};
 use crate::diagnostic::{codes, CompileResult, Diagnostic};
 use crate::mir::{
@@ -25,6 +26,7 @@ use crate::mir::{
     Terminator,
 };
 use crate::verify;
+use std::collections::{HashMap, HashSet};
 
 mod inline;
 
@@ -63,6 +65,12 @@ pub fn optimize(file: &str, module: &mut MirModule) -> CompileResult<()> {
 fn optimize_within(file: &str, module: &mut MirModule, rounds: usize) -> CompileResult<()> {
     // Before any pass touches it, and in every profile: see `check_after`.
     verify::check_block_targets(file, module, None)?;
+
+    // Devirtualization runs before inlining, and that order is the whole
+    // point: it turns a call through a block into an ordinary `Call`, which is
+    // the only shape the inliner looks for (`D-141`).
+    devirtualize(module);
+    check_after(file, module, "devirtualization")?;
 
     // Inlining runs first and once: it enlarges function bodies, and the
     // per-function passes are what clean up the result.
@@ -121,6 +129,150 @@ fn optimize_within(file: &str, module: &mut MirModule, rounds: usize) -> Compile
 /// panic rather than a wrong answer, because `simplify_cfg` indexes
 /// `function.blocks` by a terminator's target and renumbers blocks through a
 /// table indexed the same way, so it runs in every profile.
+/// Turns a call through a closure built in the same block into a direct call
+/// (`D-141`).
+///
+/// A call through a function value is indirect even when the block it reads the
+/// address out of was built three instructions earlier, because the callee is a
+/// local and nothing looked at where the local came from. When it came from a
+/// `StructNew` of a closure layout whose code word is a known `FnAddr`, the
+/// symbol is known here and the call can name it.
+///
+/// The block is still passed — a lifted body takes it as its last parameter —
+/// so this removes an indirect jump and not an allocation. What removes the
+/// allocation is what happens next: the inliner only ever matches an ordinary
+/// `Call`, so a devirtualized one becomes a candidate, and once the body is
+/// spliced in nothing reads the block and dead code elimination takes it.
+///
+/// **Only within one basic block, and only in order.** Tracing across blocks
+/// would need to prove the definition dominates the call and that nothing
+/// reassigned it on the way; a straight line needs neither, and a closure built
+/// and called in the same breath — which is what every composition and every
+/// `map` over a lambda is — is a straight line.
+fn devirtualize(module: &mut MirModule) -> bool {
+    // A `FnAddr` carries the mangled symbol and a `Call` carries the name, so
+    // the way back is to ask which function would have produced that symbol.
+    // The name, and the parameter types the callee actually declares. Those
+    // are not the argument types the indirect call carried: a lifted body takes
+    // its block as an `i64` so that returning does not drop what it was handed
+    // (`D-101`), while the value passed is typed as the `Fn` it is. Same word,
+    // two conventions, and a direct call has to use the callee's.
+    let symbols = module
+        .functions
+        .iter()
+        .map(|function| {
+            let params = function
+                .params
+                .iter()
+                .map(|param| function.locals[*param].ty.clone())
+                .collect::<Vec<_>>();
+            (
+                crate::lowering::function_symbol(&function.name, false),
+                (function.name.clone(), params),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let layouts = module
+        .structs
+        .iter()
+        .map(|item| item.name.clone())
+        .collect::<HashSet<_>>();
+
+    let mut changed = false;
+    for function in functions_mut(module) {
+        for block in &mut function.blocks {
+            changed |= devirtualize_block(block, &symbols, &layouts);
+        }
+    }
+    changed
+}
+
+fn devirtualize_block(
+    block: &mut BasicBlock,
+    symbols: &HashMap<String, (String, Vec<Type>)>,
+    layouts: &HashSet<String>,
+) -> bool {
+    // What each local was last defined as, in this block and above this point.
+    // Rebuilt as the walk goes, so a local reassigned in between is simply the
+    // later definition and traces to whatever that was.
+    let mut defined: HashMap<LocalId, usize> = HashMap::new();
+    let mut rewrites = Vec::new();
+
+    for (position, statement) in block.statements.iter().enumerate() {
+        if let Instruction::CallValue { callee, args, .. } = &statement.instruction {
+            if let Some((name, params)) =
+                trace_closure_symbol(&block.statements, &defined, *callee, symbols, layouts)
+            {
+                // An arity that disagrees is not this pass's to report; leaving
+                // the indirect call alone keeps the verifier's complaint about
+                // it pointing where it did.
+                if params.len() == args.len() {
+                    rewrites.push((position, name, params));
+                }
+            }
+        }
+        if let Some(local) = defs(&statement.instruction) {
+            defined.insert(local, position);
+        }
+    }
+
+    let changed = !rewrites.is_empty();
+    for (position, name, params) in rewrites {
+        let Instruction::CallValue {
+            dst, args, result, ..
+        } = block.statements[position].instruction.clone()
+        else {
+            continue;
+        };
+        block.statements[position].instruction = Instruction::Call {
+            dst,
+            callee: name,
+            args,
+            arg_types: params,
+            result,
+        };
+    }
+    changed
+}
+
+/// The function a callee local names, when it can be traced to a closure block
+/// built in this block (`D-141`).
+fn trace_closure_symbol(
+    statements: &[Statement],
+    defined: &HashMap<LocalId, usize>,
+    callee: LocalId,
+    symbols: &HashMap<String, (String, Vec<Type>)>,
+    layouts: &HashSet<String>,
+) -> Option<(String, Vec<Type>)> {
+    // The callee is the code word read out of a block.
+    let Instruction::FieldLoad { base, index, .. } =
+        &statements[*defined.get(&callee)?].instruction
+    else {
+        return None;
+    };
+    if *index != 0 {
+        return None;
+    }
+    // The block itself, through however many plain copies of it.
+    let mut block_local = *base;
+    for _ in 0..statements.len() {
+        match &statements[*defined.get(&block_local)?].instruction {
+            Instruction::Assign { src, .. } => block_local = *src,
+            Instruction::StructNew { name, fields, .. } if layouts.contains(name) => {
+                // The code word is field zero of a closure layout (`D-101`).
+                let Instruction::FnAddr { symbol, .. } =
+                    &statements[*defined.get(fields.first()?)?].instruction
+                else {
+                    return None;
+                };
+                return symbols.get(symbol).cloned();
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
 fn check_after(file: &str, module: &MirModule, pass: &str) -> CompileResult<()> {
     verify::check_block_targets(file, module, Some(pass))?;
     verify::check(file, module, pass)

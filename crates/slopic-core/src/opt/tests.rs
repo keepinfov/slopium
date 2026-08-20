@@ -716,3 +716,46 @@ fn a_pipeline_that_runs_out_of_rounds_still_answers() {
     crate::verify::check("test.slp", &module, "a bounded pipeline")
         .expect("the MIR is still valid");
 }
+
+#[test]
+fn a_closure_built_in_the_same_block_is_called_directly() {
+    // The block the address is read out of was built three instructions
+    // earlier, so the symbol is known here and the call can name it (`D-141`).
+    // Once it is an ordinary `Call` the inliner matches it, which is what turns
+    // the body into the constant below.
+    let source = r#"
+        (fn probe () -> i64
+          (let f (lambda () ((x i64)) -> i64 (* x 3)))
+          (f 7))
+        (fn main () -> i32 0)
+    "#;
+    let module = release(source);
+    let probe = function(&module, "probe");
+    assert!(
+        !instructions(probe)
+            .iter()
+            .any(|instruction| matches!(instruction, Instruction::CallValue { .. })),
+        "the indirect call survived: {:?}",
+        instructions(probe)
+    );
+}
+
+#[test]
+fn a_call_through_a_value_that_is_not_a_known_block_stays_indirect() {
+    // The callee arrives as a parameter, so nothing in this function knows what
+    // it points at and the call has to stay indirect. A devirtualizer that
+    // guessed here would be picking a symbol out of the air.
+    let source = r#"
+        (fn apply-to ((f (Fn (i64) i64)) (n i64)) -> i64 (f n))
+        (fn main () -> i32 0)
+    "#;
+    let module = release(source);
+    let apply = function(&module, "apply-to");
+    assert!(
+        instructions(apply)
+            .iter()
+            .any(|instruction| matches!(instruction, Instruction::CallValue { .. })),
+        "an unknowable callee must stay indirect: {:?}",
+        instructions(apply)
+    );
+}
