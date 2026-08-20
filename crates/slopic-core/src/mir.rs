@@ -5,7 +5,7 @@ use crate::sema::{
     TypedProgram, TypedTest,
 };
 use serde::Serialize;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 pub type LocalId = usize;
 pub type BlockId = usize;
@@ -43,6 +43,13 @@ pub struct MirEnum {
     pub name: String,
     pub variants: Vec<MirVariant>,
     pub emit: bool,
+    /// No variant carries anything, so a value of this enum is its tag and
+    /// nothing else — one machine word, copied rather than owned (`D-140`).
+    ///
+    /// Recorded here rather than recomputed, so that lowering, both backends
+    /// and the verifier read one answer. `Type` cannot answer it: it has no
+    /// module in hand, and `Named` says nothing about what it names.
+    pub fieldless: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -417,6 +424,15 @@ pub enum Terminator {
 }
 
 pub fn lower(program: &TypedProgram) -> MirModule {
+    // Which enums are a tag and nothing else (`D-140`). Computed once here
+    // because a `Builder` is handed one function and never the program, and
+    // this is the one thing it has to know about a type it did not declare.
+    let fieldless = program
+        .enums
+        .iter()
+        .filter(|item| item.fieldless())
+        .map(|item| item.name.clone())
+        .collect::<HashSet<_>>();
     let mut functions = Vec::new();
     let mut tests = Vec::new();
     // Lifted `lambda` bodies join the functions and their environments join the
@@ -430,7 +446,7 @@ pub fn lower(program: &TypedProgram) -> MirModule {
         layouts.extend(lowered.layouts);
     };
     for function in &program.functions {
-        let mut lowered = lower_function(function);
+        let mut lowered = lower_function(function, &fieldless);
         // The hint belongs to the function somebody wrote, and to nothing a
         // `lambda` inside it was lifted into: an annotation is written on a
         // declaration, and a lifted body is not one.
@@ -438,7 +454,7 @@ pub fn lower(program: &TypedProgram) -> MirModule {
         collect(lowered);
     }
     for (index, test) in program.tests.iter().enumerate() {
-        let (test, lowered) = lower_test(index, test);
+        let (test, lowered) = lower_test(index, test, &fieldless);
         tests.push(test);
         functions.extend(lowered.lifted);
         layouts.extend(lowered.layouts);
@@ -481,6 +497,7 @@ pub fn lower(program: &TypedProgram) -> MirModule {
                     })
                     .collect(),
                 emit: true,
+                fieldless: item.fieldless(),
             })
             .collect(),
     }
@@ -496,16 +513,6 @@ fn mir_pattern_irrefutable(pattern: &TPattern) -> bool {
     }
 }
 
-/// Whether a borrow of this type has to be *read* to get the value out.
-///
-/// A borrow of a pointer-shaped value is that pointer, so it already holds
-/// everything there is; a borrow of anything else is the address of a slot, and
-/// the value is one load away. This is the same split `AddressOf` makes when it
-/// creates the borrow, asked in the other direction.
-fn reads_through_borrow(ty: &Type) -> bool {
-    matches!(ty, Type::Ref { inner, .. } if !crate::lowering::is_pointer_like(inner))
-}
-
 /// One typed function, and everything lowering it produced beside it.
 ///
 /// A `lambda` body becomes a function of its own and its environment becomes a
@@ -517,11 +524,12 @@ struct Lowered {
     layouts: Vec<MirStruct>,
 }
 
-fn lower_function(function: &TypedFunction) -> Lowered {
+fn lower_function(function: &TypedFunction, fieldless: &HashSet<String>) -> Lowered {
     let mut builder = Builder::new(
         function.name.clone(),
         function.return_type.clone(),
         function.span,
+        fieldless.clone(),
     );
     builder.scopes.push(BuilderScope::default());
     for param in &function.params {
@@ -546,8 +554,9 @@ fn lower_lambda(
     result: &Type,
     body: &TExpr,
     span: Span,
+    fieldless: HashSet<String>,
 ) -> Lowered {
-    let mut builder = Builder::new(name, result.clone(), span);
+    let mut builder = Builder::new(name, result.clone(), span, fieldless);
     builder.scopes.push(BuilderScope::default());
     for param in params {
         let local = builder.local(param.ty.clone(), Some(param.name.clone()), true);
@@ -595,7 +604,7 @@ fn lower_body(mut builder: Builder, body: &TExpr) -> Lowered {
     }
 }
 
-fn lower_test(index: usize, test: &TypedTest) -> (MirTest, Lowered) {
+fn lower_test(index: usize, test: &TypedTest, fieldless: &HashSet<String>) -> (MirTest, Lowered) {
     let function = TypedFunction {
         name: format!("__slop_test_{index}"),
         inline: false,
@@ -605,7 +614,7 @@ fn lower_test(index: usize, test: &TypedTest) -> (MirTest, Lowered) {
         body: test.body.clone(),
         span: test.span,
     };
-    let lowered = lower_function(&function);
+    let lowered = lower_function(&function, fieldless);
     (
         MirTest {
             name: test.name.clone(),
@@ -677,6 +686,12 @@ struct Builder {
     /// ordinary — `(println (& (concat (& a) (& b))))` opens three — and each
     /// one releases exactly what was borrowed inside it.
     temporaries: Vec<Value>,
+    /// The enums that are a tag and nothing else (`D-140`).
+    ///
+    /// A copy per function rather than a borrow: the set is one entry per
+    /// fieldless enum in the program, and threading a lifetime through the
+    /// builder to save that is a worse trade than the clone.
+    fieldless: HashSet<String>,
 }
 
 /// One open scope: what it owns, and what it deferred (`D-133`).
@@ -717,7 +732,7 @@ struct LoopTarget {
 }
 
 impl Builder {
-    fn new(name: String, return_type: Type, span: Span) -> Self {
+    fn new(name: String, return_type: Type, span: Span, fieldless: HashSet<String>) -> Self {
         Self {
             name,
             return_type,
@@ -739,6 +754,7 @@ impl Builder {
             lifted: Vec::new(),
             layouts: Vec::new(),
             temporaries: Vec::new(),
+            fieldless,
         }
     }
 
@@ -1036,13 +1052,13 @@ impl Builder {
             }
             TExprKind::Var(id) => {
                 let local = self.bindings[id];
-                if !expr.ty.is_copy() {
+                if !self.is_copy(&expr.ty) {
                     self.live.insert(*id, false);
                 }
                 Some(Value {
                     local,
                     ty: expr.ty.clone(),
-                    owned_temporary: !expr.ty.is_copy(),
+                    owned_temporary: !self.is_copy(&expr.ty),
                 })
             }
             TExprKind::Let {
@@ -1070,7 +1086,7 @@ impl Builder {
                 // in. The name's own local is not touched: it is a borrow of
                 // the field, and the field is what changed.
                 if let Some(place) = self.places.get(id).copied() {
-                    let old = (!value.ty.is_copy()).then(|| {
+                    let old = (!self.is_copy(&value.ty)).then(|| {
                         let old = self.temp(value.ty.clone());
                         self.emit(if place.enumeration {
                             Instruction::EnumFieldLoad {
@@ -1109,7 +1125,7 @@ impl Builder {
                     return None;
                 }
                 let dst = self.bindings[id];
-                if self.live.get(id).copied().unwrap_or(false) && !value.ty.is_copy() {
+                if self.live.get(id).copied().unwrap_or(false) && !self.is_copy(&value.ty) {
                     self.emit(Instruction::Drop {
                         local: dst,
                         ty: value.ty.clone(),
@@ -1173,7 +1189,7 @@ impl Builder {
             TExprKind::BorrowTemporary { value } => {
                 let inner = self.expr(value)?;
                 let src = inner.local;
-                if inner.owned_temporary && !inner.ty.is_copy() {
+                if inner.owned_temporary && !self.is_copy(&inner.ty) {
                     self.temporaries.push(inner);
                 }
                 let dst = self.temp(expr.ty.clone());
@@ -1294,7 +1310,15 @@ impl Builder {
                     _ => None,
                 };
                 if let Some(op) = op {
-                    let ty = args[0].ty.clone();
+                    // A fieldless enum compares as the machine word it is, so
+                    // the comparison is over `i64` rather than over a name the
+                    // backends have no arithmetic for (`D-140`). This is the
+                    // same thing `branch_pattern` has always done with a tag.
+                    let ty = if self.is_copy(&args[0].ty) && args[0].ty.strip_ref().is_named() {
+                        Type::I64
+                    } else {
+                        args[0].ty.clone()
+                    };
                     // A unary operator arrives with one argument and leaves
                     // with two: the constant that makes it the binary
                     // operation it already was. Neither backend learns a
@@ -1366,7 +1390,11 @@ impl Builder {
                         rhs: scaled,
                         ty: Type::U64,
                     });
-                } else if callee == "clone" && arg_types.first().is_some_and(reads_through_borrow) {
+                } else if callee == "clone"
+                    && arg_types
+                        .first()
+                        .is_some_and(|ty| self.reads_through_borrow(ty))
+                {
                     // The dereference (`D-100`). A borrow of a pointer-shaped
                     // value is that pointer, so cloning one is the runtime glue
                     // below; a borrow of anything else is the address of a slot,
@@ -1398,7 +1426,7 @@ impl Builder {
                     Some(Value {
                         local: dst,
                         ty: expr.ty.clone(),
-                        owned_temporary: !expr.ty.is_copy(),
+                        owned_temporary: !self.is_copy(&expr.ty),
                     })
                 }
             }
@@ -1453,7 +1481,7 @@ impl Builder {
                 let mut taken = Vec::new();
                 for capture in captures {
                     let local = self.bindings[&capture.from];
-                    if !capture.ty.is_copy() {
+                    if !self.is_copy(&capture.ty) {
                         self.live.insert(capture.from, false);
                     }
                     taken.push((local, capture.ty.clone()));
@@ -1466,6 +1494,7 @@ impl Builder {
                     result,
                     body,
                     self.current_span,
+                    self.fieldless.clone(),
                 );
                 self.lifted.push(lowered.function);
                 self.lifted.extend(lowered.lifted);
@@ -1520,7 +1549,7 @@ impl Builder {
                     Some(Value {
                         local: dst,
                         ty: expr.ty.clone(),
-                        owned_temporary: !expr.ty.is_copy(),
+                        owned_temporary: !self.is_copy(&expr.ty),
                     })
                 }
             }
@@ -1556,6 +1585,19 @@ impl Builder {
                     }
                 }
                 let dst = self.temp(expr.ty.clone());
+                // A fieldless enum *is* its tag, so building one is writing a
+                // constant and there is no block (`D-140`).
+                if self.is_copy(&expr.ty) {
+                    self.emit(Instruction::ConstInt {
+                        dst,
+                        value: *tag as i64,
+                    });
+                    return Some(Value {
+                        local: dst,
+                        ty: expr.ty.clone(),
+                        owned_temporary: false,
+                    });
+                }
                 self.emit(Instruction::EnumNew {
                     dst,
                     enum_name: enum_name.clone(),
@@ -1632,7 +1674,7 @@ impl Builder {
         result.map(|local| Value {
             local,
             ty: result_type.clone(),
-            owned_temporary: !result_type.is_copy(),
+            owned_temporary: !self.is_copy(result_type),
         })
     }
 
@@ -1712,7 +1754,7 @@ impl Builder {
         Some(Value {
             local: payload,
             ty: ok_type.clone(),
-            owned_temporary: !ok_type.is_copy(),
+            owned_temporary: !self.is_copy(ok_type),
         })
     }
 
@@ -1781,7 +1823,7 @@ impl Builder {
             if then_has != else_has {
                 let local = self.bindings[&id];
                 let ty = self.locals[local].ty.clone();
-                if !ty.is_copy() {
+                if !self.is_copy(&ty) {
                     let block = if then_has { then_end } else { else_end };
                     self.emit_in(block, Instruction::Drop { local, ty });
                 }
@@ -1792,7 +1834,7 @@ impl Builder {
         result.map(|local| Value {
             local,
             ty: expr.ty.clone(),
-            owned_temporary: !expr.ty.is_copy(),
+            owned_temporary: !self.is_copy(&expr.ty),
         })
     }
 
@@ -1825,11 +1867,18 @@ impl Builder {
                 self.branch_equal(value, expected, value_type, success, failure);
             }
             TPattern::Enum { tag, fields, .. } => {
-                let tag_value = self.temp(Type::I64);
-                self.emit(Instruction::EnumTag {
-                    dst: tag_value,
-                    base: value,
-                });
+                // A fieldless enum is its tag, so there is nothing to read out
+                // of it and the value compares directly (`D-140`).
+                let tag_value = if self.is_copy(value_type) {
+                    value
+                } else {
+                    let read = self.temp(Type::I64);
+                    self.emit(Instruction::EnumTag {
+                        dst: read,
+                        base: value,
+                    });
+                    read
+                };
                 let expected = self.temp(Type::I64);
                 self.emit(Instruction::ConstInt {
                     dst: expected,
@@ -1939,7 +1988,7 @@ impl Builder {
     ) {
         match pattern {
             TPattern::Wildcard => {
-                if !borrowed && !value_type.is_copy() {
+                if !borrowed && !self.is_copy(value_type) {
                     self.emit(Instruction::Drop {
                         local: value,
                         ty: value_type.clone(),
@@ -1963,7 +2012,7 @@ impl Builder {
                     self.record_place(&field.pattern, value, index, true);
                     self.consume_pattern(&field.pattern, local, &field.ty, scope, borrowed);
                 }
-                if !borrowed {
+                if !borrowed && !self.is_copy(value_type) {
                     self.emit(Instruction::Free { local: value });
                 }
             }
@@ -2061,14 +2110,12 @@ impl Builder {
             mutable: false,
             inner: Box::new(field_type.clone()),
         });
-        self.emit(
-            match (enumeration, crate::lowering::is_pointer_like(field_type)) {
-                (true, true) => Instruction::EnumFieldLoad { dst, base, index },
-                (true, false) => Instruction::EnumFieldAddr { dst, base, index },
-                (false, true) => Instruction::FieldLoad { dst, base, index },
-                (false, false) => Instruction::FieldAddr { dst, base, index },
-            },
-        );
+        self.emit(match (enumeration, self.pointer_like(field_type)) {
+            (true, true) => Instruction::EnumFieldLoad { dst, base, index },
+            (true, false) => Instruction::EnumFieldAddr { dst, base, index },
+            (false, true) => Instruction::FieldLoad { dst, base, index },
+            (false, false) => Instruction::FieldAddr { dst, base, index },
+        });
         dst
     }
 
@@ -2170,7 +2217,7 @@ impl Builder {
                     if state.get(&id).copied().unwrap_or(false) {
                         let local = self.bindings[&id];
                         let ty = self.locals[local].ty.clone();
-                        if !ty.is_copy() {
+                        if !self.is_copy(&ty) {
                             self.emit_in(*block, Instruction::Drop { local, ty });
                         }
                     }
@@ -2182,13 +2229,13 @@ impl Builder {
         result.map(|local| Value {
             local,
             ty: expr.ty.clone(),
-            owned_temporary: !expr.ty.is_copy(),
+            owned_temporary: !self.is_copy(&expr.ty),
         })
     }
 
     fn drop_temporary(&mut self, value: Option<Value>) {
         if let Some(value) = value {
-            if value.owned_temporary && !value.ty.is_copy() {
+            if value.owned_temporary && !self.is_copy(&value.ty) {
                 self.emit(Instruction::Drop {
                     local: value.local,
                     ty: value.ty,
@@ -2247,7 +2294,7 @@ impl Builder {
                     continue;
                 }
                 let ty = self.locals[local].ty.clone();
-                if !ty.is_copy() {
+                if !self.is_copy(&ty) {
                     pending.push(Instruction::Drop { local, ty });
                 }
             }
@@ -2255,6 +2302,45 @@ impl Builder {
                 self.emit(instruction);
             }
         }
+    }
+
+    /// Whether a value of this type is copied rather than owned (`D-140`).
+    ///
+    /// `Type::is_copy` is the same question asked of a type alone, and it
+    /// answers `false` for every `Named` because it has no module and `Named`
+    /// says nothing about what it names. A fieldless enum is a machine word,
+    /// so it is copied, dropped by nobody and freed by nobody.
+    /// Whether a borrow of this type has to be *read* to get the value out.
+    ///
+    /// A borrow of a pointer-shaped value is that pointer, so it already holds
+    /// everything there is; a borrow of anything else is the address of a slot,
+    /// and the value is one load away. This is the same split `AddressOf` makes
+    /// when it creates the borrow, asked in the other direction.
+    ///
+    /// It moved onto the builder when a fieldless enum stopped being
+    /// pointer-shaped: the answer depends on the module now (`D-140`).
+    fn reads_through_borrow(&self, ty: &Type) -> bool {
+        matches!(ty, Type::Ref { inner, .. } if !self.pointer_like(inner))
+    }
+
+    /// Whether a borrow of this type is the word itself rather than the
+    /// address of the slot holding it (`D-140`).
+    ///
+    /// `lowering::is_pointer_like` answers this of a type alone and says `true`
+    /// for every `Named`, because it has no module. A fieldless enum is a word
+    /// in a slot like an `i64`, so a borrow of one is the slot's address.
+    fn pointer_like(&self, ty: &Type) -> bool {
+        crate::lowering::is_pointer_like(ty) && !self.is_copy(ty)
+    }
+
+    fn is_copy(&self, ty: &Type) -> bool {
+        if ty.is_copy() {
+            return true;
+        }
+        let Type::Named(name) = ty else {
+            return false;
+        };
+        self.fieldless.contains(name)
     }
 
     fn drop_scope_except(&mut self, scope_index: usize, except: Option<LocalId>) {
@@ -2272,7 +2358,7 @@ impl Builder {
                 continue;
             };
             if self.live.get(&id).copied().unwrap_or(false)
-                && !ty.is_copy()
+                && !self.is_copy(&ty)
                 && Some(local) != except
             {
                 self.emit(Instruction::Drop { local, ty });

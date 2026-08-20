@@ -1,0 +1,10 @@
+; `=` reaches an enum whose variants all carry nothing, because such a value is
+; one machine word holding itself (`D-140`). One that carries something is a
+; block, and comparing two of those is structural equality by inference, which
+; `D-012` forbids and `D-088` refused to open.
+(enum Reading Silent (Value ((n i64))))
+
+(fn main () -> i32
+  (let a (Reading:Value 1))
+  (let b (Reading:Silent))
+  (if (= a b) 0 1))

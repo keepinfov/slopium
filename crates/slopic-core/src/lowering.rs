@@ -216,6 +216,22 @@ fn encoded(name: &str) -> String {
 
 /// The helper that releases a value of this type, or `None` when the type owns
 /// nothing and dropping it is a no-op.
+/// Whether this type is an enum no variant of which carries anything
+/// (`D-140`).
+///
+/// Such a value is its tag and nothing else: one machine word, copied rather
+/// than owned, with no block to allocate, free or clone. Everything that used
+/// to treat every `Named` enum as a pointer asks this first.
+pub fn is_fieldless_enum(module: &MirModule, ty: &Type) -> bool {
+    let Type::Named(name) = ty.strip_ref() else {
+        return false;
+    };
+    module
+        .enums
+        .iter()
+        .any(|item| item.name == *name && item.fieldless)
+}
+
 pub fn drop_function(module: &MirModule, ty: &Type) -> Option<String> {
     match ty {
         Type::String => Some("sl_rt_string_drop".to_owned()),
@@ -224,6 +240,9 @@ pub fn drop_function(module: &MirModule, ty: &Type) -> Option<String> {
         Type::Named(inner) if module.structs.iter().any(|item| &item.name == inner) => {
             Some(struct_drop_symbol(inner))
         }
+        // A fieldless enum owns nothing, so there is no helper and nothing
+        // calls one (`D-140`).
+        Type::Named(_) if is_fieldless_enum(module, ty) => None,
         Type::Named(inner) if module.enums.iter().any(|item| &item.name == inner) => {
             Some(enum_drop_symbol(inner))
         }
@@ -246,6 +265,7 @@ pub fn clone_function(module: &MirModule, ty: &Type) -> Option<String> {
         Type::Named(inner) if module.structs.iter().any(|item| &item.name == inner) => {
             Some(struct_clone_symbol(inner))
         }
+        Type::Named(_) if is_fieldless_enum(module, ty) => None,
         Type::Named(inner) if module.enums.iter().any(|item| &item.name == inner) => {
             Some(enum_clone_symbol(inner))
         }
@@ -305,6 +325,12 @@ pub fn reference_is_slice(ty: &Type) -> bool {
 /// value that happens to be an address, the way an integer's word is a value,
 /// so `(& p)` takes the address of the slot holding it. Listing it here would
 /// make a borrow of a pointer alias whatever the pointer points at.
+/// Whether a borrow of this type is the word itself rather than the address of
+/// the slot holding it.
+///
+/// A fieldless enum is *not* pointer-like even though it is `Named`, so callers
+/// that can tell one apart must ask [`is_fieldless_enum`] first; this function
+/// has no module and cannot (`D-140`).
 pub fn is_pointer_like(ty: &Type) -> bool {
     matches!(
         ty,
@@ -756,6 +782,7 @@ mod tests {
                     },
                 ],
                 emit: true,
+                fieldless: false,
             }],
         }
     }

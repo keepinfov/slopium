@@ -151,6 +151,7 @@ of what was believed at the time is the part worth keeping.
 - [D-136 — a declaration says which target it is for, and `cfg` is not built](#d-136--a-declaration-says-which-target-it-is-for-and-cfg-is-not-built)
 - [D-137 — a changelog entry is a file, because two of them are not a conflict](#d-137--a-changelog-entry-is-a-file-because-two-of-them-are-not-a-conflict)
 - [D-138 — the verifier bounds every index it can, and says which it cannot](#d-138--the-verifier-bounds-every-index-it-can-and-says-which-it-cannot)
+- [D-140 — a fieldless enum is its tag, and `=` reaches one](#d-140--a-fieldless-enum-is-its-tag-and--reaches-one)
 
 ## D-001 — a native compiler, without LLVM
 
@@ -2902,3 +2903,44 @@ lifted lambda's capture block is deliberately typed `i64` so that a body does
 not drop what it was handed (`D-101`), so a `FieldLoad` base does not always
 name a layout; where the type does not say which aggregate it is, nothing is
 claimed about it.
+
+## D-140 — a fieldless enum is its tag, and `=` reaches one
+
+Status: approved · 2026-08-20
+
+`D-089` restricted `=` to `bool`, the integer types and `f64` because everything
+else was one machine word holding a *handle*, so a wider comparison would have
+answered about identity while looking like it answered about contents. A
+fieldless enum is the case that rule was written before it existed: an enum no
+variant of which carries anything has nothing to point at, so the word can hold
+the value itself.
+
+So it does. Such an enum is its tag — one machine word, copied rather than
+owned, with no block to allocate, free or clone, and no drop or clone helper
+generated for it. Building one is writing a constant, matching on one compares
+the value where it used to read a word out of a block, and `=` is an ordinary
+`i64` comparison, which is the same thing `branch_pattern` has always done with
+a tag. That last part is why the MIR verifier needed no widening: the comparison
+never reaches it as a comparison of a named type.
+
+**Per enum and never per variant.** `Option`'s `None` carries nothing and its
+`Some` carries a value; which one a local holds is precisely the run-time
+question `match` exists to answer, so a representation that differed between
+them would need that answer before the question could be asked. It also keeps
+`Step::WrapOption` — where both backends hand-assemble an `Option` block — true
+without a line changing.
+
+The obstacle was that nothing could answer "is this enum fieldless" where the
+answer was needed. `Type::is_copy` is asked of a type alone and says `false` for
+every `Named`, because a type does not know what it names; the MIR builder is
+handed one function and never the module. So the answer is recorded where the
+type is built — on `TypedEnum` and on `MirEnum` — computed once in `mir::lower`
+and threaded into each builder, and asked through `Builder::is_copy` and
+`Analyzer::is_copy_type` rather than of `Type`. Three predicates moved onto the
+builder with it, `reads_through_borrow` among them, because whether a borrow is
+the word or the address of a slot now depends on the module too.
+
+What this deliberately does not do is make `(clone status)` an error. A
+fieldless enum joining `is_nothing_to_clone` would refuse a program that
+compiles today, and a representation change is a poor reason to break source;
+cloning one is a copy that costs nothing, which is what it already was.

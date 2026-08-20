@@ -41,6 +41,24 @@ pub struct TypedEnum {
     pub variants: Vec<TypedVariant>,
 }
 
+impl TypedEnum {
+    /// Whether no variant of this enum carries anything (`D-140`).
+    ///
+    /// Such an enum is a tag and nothing else, so it is one machine word rather
+    /// than a pointer to a block holding one — which is what lets `=` compare
+    /// two of them, and what stops a comparison from consuming its operands.
+    ///
+    /// Per enum and never per variant: `Option`'s `None` carries nothing and
+    /// its `Some` does, and a representation that changed between them would
+    /// need a rule for which one a local holds, which is the question `match`
+    /// exists to answer at run time.
+    pub fn fieldless(&self) -> bool {
+        self.variants
+            .iter()
+            .all(|variant| variant.fields.is_empty())
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct TypedVariant {
     pub name: String,
@@ -1776,7 +1794,7 @@ impl<'a> Analyzer<'a> {
                     format!("cannot use `{name}` while it is mutably borrowed"),
                 );
             }
-            OwnershipState::SharedBorrowed(_) if consume && !binding.ty.is_copy() => {
+            OwnershipState::SharedBorrowed(_) if consume && !self.is_copy_type(&binding.ty) => {
                 match self.deferred_reads.get(&id).copied() {
                     Some(deferred) => self.diagnostics.push(
                         Diagnostic::error(
@@ -1804,7 +1822,7 @@ impl<'a> Analyzer<'a> {
         // A capture belongs to the environment, which drops it (`D-102`). The
         // damage a move would do is not to this call but to the second one, so
         // it is refused by what the name is rather than by what state it is in.
-        if consume && !binding.ty.is_copy() && binding.captured {
+        if consume && !self.is_copy_type(&binding.ty) && binding.captured {
             self.diagnostics.push(
                 Diagnostic::error(
                     codes::OWNERSHIP,
@@ -1828,7 +1846,7 @@ impl<'a> Analyzer<'a> {
         // going to be dropped, so it is refused by where it is written, the
         // same shape the guard below uses.
         if consume
-            && !binding.ty.is_copy()
+            && !self.is_copy_type(&binding.ty)
             && self.defers.last().is_some_and(|frame| id < frame.bindings)
         {
             self.diagnostics.push(
@@ -1845,7 +1863,10 @@ impl<'a> Analyzer<'a> {
                 ),
             );
         }
-        if consume && !binding.ty.is_copy() && self.guards.last().is_some_and(|floor| id < *floor) {
+        if consume
+            && !self.is_copy_type(&binding.ty)
+            && self.guards.last().is_some_and(|floor| id < *floor)
+        {
             self.diagnostics.push(
                 Diagnostic::error(
                     codes::OWNERSHIP,
@@ -1860,7 +1881,8 @@ impl<'a> Analyzer<'a> {
                 ),
             );
         }
-        if consume && !binding.ty.is_copy() && binding.state == OwnershipState::Available {
+        if consume && !self.is_copy_type(&binding.ty) && binding.state == OwnershipState::Available
+        {
             if let Some(binding) = self.env.bindings.get_mut(&id) {
                 binding.state = OwnershipState::Moved;
             }
@@ -2127,7 +2149,7 @@ impl<'a> Analyzer<'a> {
             let Some(binding) = self.env.bindings.get(&id) else {
                 continue;
             };
-            if binding.ty.is_copy() {
+            if self.is_copy_type(&binding.ty) {
                 continue;
             }
             let next_state = match binding.state {
@@ -3979,7 +4001,7 @@ impl<'a> Analyzer<'a> {
             return self.typed(expr, Type::Unit, TExprKind::Unit);
         };
         let field_type = field_type.clone();
-        if !field_type.is_copy() {
+        if !self.is_copy_type(&field_type) {
             self.diagnostics.push(
                 Diagnostic::error(
                     codes::OWNERSHIP,
@@ -4448,7 +4470,7 @@ impl<'a> Analyzer<'a> {
                 )
             }
             "get" => {
-                if !element.is_copy() {
+                if !self.is_copy_type(&element) {
                     self.diagnostics.push(
                         Diagnostic::error(
                             codes::OWNERSHIP,
@@ -4579,7 +4601,14 @@ impl<'a> Analyzer<'a> {
         // a half-truth. `D-090` says a conversion is written, and a shift is not
         // the operator that gets an exception.
         let right = (args.len() == 2).then(|| self.expr(&args[1], Some(&left.ty)));
-        if !spec.domain.accepts(&left.ty) {
+        // `D-089` restricted `=` to scalars because everything else was one
+        // machine word holding a *handle*, so a comparison would have answered
+        // about the handle while looking like it answered about the contents. A
+        // fieldless enum is the exception that rule was written before: it is
+        // one machine word holding the value itself (`D-140`).
+        let comparable_enum =
+            matches!(spec.domain, Domain::Scalar) && self.is_fieldless_enum(&left.ty);
+        if !spec.domain.accepts(&left.ty) && !comparable_enum {
             let mut diagnostic = Diagnostic::error(
                 codes::NAME_OR_TYPE,
                 self.file,
@@ -4590,6 +4619,15 @@ impl<'a> Analyzer<'a> {
             // than by a second claim that the two behave alike.
             if matches!(spec.domain, Domain::Scalar) && is_text(&left.ty) {
                 diagnostic = diagnostic.with_help("compare text with `core:string:equals`");
+            }
+            // An enum that carries something is not one word, so comparing two
+            // of them is structural equality by inference, which `D-012`
+            // forbids and `D-088` refused to open (`D-140`).
+            if matches!(spec.domain, Domain::Scalar) && self.enum_of_type(&left.ty).is_some() {
+                diagnostic = diagnostic.with_help(
+                    "`=` reaches an enum whose variants all carry nothing; match on this one, \
+                     which is what asks about the payload as well as the variant",
+                );
             }
             self.diagnostics.push(diagnostic);
         }
@@ -4858,6 +4896,44 @@ impl<'a> Analyzer<'a> {
     /// concrete. An `Apply` is a generic body's view of one — `(Option T)` —
     /// where the variants exist but their payloads are still parameters
     /// (`D-095`).
+    /// Whether a value of this type is copied rather than owned (`D-140`).
+    ///
+    /// `Type::is_copy` asks the same question of a type alone and answers
+    /// `false` for every `Named`, because a type does not know what it names. A
+    /// fieldless enum is its tag — one machine word — so it is copied, and
+    /// comparing two of them does not consume them, which is the whole point of
+    /// widening `=` to reach one.
+    fn is_copy_type(&self, ty: &Type) -> bool {
+        ty.is_copy() || self.is_fieldless_enum(ty)
+    }
+
+    /// Whether this type is an enum no variant of which carries anything.
+    ///
+    /// Per enum and never per variant: `Option`'s `None` carries nothing and
+    /// its `Some` does, and which one a local holds is the run-time question
+    /// `match` exists to answer.
+    fn is_fieldless_enum(&self, ty: &Type) -> bool {
+        let Some(name) = self.enum_of_type(ty) else {
+            return false;
+        };
+        if let Some(generated) = self.generated_enums.get(&name) {
+            return generated.fieldless();
+        }
+        if let Some(generic) = self.generic_enums.get(&name) {
+            return generic.variants.iter().all(|item| item.fields.is_empty());
+        }
+        // A declared enum, which is the common case and the only one a
+        // fieldless enum can be: a generic enum with no payload anywhere has no
+        // use for its parameters.
+        self.variants
+            .values()
+            .filter(|variant| variant.enum_name == name)
+            .fold(None, |seen: Option<bool>, variant| {
+                Some(seen.unwrap_or(true) && variant.fields.is_empty())
+            })
+            .unwrap_or(false)
+    }
+
     fn enum_of_type(&self, ty: &Type) -> Option<String> {
         match ty {
             Type::Named(name)
