@@ -93,6 +93,7 @@ const KEYWORDS: &[&str] = &[
     "unsafe",
     "inline",
     "deprecated",
+    "target",
 ];
 
 struct Document {

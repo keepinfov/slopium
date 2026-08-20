@@ -21,6 +21,7 @@ local static_items = {
   { label = "const", kind = kinds.Snippet, detail = "module-level literal", insertText = "const ${1:name} ${0:value}", insertTextFormat = 2 },
   { label = "inline", kind = kinds.Snippet, detail = "annotation: worth copying into its callers", insertText = "inline", insertTextFormat = 2 },
   { label = "deprecated", kind = kinds.Snippet, detail = "annotation: warn at every use", insertText = 'deprecated "${0:use this instead}"', insertTextFormat = 2 },
+  { label = "target", kind = kinds.Snippet, detail = "annotation: build this declaration only for one target", insertText = 'target "${0:x86_64-unknown-linux-gnu}"', insertTextFormat = 2 },
   { label = "let", kind = kinds.Snippet, detail = "immutable binding", insertText = "let ${1:name} ${0:value}", insertTextFormat = 2 },
   { label = "let mut", kind = kinds.Snippet, detail = "mutable binding", insertText = "let mut ${1:name} ${0:value}", insertTextFormat = 2 },
   { label = "set", kind = kinds.Snippet, detail = "assign a mutable binding or a field bound by a `&mut` match", insertText = "set ${1:name} ${0:value}", insertTextFormat = 2 },

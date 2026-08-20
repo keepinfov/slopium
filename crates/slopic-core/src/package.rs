@@ -153,13 +153,16 @@ pub fn analyze_package(input: &PackageInput, options: &CompileOptions) -> Packag
                 continue;
             }
         };
-        let program = match ast::build_program(&source.path, &forms) {
+        let mut program = match ast::build_program(&source.path, &forms) {
             Ok(program) => program,
             Err(mut errors) => {
                 diagnostics.append(&mut errors);
                 continue;
             }
         };
+        // Before anything types it: a declaration for another target is not
+        // part of this program (`D-136`).
+        ast::select_for_target(&mut program, &options.target);
         units.push(ModuleUnit {
             path: source.path.clone(),
             module: full_module,
@@ -239,8 +242,10 @@ pub fn analyze_package(input: &PackageInput, options: &CompileOptions) -> Packag
         structs: Vec::new(),
         enums: Vec::new(),
         consts: Vec::new(),
+        omitted: Vec::new(),
     };
     for (unit, source) in units.iter_mut().zip(&input.files) {
+        merged.omitted.append(&mut unit.program.omitted);
         merged.functions.append(&mut unit.program.functions);
         merged.externs.append(&mut unit.program.externs);
         // A dependency's tests belong to the dependency. Collecting them here

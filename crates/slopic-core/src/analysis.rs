@@ -111,7 +111,7 @@ pub fn analyze_source(file: &str, source: &str, options: &CompileOptions) -> Ana
             };
         }
     };
-    let ast = match ast::build_program(file, &forms) {
+    let mut ast = match ast::build_program(file, &forms) {
         Ok(program) => program,
         Err(diagnostics) => {
             return Analysis {
@@ -123,6 +123,9 @@ pub fn analyze_source(file: &str, source: &str, options: &CompileOptions) -> Ana
             };
         }
     };
+    // The editor shows the program that is being built, not every program the
+    // file could be (`D-136`).
+    ast::select_for_target(&mut ast, &options.target);
     let mut warnings = Vec::new();
     match sema::analyze_with_options(
         file,

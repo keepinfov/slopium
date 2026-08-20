@@ -92,7 +92,7 @@ name.
 (fn (inline) (deprecated) legacy () -> i64 0)
 ```
 
-There are two annotations, and each one says which declarations it applies to.
+There are three annotations, and each one says which declarations it applies to.
 Writing one where it does not apply is refused by name, as is an unknown name,
 a wrong argument and the same annotation written twice.
 
@@ -100,11 +100,39 @@ a wrong argument and the same annotation written twice.
 | --- | --- | --- | --- |
 | `inline` | none | `fn` | this body is worth copying into its callers |
 | `deprecated` | zero or one string | `fn`, `extern`, `const` | every use warns, with the string as a note |
+| `target` | one string | every form | this declaration is built only for that target |
 
 `inline` is a hint and only a hint: whether inlining is *sound* — across a
 module boundary, into a recursive function, through the C boundary — is the
 optimizer's to decide and the annotation moves none of it. What it moves is the
 size at which a body stops being worth copying.
+
+`target` is the one conditional compilation the language has (`D-136`). A
+declaration annotated with a target triple is part of the build only when that
+triple is the one selected, and it is removed before anything types it — so no
+pass, no backend and no diagnostic ever sees a declaration nobody compiles:
+
+```lisp
+(fn (target "x86_64-unknown-linux-gnu") architecture () -> String "x86-64")
+(fn (target "aarch64-unknown-linux-gnu") architecture () -> String "aarch64")
+
+(const (target "riscv32-unknown-none") pointer-bits 32 : i64)
+```
+
+The string is a target triple, spelled exactly as `slopium targets` prints it,
+as `[build] target` takes it and as `--target` takes it. It is spelled `target`
+rather than `cfg` because it tests one thing: there is no `any`, no `all`, no
+`not` and no feature namespace, and inventing one later stays compatible because
+an annotation's arguments can widen.
+
+Two things follow, and the second is the price. A name whose only declaration
+was for another target is an unknown name — but the compiler knows what it
+removed, so the refusal says which target declares it rather than leaving a
+reader to find the definition themselves. And a declaration that is not selected
+is never typechecked, so it can rot without anything saying so; that is the
+standard cost of conditional compilation everywhere it exists, and it is the
+argument for keeping a whole-file difference in separate modules, where every
+file is compiled as an ordinary module for the target it belongs to.
 
 A use of a `deprecated` declaration is a warning rather than an error, so the
 program still compiles; `SL0800` is the code, and `docs/diagnostics.md`

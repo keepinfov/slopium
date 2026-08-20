@@ -630,6 +630,14 @@ struct Analyzer<'a> {
     /// The `deprecated` a `const` carries, kept beside `consts` rather than in
     /// it: a use of an ordinary constant should not pay a word for it.
     deprecated_consts: HashMap<String, Deprecation>,
+    /// What `(target "...")` left out, by name, with the triple it asked for
+    /// (`D-136`).
+    ///
+    /// A declaration for another target is gone by the time anything here runs,
+    /// so every use of it is an unknown name. This is what tells that apart
+    /// from a name nothing ever declared, which is the difference between an
+    /// error a reader can act on and one they have to go looking for.
+    omitted_for_target: HashMap<String, String>,
     /// One entry per `when` guard being typed, holding the first binding id
     /// that did not exist when the guard started (`D-121`).
     ///
@@ -801,6 +809,11 @@ impl<'a> Analyzer<'a> {
             loops: Vec::new(),
             consts: HashMap::new(),
             deprecated_consts: HashMap::new(),
+            omitted_for_target: program
+                .omitted
+                .iter()
+                .map(|omission| (omission.name.clone(), omission.target.clone()))
+                .collect(),
             guards: Vec::new(),
             unsafe_depth: 0,
             diagnostics: Vec::new(),
@@ -1161,7 +1174,7 @@ impl<'a> Analyzer<'a> {
                 if !self.declared_types.contains(name)
                     && !self.active_type_params.contains(name) =>
             {
-                self.error(span, format!("unknown type `{name}`"));
+                self.unknown_name(span, name, format!("unknown type `{name}`"));
             }
             Type::List(inner) | Type::Slice(inner) | Type::Ref { inner, .. } => {
                 self.validate_type(inner, span);
@@ -1699,11 +1712,11 @@ impl<'a> Analyzer<'a> {
                 let ty = expected.cloned().unwrap_or(Type::Unit);
                 return self.typed(expr, ty, TExprKind::Unit);
             }
-            self.error(expr.span, format!("undefined variable `{name}`"));
+            self.unknown_name(expr.span, name, format!("undefined variable `{name}`"));
             return self.typed(expr, Type::Unit, TExprKind::Unit);
         };
         let Some(binding) = self.env.bindings.get(&id).cloned() else {
-            self.error(expr.span, format!("undefined variable `{name}`"));
+            self.unknown_name(expr.span, name, format!("undefined variable `{name}`"));
             return self.typed(expr, Type::Unit, TExprKind::Unit);
         };
         match binding.state {
@@ -1887,7 +1900,7 @@ impl<'a> Analyzer<'a> {
 
     fn set(&mut self, expr: &Expr, name: &str, value: &Expr) -> TExpr {
         let Some(id) = self.env.lookup_id(name) else {
-            self.error(expr.span, format!("undefined variable `{name}`"));
+            self.unknown_name(expr.span, name, format!("undefined variable `{name}`"));
             return self.typed(expr, Type::Unit, TExprKind::Unit);
         };
         let binding = self
@@ -2965,7 +2978,7 @@ impl<'a> Analyzer<'a> {
             if self.env.lookup_id(callee).is_some() {
                 return self.call_value(expr, callee, args);
             }
-            self.error(expr.span, format!("unknown function `{callee}`"));
+            self.unknown_name(expr.span, callee, format!("unknown function `{callee}`"));
             return self.typed(expr, Type::Unit, TExprKind::Unit);
         };
         // Before the arity check and before `generic_call` takes over, so that
@@ -4700,6 +4713,29 @@ impl<'a> Analyzer<'a> {
 
     fn error(&mut self, span: Span, message: impl Into<String>) {
         self.error_with_code(codes::NAME_OR_TYPE, span, message);
+    }
+
+    /// The refusal for a name nothing declares — which says something else when
+    /// something did declare it, for another target (`D-136`).
+    ///
+    /// Without this the failure lands at the use as a bare unknown name and the
+    /// reader is left to work out that the definition is right there in the
+    /// file and simply not theirs. That is the standard complaint about
+    /// conditional compilation everywhere it exists, and it is a note.
+    fn unknown_name(&mut self, span: Span, name: &str, message: impl Into<String>) {
+        let Some(target) = self.omitted_for_target.get(name).cloned() else {
+            self.error(span, message);
+            return;
+        };
+        self.diagnostics.push(
+            Diagnostic::error(codes::NAME_OR_TYPE, self.file, span, message)
+                .with_note(format!(
+                    "`{name}` is declared for `{target}`, which this build is not for"
+                ))
+                .with_help(
+                    "annotate a declaration for this target too, or select it in the manifest",
+                ),
+        );
     }
 
     /// A use of a declaration somebody marked `deprecated` (`D-122`).

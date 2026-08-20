@@ -1,0 +1,12 @@
+target-not-for-this-build.slp:7:11: error[SL0200]: unknown function `word-size`
+  |
+ 7 |   (as i32 (word-size)))
+  |           ^^^^^^^^^^^
+  = help: annotate a declaration for this target too, or select it in the manifest
+  = note: `word-size` is declared for `aarch64-unknown-linux-gnu`, which this build is not for
+
+target-not-for-this-build.slp:7:3: error[SL0200]: `as` cannot convert `unit` to `i32`
+  |
+ 7 |   (as i32 (word-size)))
+  |   ^^^^^^^^^^^^^^^^^^^^
+  = help: `as` converts between the integer types; the source's signedness extends and the target's width truncates

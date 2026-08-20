@@ -2,4 +2,4 @@ annotation-unknown.slp:5:6: error[SL0100]: unknown annotation `inlien`
   |
  5 | (fn (inlien) hot ((x i64)) -> i64 (* x x))
   |      ^^^^^^
-  = help: the annotations are `inline` and `deprecated`
+  = help: the annotations are `inline`, `deprecated` and `target`

@@ -486,6 +486,34 @@ if command -v readelf >/dev/null 2>&1; then
     fi
     echo "project-tests: manager builds and runs for $target ... ok"
   done
+
+  # The same source, built for each target, has to answer differently — which is
+  # the whole claim of `(target "...")` (`D-136`). `basics` above proves the
+  # manager can drive every target; this proves the *program* changed with it,
+  # and a fixture whose output did not depend on the target could not.
+  for target in "${targets[@]}"; do
+    selection_project="$result_dir/selection-$target"
+    cp -R "$projects_dir/pass/target-selection" "$selection_project"
+    run_manager_logged "target selection for $target" \
+      "$result_dir/selection-$target.stdout" "$result_dir/selection-$target.stderr" \
+      "$selection_project/Slopium.toml" build --target "$target"
+    artifact="$selection_project/target/$target/dev/target-selection"
+    if [[ "$target" == "$host_target" ]]; then
+      "$artifact" >"$result_dir/selection-$target.run"
+    else
+      "$qemu" "$artifact" >"$result_dir/selection-$target.run"
+    fi
+    case "$target" in
+      "$host_target") expected_architecture="x86-64" ;;
+      "$cross_target") expected_architecture="aarch64" ;;
+    esac
+    if [[ "$(head -n 1 "$result_dir/selection-$target.run")" != "$expected_architecture" ]]; then
+      echo "project-tests: $target selected the wrong declaration" >&2
+      cat "$result_dir/selection-$target.run" >&2
+      exit 1
+    fi
+    echo "project-tests: a declaration selected by target, built for $target ... ok"
+  done
 else
   skip "readelf not found; per-target build checks skipped"
 fi
