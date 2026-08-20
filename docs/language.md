@@ -604,12 +604,14 @@ that name. The combinators live in modules of their own rather than in
   ((Option:None) ()))
 ```
 
-**Nothing in the library aborts** (`D-087`). A line past the end of input, a
-byte that is not a digit, an argument that is not there, a variable that is not
-set: each is `None`, and a file operation that fails is an `Err` carrying an
-`errno`. The runtime errors that remain — an index out of bounds, a division by
-zero, an overflow — are the language's own, and they still print a normalized
-message and exit with status 101.
+**Nothing in the library aborts unless it is asked to** (`D-087`). A line past
+the end of input, a byte that is not a digit, an argument that is not there, a
+variable that is not set: each is `None`, and a file operation that fails is an
+`Err` carrying an `errno`. The runtime errors that remain — an index out of
+bounds, a division by zero, an overflow — are the language's own, and they
+still print a normalized message and exit with status 101. The one place the
+library ends a program is `std:panic`, which exists for nothing else and has to
+be called (`D-130`).
 
 `std:option` and `std:result` are the combinators. `Option` has `is-some`,
 `is-none`, `map`, `and-then`, `unwrap-or` and `or-else`; `Result` has `is-ok`,
@@ -770,6 +772,32 @@ nothing and no drop glue runs for it (`D-084`).
 
 `std:process` has `args-len`, `arg` and `args`, `env` returning
 `(Option String)`, and `exit`.
+
+`std:panic` — `core:panic` for a freestanding program — is how a program fails
+on purpose: `(panic message)`, `(assert condition message)` and
+`(unreachable)`. All three end the program with status 101, the same one an
+overflow or an index past the end ends it with, and print the message on
+standard error. There is no catching one: a `Result` is how a failure the
+caller can answer is carried (`D-087`), and this is the other kind. Each
+answers `unit`, because the language has no type meaning "never", so a panic is
+written where a statement goes — under a `when`, at the end of a branch — and
+not where a value is expected (`D-130`).
+
+`std:test` is what a failing test says. A `test` answers `bool` and the harness
+prints its name and the verdict, so the two values that disagreed are otherwise
+gone; `equal-i64`, `equal-u64` and `equal-text` compare exactly as `=` does and
+leave a note behind on a mismatch:
+
+```lisp
+(take std:test equal-i64)
+
+(test "the sum" (equal-i64 (add 20 21) 42))
+; test main:the sum ... FAILED: expected 42, got 41
+```
+
+They are not assertions, and that is the whole reason they are separate from
+`assert`: a failed assertion ends the program, and a suite that stops at the
+first failure reports one problem per run.
 
 A lone file has no manifest to declare a dependency in, so `slopic file.slp`
 compiles it against `std` and `--no-std` opts out; `--freestanding` gets `core`

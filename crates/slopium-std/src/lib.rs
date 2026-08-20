@@ -52,6 +52,7 @@ pub const TOOLCHAIN_PACKAGES: &[ToolchainPackage] = &[
             ("float", include_str!("../../../std/core/float.slp")),
             ("map", include_str!("../../../std/core/map.slp")),
             ("set", include_str!("../../../std/core/set.slp")),
+            ("panic", include_str!("../../../std/core/panic.slp")),
         ],
         dependencies: &[],
         language_items: &[
@@ -75,6 +76,8 @@ pub const TOOLCHAIN_PACKAGES: &[ToolchainPackage] = &[
             ("float", include_str!("../../../std/std/float.slp")),
             ("process", include_str!("../../../std/std/process.slp")),
             ("fs", include_str!("../../../std/std/fs.slp")),
+            ("panic", include_str!("../../../std/std/panic.slp")),
+            ("test", include_str!("../../../std/std/test.slp")),
         ],
         dependencies: &[CORE_PACKAGE],
         // Pointed at `prelude`, which takes them from `core` and exports them

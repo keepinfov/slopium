@@ -1,0 +1,56 @@
+; What a failing test compared.
+;
+; A `test` answers `bool` and the harness prints its name and the verdict, so
+; when one fails the two values that disagreed are gone and the only way to see
+; them is to run the program by hand. These comparisons answer exactly as `=`
+; does and, on a mismatch, leave a note the harness prints beside `FAILED`
+; (`D-130`):
+;
+;     test main:the sum ... FAILED: expected 42, got 41
+;
+; This is `std` and not `core` because the harness is: a freestanding program
+; has nothing to print with.
+;
+; They are not assertions. A failed assertion ends the program, and a test suite
+; that stops at the first failure reports one problem per run; these let the
+; harness go on to the next test, which is why `core:panic:assert` and these are
+; different functions rather than one.
+
+(take core:string concat from-i64 from-u64 equals)
+
+(export note equal-i64 equal-u64 equal-text)
+
+; The note crosses as the pointer alone, NUL-terminated (`D-065`). The runtime
+; copies it, because the `String` it points at is dropped on the way out of the
+; call that made it.
+(extern "sl_rt_test_note" (note-raw (message (& String))) -> unit)
+
+(fn note ((message (& String))) -> unit
+  (note-raw message))
+
+(fn disagreement ((want (& String)) (got (& String))) -> String
+  (let opening (concat (& "expected ") want))
+  (let middle (concat (& opening) (& ", got ")))
+  (concat (& middle) got))
+
+(fn quoted ((text (& String))) -> String
+  (let opening (concat (& "\"") text))
+  (concat (& opening) (& "\"")))
+
+(fn equal-i64 ((got i64) (want i64)) -> bool
+  (if (= got want)
+    true
+    (note (& (disagreement (& (from-i64 want)) (& (from-i64 got)))))
+    false))
+
+(fn equal-u64 ((got u64) (want u64)) -> bool
+  (if (= got want)
+    true
+    (note (& (disagreement (& (from-u64 want)) (& (from-u64 got)))))
+    false))
+
+(fn equal-text ((got (& String)) (want (& String))) -> bool
+  (if (equals got want)
+    true
+    (note (& (disagreement (& (quoted want)) (& (quoted got)))))
+    false))

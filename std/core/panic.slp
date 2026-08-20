@@ -1,0 +1,35 @@
+; Failing on purpose.
+;
+; Until this module there were two ways out of a program that had gone wrong: a
+; trap the program did not ask for, and `std:process:exit`, which says nothing.
+; Neither is what a function does when its caller broke the contract.
+;
+; It is `core` because the failure path is (`D-080`): a freestanding program
+; supplies `sl_rt_panic` and gets the same behaviour a hosted one gets, and
+; `scripts/core-check.sh` links a `-nostdlib` program that calls into here.
+;
+; A panic exits with status 101, which is what every deliberate failure in this
+; language exits with — an overflow, an index past the end, a division by zero
+; (`D-031`). There is no way to catch one: a `Result` is how a failure a caller
+; can answer is carried (`D-087`), and this is the other kind.
+
+(export panic assert unreachable)
+
+; The message crosses as the pointer alone, NUL-terminated, which is what a
+; borrowed `String` is at the boundary (`D-065`).
+(extern "sl_rt_panic" (panic-raw (message (& String))) -> unit)
+
+; The result is `unit` rather than a type that says "never", because this
+; language has no such type and adding one to spell three functions would be a
+; larger change than the functions (`D-130`). So a panic is written where a
+; statement goes — under a `when`, at the end of a branch — and not where a
+; value is expected.
+(fn panic ((message (& String))) -> unit
+  (panic-raw message))
+
+(fn assert ((held bool) (message (& String))) -> unit
+  (when (not held)
+    (panic message)))
+
+(fn unreachable () -> unit
+  (panic (& "reached a branch the program said it could not")))

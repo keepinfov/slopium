@@ -142,6 +142,7 @@ of what was believed at the time is the part worth keeping.
 - [D-127 — a body is as many expressions as it needs, and a one-sided condition is `when`](#d-127--a-body-is-as-many-expressions-as-it-needs-and-a-one-sided-condition-is-when)
 - [D-128 — a manifest survives a key it does not know, and a config does not](#d-128--a-manifest-survives-a-key-it-does-not-know-and-a-config-does-not)
 - [D-129 — hexadecimal is two functions and an uppercase table](#d-129--hexadecimal-is-two-functions-and-an-uppercase-table)
+- [D-130 — failing on purpose, and a failing test that says what it compared](#d-130--failing-on-purpose-and-a-failing-test-that-says-what-it-compared)
 
 ## D-001 — a native compiler, without LLVM
 
@@ -2509,3 +2510,50 @@ The loop divides by sixteen rather than shifting by four, which is slower and
 is the point: it is `digits-of` over a different base, and a shift would be the
 only place in the module where an unsigned value is taken apart a second way.
 Nothing here is on a path where the difference is measurable.
+
+## D-130 — failing on purpose, and a failing test that says what it compared
+
+Status: approved · 2026-08-20
+
+There were two ways out of a program that had gone wrong: a trap it did not ask
+for, and `std:process:exit`, which says nothing. Neither is what a function
+does when its caller broke the contract, so `panic`, `assert` and `unreachable`
+are `core:panic`, written over `sl_rt_panic`, which the `extern` vocabulary
+could already declare. They are `core` because the failure path is (`D-080`): a
+freestanding program supplies the hook and gets the same behaviour, and
+`core-check.sh` links one that calls in. A panic exits 101, the status every
+deliberate failure in this language already exits with, and there is no
+catching it — a `Result` carries the failure a caller can answer (`D-087`), and
+this is the other kind.
+
+**All three answer `unit`.** The honest type is one meaning "never", and the
+language has none. Adding one to spell three functions would be the larger
+change by far — every `match` arm, every branch merge and the whole of
+inference would have to learn a type that is a subtype of all others — so the
+functions were written to the language rather than the language to the
+functions. What it costs is that a panic goes where a statement goes: under a
+`when`, at the end of a branch, and not where a value is expected. The `when`
+of `D-127` is what makes that read as intended rather than as a hole.
+
+**A failing test is a separate mechanism, and that is the point.** A failed
+assertion ends the program, so a suite built on `assert` reports one problem
+per run and stops. `std:test` instead gives `equal-i64`, `equal-u64` and
+`equal-text`, which answer exactly as `=` does and, on a mismatch, leave a note
+that the harness prints beside `FAILED` — so the run continues and every
+failure names both sides. It is `std` rather than `core` because the harness
+is; a freestanding program has nothing to print with.
+
+The note lives in the hosted runtime as one bounded slot, copied on the way in
+and cleared as the verdict is printed. One slot is enough because tests run one
+after another, and copying is required rather than convenient: the `String` the
+message was built in is dropped on the way out of the call that made it. That
+is a length error away from memory corruption, which is why `runtime-check.sh`
+now runs a deliberately failing suite under ASan and valgrind, with a note
+longer than the slot among them — and why a test that leaves no note is in
+there too, since a note printed against the wrong test is the other way this
+fails.
+
+`tests/projects/test-fail` exists for the same reason. Every other fixture
+asserts that its tests pass, which is precisely the case where a failure has
+nothing to report, so what a failing test says was held to nothing at all until
+a fixture failed on purpose.

@@ -403,4 +403,83 @@ else
   skip "valgrind not found; skipped"
 fi
 
+# A suite whose failures are the point. Three shapes: a note that fits, a note
+# longer than the runtime's slot, and a test that leaves none — the third is
+# what catches a note printed against the wrong test.
+cat >"$check_dir/harness.slp" <<'SLOPIUM'
+(take std:test equal-i64 equal-text)
+(take std:panic assert)
+(take std:string concat)
+
+(fn sum ((a i64) (b i64)) -> i64
+  (assert (>= b 0) (& "the second term is a count"))
+  (+ a b))
+
+(fn wide () -> String
+  (let piece "0123456789abcdef")
+  (let half (concat (& piece) (& piece)))
+  (let whole (concat (& half) (& half)))
+  (concat (& whole) (& whole)))
+
+(fn main () -> i32 0)
+
+(test "the sum" (equal-i64 (sum 20 21) 42))
+
+(test "the wide one" (equal-text (& (wide)) (& "short")))
+
+(test "the quiet one" false)
+
+(test "the one that holds" (equal-i64 (sum 20 22) 42))
+SLOPIUM
+# The test harness, which is the other half of the hosted runtime a program
+# reaches: `sl_rt_test_note` copies a message out of a `String` the caller
+# drops on the way out of the call, so a length wrong by one is memory
+# corruption rather than a wrong verdict (`D-130`). The suite fails on purpose,
+# so a non-zero exit is the expected one and what it printed is the assertion.
+cargo run --quiet --manifest-path "$workspace_dir/Cargo.toml" -p slopic -- \
+  "$check_dir/harness.slp" --emit asm --test --output "$check_dir/harness.s"
+
+cc -g -fsanitize=address -fno-omit-frame-pointer \
+  -o "$check_dir/harness-asan" \
+  "$check_dir/harness.s" "$workspace_dir/runtime/slop_rt_core.c" \
+  "$workspace_dir/runtime/slop_rt_hosted.c"
+set +e
+ASAN_OPTIONS=detect_leaks="${SLOPIUM_ASAN_DETECT_LEAKS:-0}":halt_on_error=1 \
+  "$check_dir/harness-asan" >"$check_dir/harness.out" 2>&1
+harness_status=$?
+set -e
+if [ "$harness_status" -eq 0 ]; then
+  echo "runtime-check: the harness reported success for a suite that fails" >&2
+  cat "$check_dir/harness.out" >&2
+  exit 1
+fi
+grep --quiet 'FAILED: expected 42, got 41' "$check_dir/harness.out" ||
+  { echo "runtime-check: a failing test did not say what it compared" >&2
+    cat "$check_dir/harness.out" >&2; exit 1; }
+grep --quiet 'the wide one ... FAILED: expected "' "$check_dir/harness.out" ||
+  { echo "runtime-check: a long note was not carried" >&2
+    cat "$check_dir/harness.out" >&2; exit 1; }
+grep --quiet 'the quiet one ... FAILED$' "$check_dir/harness.out" ||
+  { echo "runtime-check: a note outlived the test that left it" >&2
+    cat "$check_dir/harness.out" >&2; exit 1; }
+echo "runtime-check: the test harness and its notes under ASan ... ok"
+
+if command -v valgrind >/dev/null 2>&1; then
+  cc -g -o "$check_dir/harness-valgrind" \
+    "$check_dir/harness.s" "$workspace_dir/runtime/slop_rt_core.c" \
+    "$workspace_dir/runtime/slop_rt_hosted.c"
+  set +e
+  valgrind --quiet --leak-check=full --show-leak-kinds=all --error-exitcode=99 \
+    "$check_dir/harness-valgrind" >"$check_dir/harness.valgrind" 2>&1
+  harness_status=$?
+  set -e
+  if [ "$harness_status" -eq 99 ]; then
+    echo "runtime-check: valgrind faulted on the test harness" >&2
+    cat "$check_dir/harness.valgrind" >&2
+    exit 1
+  fi
+  echo "runtime-check: the same harness under valgrind ... ok"
+fi
+
 echo "runtime-check: all runtime checks passed"
+

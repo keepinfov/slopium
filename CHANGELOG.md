@@ -18,6 +18,12 @@ rather than everything it touched.
   `hex-from-u64` for the digits and `hex-prefixed-from-u64` for the same under
   `0x`. The width pads and never truncates, and the glyphs are uppercase, so
   what is printed can be pasted back into a program as a literal.
+- A program can fail on purpose: `core:panic` — `std:panic` for a hosted
+  package — has `panic`, `assert` and `unreachable`, each ending the program
+  with status 101 and a message on standard error.
+- A failing test says what it compared. `std:test` has `equal-i64`,
+  `equal-u64` and `equal-text`, which answer as `=` does and leave a note the
+  harness prints beside `FAILED`.
 - `when` is the one-sided conditional: `(when condition body ...)` runs the body
   when the condition holds and answers `unit` either way, so `()` no longer
   stands in for a branch nobody wrote.

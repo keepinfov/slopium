@@ -1,0 +1,22 @@
+; A program that fails because it decided to, rather than because it tripped
+; over a trap (`D-130`). It exits 101 like every other deliberate failure in
+; this language, and says why on standard error.
+
+(take std:io println-i64)
+(take std:panic assert panic unreachable)
+
+; The contract is on the caller, so breaking it is a bug in the caller and a
+; `Result` here would be a lie: there is nothing the caller could do with an
+; `Err` that it could not have done by not calling.
+(fn width ((count i64)) -> i64
+  (assert (>= count 0) (& "a width cannot be negative"))
+  (* count 8))
+
+(fn main () -> i32
+  (println-i64 (width 3))
+  (println-i64 (width -1))
+  (unreachable)
+  0)
+
+(test "an assertion that holds is not a failure"
+  (= (width 3) 24))
