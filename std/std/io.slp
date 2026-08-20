@@ -37,20 +37,16 @@
   (write-line-bytes text (len text)))
 
 (fn print-i64 ((value i64)) -> unit
-  (let text (from-i64 value))
-  (print (& text)))
+  (print (& (from-i64 value))))
 
 (fn println-i64 ((value i64)) -> unit
-  (let text (from-i64 value))
-  (println (& text)))
+  (println (& (from-i64 value))))
 
 (fn print-u64 ((value u64)) -> unit
-  (let text (from-u64 value))
-  (print (& text)))
+  (print (& (from-u64 value))))
 
 (fn println-u64 ((value u64)) -> unit
-  (let text (from-u64 value))
-  (println (& text)))
+  (println (& (from-u64 value))))
 
 (fn print-bool ((flag bool)) -> unit
   (print-i64 (if flag 1 0)))

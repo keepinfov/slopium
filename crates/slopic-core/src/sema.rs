@@ -161,6 +161,17 @@ pub enum TExprKind {
         type_args: Vec<Type>,
     },
 
+    /// A borrow of a value nothing owns yet (`D-126`).
+    ///
+    /// `Borrow` names a binding; this one carries the value itself, because
+    /// there is no binding to name. It is legal only where a call takes it as
+    /// an argument, which is what makes "the temporary dies at the end of the
+    /// expression" a rule with one implementation: the call that consumed it
+    /// is where the drop goes.
+    BorrowTemporary {
+        value: Box<TExpr>,
+    },
+
     /// A top-level `fn` handed to C as a function pointer (`D-124`).
     ///
     /// `FnRef` builds a function *value*, which is a block with a header and an
@@ -592,6 +603,15 @@ struct Analyzer<'a> {
     declared_types: HashSet<String>,
     type_arities: HashMap<String, usize>,
     active_type_params: HashSet<String>,
+    /// How many argument lists are being typed around the expression in hand.
+    ///
+    /// A temporary may be borrowed where a call takes it and nowhere else
+    /// (`D-126`), and this is how that position is recognised. It is a depth
+    /// rather than a flag because a call inside an argument is ordinary —
+    /// `(println (& (concat (& a) (& b))))` has two of them — and it is reset
+    /// around a `lambda` body, which is a function that happens to be written
+    /// inside an argument rather than part of one.
+    argument_depth: usize,
     language_items: crate::LanguageItems,
     validate_entry_point: bool,
     current_return_type: Option<Type>,
@@ -774,6 +794,7 @@ impl<'a> Analyzer<'a> {
             declared_types,
             type_arities,
             active_type_params: HashSet::new(),
+            argument_depth: 0,
             language_items: language_items.clone(),
             validate_entry_point,
             current_return_type: None,
@@ -1515,7 +1536,17 @@ impl<'a> Analyzer<'a> {
             ExprKind::Borrow { mutable, value } => self.borrow(expr, *mutable, value),
             ExprKind::Try(value) => self.try_expr(expr, value),
             ExprKind::Convert { target, value } => self.convert(expr, target, value),
-            ExprKind::Call { callee, args } => self.call(expr, callee, args, expected),
+            ExprKind::Call { callee, args } => {
+                // Inside an argument list, and only there, a temporary may be
+                // borrowed (`D-126`). Every call shape reaches this arm —
+                // builtin, ordinary, generic, through a value, an operator, a
+                // constructor — so the depth is kept in one place rather than
+                // at each of the twenty sites that type an argument.
+                self.argument_depth += 1;
+                let typed = self.call(expr, callee, args, expected);
+                self.argument_depth -= 1;
+                typed
+            }
             ExprKind::Lambda {
                 captures,
                 params,
@@ -2198,8 +2229,7 @@ impl<'a> Analyzer<'a> {
 
     fn borrow(&mut self, expr: &Expr, mutable: bool, value: &Expr) -> TExpr {
         let ExprKind::Var { name, .. } = &value.kind else {
-            self.error(value.span, "only named bindings can be borrowed");
-            return self.typed(expr, Type::Unit, TExprKind::Unit);
+            return self.borrow_temporary(expr, mutable, value);
         };
         let Some(id) = self.env.lookup_id(name) else {
             self.error(value.span, format!("undefined variable `{name}`"));
@@ -2257,6 +2287,72 @@ impl<'a> Analyzer<'a> {
                 inner: Box::new(binding.ty),
             },
             TExprKind::Borrow { id, mutable },
+        )
+    }
+
+    /// A borrow of something that is not a binding (`D-126`).
+    ///
+    /// `(& "hello")` and `(& (from-i64 id))` used to be refused, and the shape
+    /// that refusal forced — a column of `let`s whose only purpose is to give a
+    /// value a name — was the first thing an outside program complained about.
+    ///
+    /// The temporary dies at the end of the expression the borrow appears in,
+    /// which is why this is legal in an argument and nowhere else: the call is
+    /// that expression, and the drop goes after it. Anywhere else there is no
+    /// point at which the value could be released, so the old refusal stands
+    /// with a sentence saying where it would have worked.
+    fn borrow_temporary(&mut self, expr: &Expr, mutable: bool, value: &Expr) -> TExpr {
+        let inner = self.expr(value, None);
+        if self.argument_depth == 0 {
+            self.diagnostics.push(
+                Diagnostic::error(
+                    codes::NAME_OR_TYPE,
+                    self.file,
+                    value.span,
+                    "only a binding can be borrowed here",
+                )
+                .with_help("give the value a name with `let`, or borrow it where a call takes it")
+                .with_note(
+                    "a borrowed temporary dies when the call it was passed to returns, so \
+                     there is nowhere to release one that is not an argument",
+                ),
+            );
+            // The type is the one the borrow would have had. Answering `unit`
+            // would make the binding this sits in complain about a type nobody
+            // wrote, which is two diagnostics for one mistake.
+            return self.typed(
+                expr,
+                Type::Ref {
+                    mutable,
+                    inner: Box::new(inner.ty.clone()),
+                },
+                TExprKind::BorrowTemporary {
+                    value: Box::new(inner),
+                },
+            );
+        }
+        if matches!(inner.ty, Type::Ref { .. }) {
+            self.diagnostics.push(
+                Diagnostic::error(
+                    codes::NAME_OR_TYPE,
+                    self.file,
+                    value.span,
+                    format!("`{}` cannot be borrowed", inner.ty),
+                )
+                .with_help("a borrow of a borrow says nothing the borrow did not say already"),
+            );
+            return self.typed(expr, Type::Unit, TExprKind::Unit);
+        }
+        let ty = Type::Ref {
+            mutable,
+            inner: Box::new(inner.ty.clone()),
+        };
+        self.typed(
+            expr,
+            ty,
+            TExprKind::BorrowTemporary {
+                value: Box::new(inner),
+            },
         )
     }
 
@@ -3116,7 +3212,12 @@ impl<'a> Analyzer<'a> {
             );
         }
         self.current_return_type = Some(result_type.clone());
+        // A `lambda` written inside an argument is a function, not part of the
+        // argument: its body has its own expressions, and a temporary borrowed
+        // there would have no call to die after (`D-126`).
+        let enclosing_arguments = std::mem::take(&mut self.argument_depth);
         let typed_body = self.expr(body, Some(&result_type));
+        self.argument_depth = enclosing_arguments;
         self.env.pop();
         self.env = self.enclosing.pop().unwrap_or_default();
         self.pattern_borrow = outer_pattern_borrow;
@@ -4445,6 +4546,7 @@ impl<'a> Analyzer<'a> {
             // A function pointer names a concrete function and carries no type
             // arguments: a generic one is refused where the node is made.
             TExprKind::FnPointer { .. } => {}
+            TExprKind::BorrowTemporary { value } => self.materialize_typed_expr(value),
             TExprKind::Convert { value } => self.materialize_typed_expr(value),
             TExprKind::Try {
                 value,
@@ -5495,6 +5597,7 @@ fn specialize_expr(
         }
         // Nothing to specialize: the node exists only for a concrete function.
         TExprKind::FnPointer { .. } => {}
+        TExprKind::BorrowTemporary { value } => specialize_expr(value, substitutions, queue),
         TExprKind::FnRef { name, type_args } => {
             if !type_args.is_empty() {
                 let concrete = type_args

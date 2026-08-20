@@ -138,6 +138,7 @@ of what was believed at the time is the part worth keeping.
 - [D-123 — the version belongs to the release, and the decision log is public](#d-123--the-version-belongs-to-the-release-and-the-decision-log-is-public)
 - [D-124 — the C boundary opens by three rows, and none of them is a slice](#d-124--the-c-boundary-opens-by-three-rows-and-none-of-them-is-a-slice)
 - [D-125 — `format` is reserved at the freeze, and nothing is built](#d-125--format-is-reserved-at-the-freeze-and-nothing-is-built)
+- [D-126 — a temporary is borrowed where a call takes it, and dies there](#d-126--a-temporary-is-borrowed-where-a-call-takes-it-and-dies-there)
 
 ## D-001 — a native compiler, without LLVM
 
@@ -2346,3 +2347,42 @@ adding the form later a change nobody's program can notice.
 
 `StringBuilder` needs no reservation: it is a library type and a library
 function, and both are additive at any time.
+
+## D-126 — a temporary is borrowed where a call takes it, and dies there
+
+Status: approved · 2026-08-20
+
+Only a named binding could be borrowed, so `(& "hello")` and
+`(& (from-i64 id))` were refused and the shape that forced — a column of `let`s
+whose only purpose is to give a value a name — was the first thing an outside
+program complained about. It was in the library too: six printers each spent a
+line naming a string they immediately borrowed.
+
+**A temporary may now be borrowed where a call takes it as an argument, and it
+dies when that call returns.** The lifetime rule is the whole decision, and the
+alternative — extending the temporary to the end of the enclosing scope, as if
+the compiler had written the `let` — was rejected: it keeps an allocation alive
+somewhere a reader cannot see, and in a loop body it grows memory until the
+scope ends. Dying at the end of the expression is what a reader would guess,
+and it is what the lowering already knew how to do.
+
+**The argument position is not a restriction on top of the rule; it is the rule
+made checkable.** The temporary dies at the end of the expression the borrow
+appears in, so there has to *be* such an expression — a call is one, and a
+`let` value is not, because the binding outlives it. So `(let text (& "x"))` is
+refused with a message that says to name the value, and everything else is
+reached through an argument anyway.
+
+The checker recognises the position with a depth counter rather than a flag,
+because a call inside an argument list is ordinary: `(println (& (concat (& a)
+(& b))))` opens three, and each releases what was borrowed inside it. The count
+is reset around a `lambda` body, which is a function that happens to be written
+inside an argument rather than part of one — a borrow *inside* that body is
+still fine, because it is an argument of the call the body makes.
+
+Lowering cost nothing new. `clone` already collected the owned temporaries
+handed to it and dropped them after the call, so this is that mechanism with
+one more producer: the borrow pushes what it owns onto a stack, and the
+expression wrapper drains the stack after any call it lowered, innermost first.
+Neither backend learned anything, and no MIR instruction was added — the borrow
+is the `AddressOf` a borrow always was.

@@ -1,0 +1,6 @@
+borrow-temporary-outside-a-call.slp:2:16: error[SL0200]: only a binding can be borrowed here
+  |
+ 2 |   (let text (& "a literal has no name to borrow"))
+  |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  = help: give the value a name with `let`, or borrow it where a call takes it
+  = note: a borrowed temporary dies when the call it was passed to returns, so there is nowhere to release one that is not an argument

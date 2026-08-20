@@ -1,0 +1,11 @@
+borrow-temporary-as-a-lambda-body.slp:5:21: error[SL0300]: borrowed values cannot be returned from functions
+  |
+ 5 |   (let total (apply (lambda () () -> (& String) (& "nothing calls this"))))
+  |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+borrow-temporary-as-a-lambda-body.slp:5:52: error[SL0200]: only a binding can be borrowed here
+  |
+ 5 |   (let total (apply (lambda () () -> (& String) (& "nothing calls this"))))
+  |                                                    ^^^^^^^^^^^^^^^^^^^^
+  = help: give the value a name with `let`, or borrow it where a call takes it
+  = note: a borrowed temporary dies when the call it was passed to returns, so there is nowhere to release one that is not an argument
