@@ -1,0 +1,4 @@
+defer-without-body.slp:4:3: error[SL0100]: `defer` expects a body
+  |
+ 4 |   (defer)
+  |   ^^^^^^^

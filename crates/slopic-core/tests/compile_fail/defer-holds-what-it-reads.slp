@@ -1,0 +1,10 @@
+; The other half of the rule: a `defer` reads its names when the scope ends, so
+; nothing written below it may take one away first (`D-133`).
+(fn consume ((text String)) -> i64
+  (len (& text)))
+
+(fn main () -> i32
+  (let message "the handle is closed")
+  (defer (len (& message)))
+  (consume message)
+  0)

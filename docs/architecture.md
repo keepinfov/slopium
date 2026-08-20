@@ -78,6 +78,17 @@ command-line protocol is internal and versioned.
    else: every rule that makes inlining sound still decides, which is why the
    annotation is not part of a module's interface and adding one rebuilds
    nothing but the module it is written in (`D-122`).
+
+   Two bounds keep a mistake in a pass from hanging the compiler, and they mean
+   opposite things (`D-132`). The pipeline's bound is quiet: every pass is
+   sound on its own, so a module still improving when the rounds run out is a
+   correct module that was optimized less. Constant propagation's is not: its
+   lattice is optimistic until it settles, so a run that reaches the bound
+   folds nothing and reports `SL0700`. The block-target half of MIR
+   verification runs in every profile for the same reason — the passes index
+   blocks by a terminator's target, so an out-of-range one is a panic rather
+   than a wrong answer, and the rest of the verifier is off in the only profile
+   the pipeline runs in.
 9. A verifier checks the result of each pass: identifier ranges, parameter
    layout, call arity, operand types, and that every read has a reaching
    definition. A call through a function value is checked against the `Fn` type
@@ -121,6 +132,14 @@ elaboration is fused into lowering: the builder compares per-branch liveness
 maps and inserts drops at merges, so ownership correctness lives in the
 lowering code rather than in a later pass. `--emit mir-text` renders the whole
 module for reading.
+
+Ending a scope is two phases, in this order: what the scope deferred runs, then
+what it owns is dropped (`D-133`). `drop_scope_except` is the exit that falls
+off the end of a scope, and `unwind_scopes` is the one that leaves a range of
+them at once — a `break`, a `continue`, and the error arm of a `try`, which used
+to walk the live set and reproduce the drop order by hand. A deferred expression
+is held on its scope and lowered again at each exit, because there are no
+landing pads and no unwinder to share one copy between them.
 
 Register allocation is whole-interval: a local lives in one register for its
 entire function or in its frame slot for the entire function, with no interval

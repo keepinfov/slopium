@@ -45,7 +45,7 @@ syntax keyword slopiumModifier mut contained nextgroup=slopiumVariableDefinition
 syntax match slopiumVariableDefinition "[a-z_][A-Za-z0-9_-]*" contained
 syntax keyword slopiumAssignmentKeyword set nextgroup=slopiumVariable skipwhite
 syntax match slopiumVariable "[a-z_][A-Za-z0-9_-]*" contained
-syntax keyword slopiumControl do loop while break continue
+syntax keyword slopiumControl do loop while break continue defer
 " `unsafe` is a block like `do`, and a permission rather than a second type
 " system. It gets its own group so that a reader scanning a file can find every
 " place the compiler stopped proving things.

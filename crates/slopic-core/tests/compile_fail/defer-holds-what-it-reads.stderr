@@ -1,0 +1,6 @@
+defer-holds-what-it-reads.slp:9:12: error[SL0300]: cannot move `message`, which a `defer` reads when the scope ends
+  |
+ 9 |   (consume message)
+  |            ^^^^^^^
+  = label 8:3: deferred here
+  = help: borrow it or `clone` it; the deferred expression still needs the value

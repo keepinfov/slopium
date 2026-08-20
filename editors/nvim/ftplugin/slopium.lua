@@ -11,7 +11,7 @@ vim.bo.iskeyword = vim.bo.iskeyword .. ",-"
 -- word rather than under the operands. `lambda` and `unsafe` arrived after this
 -- line was first written and indent like `do` and `loop` do.
 vim.bo.lispwords =
-  "fn,test,struct,enum,const,export,take,extern,lambda,let,set,do,if,match,when,loop,while,unsafe,list,array,push"
+  "fn,test,struct,enum,const,export,take,extern,lambda,let,set,do,defer,if,match,when,loop,while,unsafe,list,array,push"
 vim.bo.omnifunc = "v:lua.slopium_omnifunc"
 
 vim.b.undo_ftplugin =
