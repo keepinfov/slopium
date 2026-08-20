@@ -47,6 +47,8 @@ fn native_program(source: &str) -> (PathBuf, PathBuf) {
     compile(&CompileRequest {
         input,
         source_root: None,
+        excluded_modules: Vec::new(),
+        named_modules: Vec::new(),
         dependencies: Vec::new(),
         toolchain_dependencies: vec![STD_PACKAGE.to_owned()],
         output: Some(output.clone()),
@@ -106,6 +108,8 @@ fn compiles_and_runs_multi_file_package() {
     .unwrap();
     compile(&CompileRequest {
         input,
+        excluded_modules: Vec::new(),
+        named_modules: Vec::new(),
         source_root: Some(source_root),
         dependencies: Vec::new(),
         toolchain_dependencies: vec![STD_PACKAGE.to_owned()],
@@ -148,8 +152,12 @@ fn compiles_path_dependency_under_manifest_alias() {
     let executable = directory.join("program");
     compile(&CompileRequest {
         input,
+        excluded_modules: Vec::new(),
+        named_modules: Vec::new(),
         source_root: Some(app),
         dependencies: vec![DependencySource {
+            excluded_modules: Vec::new(),
+            named_modules: Vec::new(),
             namespace: "math".into(),
             source_root: dependency,
         }],
@@ -258,6 +266,8 @@ fn try_propagates_configured_result_errors() {
     compile(&CompileRequest {
         input,
         source_root: None,
+        excluded_modules: Vec::new(),
+        named_modules: Vec::new(),
         dependencies: Vec::new(),
         toolchain_dependencies: vec![STD_PACKAGE.to_owned()],
         output: Some(executable.clone()),
@@ -330,6 +340,8 @@ fn toolchain_std_supplies_option_result_and_language_items() {
     .unwrap();
     compile(&CompileRequest {
         input,
+        excluded_modules: Vec::new(),
+        named_modules: Vec::new(),
         source_root: Some(source_root),
         dependencies: Vec::new(),
         toolchain_dependencies: vec!["std".into()],

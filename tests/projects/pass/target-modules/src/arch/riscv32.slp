@@ -1,0 +1,8 @@
+; The `arch` module for a target this toolchain cannot build for. It is here to
+; prove that costs the build nothing: it is never selected, so it is never
+; compiled, and the width it claims is one no other file here has.
+(export name pointer-bits)
+
+(fn name () -> String "riscv32")
+
+(fn pointer-bits () -> i64 32)

@@ -25,7 +25,15 @@ rather than everything it touched.
   written, and all of them run before the scope releases what it owns, so a
   file descriptor, a socket or a lock behind an `i64` is released where it was
   decided rather than wherever the scope happens to end.
-  
+- A manifest can say what a module *is* for each target:
+  `[target."x86_64-unknown-linux-gnu"] modules = { arch = "src/arch/x86-64.slp" }`,
+  and another file under another triple. The program writes `(take arch ...)`
+  once and never learns which file answered; the files that were not selected
+  are not compiled, and the one that was is an ordinary module, checked like
+  every other. A triple this toolchain cannot build for needs no special case.
+  An entry naming a file that is not there is refused as `SL1102` rather than
+  quietly doing nothing.
+
 ### Fixed
 - A release build no longer folds a constant its analysis had not finished
   proving. Constant propagation bails out at a bound, and until it settles its

@@ -317,6 +317,53 @@ which is what putting a package into a static tree takes. It is also where
 `D-054` is enforced from the writing side: a manifest that depends on a
 directory or a repository cannot become an index entry.
 
+### A module that is a different file per target
+
+There is no conditional compilation in the language, and the library's answer —
+the `core`/`std` split — works because that split is a *dependency* rather than
+a condition. It does not scale to a hardware abstraction layer with a file per
+chip, so the manifest says what a module **is** for each target (`D-135`):
+
+```toml
+[target."x86_64-unknown-linux-gnu"]
+modules = { arch = "src/arch/x86-64.slp" }
+
+[target."aarch64-unknown-linux-gnu"]
+modules = { arch = "src/arch/aarch64.slp" }
+
+[target."riscv32-unknown-none"]
+modules = { arch = "src/arch/riscv32.slp" }
+```
+
+```lisp
+(take arch name pointer-bits)   ; the same line whatever is being built
+```
+
+The name is what makes it work. Selecting files alone would leave them named
+after their paths — `arch:x86-64` and `arch:aarch64` — and a program would still
+have to name the one it wanted, which is the problem this removes. Every file
+any target names is out of the build unless the target naming it is the one
+selected, and the file that *is* selected is compiled as an ordinary module,
+checked and exported exactly like every other. The paths are relative to the
+package root, as `entry` and `c-sources` are, and one that leaves the package or
+names no file is refused as `SL1102` — a selection that quietly does nothing is
+worse than one that is refused.
+
+A triple this toolchain cannot build for needs no special case: its file is
+simply never the selected one. That is what makes the table forward-compatible
+with no version to check, and `D-128` covers the other direction — a toolchain
+older than this key warns `SL1200` and carries on, building for the targets it
+does know.
+
+Each package's own table is read, not only the root's — unlike `[build] target`
+and `[build] linker-script` beside it, which describe the one image being built
+(`D-117`). A library with a module per chip is the case this exists for, and a
+library is never the root.
+
+The archive carries every target's file, because a package is one thing wherever
+it is built. What a build leaves out is decided when it runs, not when it is
+packaged.
+
 ### A key the toolchain does not know
 
 A manifest is read by every toolchain that ever sees the package, and not only

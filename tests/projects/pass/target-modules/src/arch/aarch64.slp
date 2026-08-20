@@ -1,0 +1,6 @@
+; The `arch` module for `aarch64-unknown-linux-gnu`.
+(export name pointer-bits)
+
+(fn name () -> String "aarch64")
+
+(fn pointer-bits () -> i64 64)

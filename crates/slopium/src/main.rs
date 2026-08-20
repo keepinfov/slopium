@@ -759,9 +759,9 @@ impl Session {
     }
 
     /// What one member compiles against.
-    fn dependencies(&self, project: &Project) -> Result<Dependencies, String> {
+    fn dependencies(&self, project: &Project, target: &str) -> Result<Dependencies, String> {
         let resolution = self.resolution.member(&project.name)?;
-        dependencies_of(project, resolution)
+        dependencies_of(project, resolution, target)
     }
 }
 
@@ -769,9 +769,11 @@ fn check(session: &Session, project: &Project, args: &TargetArgs) -> Result<(), 
     let target = target(project, args.target.clone());
     let source = source_path(project)?;
     let source_root = project.source_root()?;
-    let dependencies = session.dependencies(project)?;
+    let dependencies = session.dependencies(project, &target)?;
+    let selection = target_selection(project, &target)?;
     let mut command = slopic_command(project, &target, args.cc.clone())?;
     command.arg(&source).arg("--source-root").arg(&source_root);
+    add_selection_args(&mut command, &selection);
     add_dependency_args(&mut command, &dependencies);
     if project.is_library() {
         command.arg("--library");
@@ -834,7 +836,8 @@ fn build(
     }
     let source = source_path(project)?;
     let source_root = project.source_root()?;
-    let dependencies = session.dependencies(project)?;
+    let dependencies = session.dependencies(project, &target)?;
+    let selection = target_selection(project, &target)?;
     let profile_name = if args.release { "release" } else { "dev" };
     let profile = project.manifest.profile.get(profile_name);
     // One `target/` for the whole workspace, so members share compiled
@@ -887,7 +890,7 @@ fn build(
     fs::create_dir_all(&object_dir)
         .map_err(|error| format!("cannot create `{}`: {error}", object_dir.display()))?;
     let mut objects = Vec::new();
-    let module_units = codegen_module_units(project, &dependencies)?;
+    let module_units = codegen_module_units(project, &dependencies, &selection)?;
     for module in &module_units {
         let object = object_dir.join(format!("{}.o", encode_file_name(&module.name)));
         let object_stamp = object.with_extension("slop-cache");
@@ -897,6 +900,7 @@ fn build(
         {
             let mut command = Command::new(&compiler);
             command.arg(&source).arg("--source-root").arg(&source_root);
+            add_selection_args(&mut command, &selection);
             add_dependency_args(&mut command, &dependencies);
             command
                 .args([
@@ -1009,13 +1013,22 @@ struct ModuleCacheUnit {
     has_generics: bool,
 }
 
+/// One `ModuleCacheUnit` per module the build emits an object for.
+///
+/// It walks the source trees itself rather than asking the compiler, so it has
+/// to leave out the same modules the compiler was told to (`D-135`): asking for
+/// an object for a module that is not in the build would name a `--codegen-
+/// module` the compiler has never heard of.
 fn codegen_module_units(
     project: &Project,
     dependencies: &Dependencies,
+    selection: &TargetSelection,
 ) -> Result<Vec<ModuleCacheUnit>, String> {
     fn modules(
         root: &Path,
         namespace: Option<&str>,
+        excluded: &[String],
+        named: &[(String, PathBuf)],
         output: &mut Vec<ModuleCacheUnit>,
     ) -> Result<(), String> {
         let mut sources = Vec::new();
@@ -1040,7 +1053,17 @@ fn codegen_module_units(
                 .and_then(|name| name.to_str())
                 .ok_or_else(|| format!("invalid source file name `{}`", source.display()))?
                 .to_owned();
-            let module = parts.join(":");
+            // A file the manifest named is that module, whatever its path
+            // would have said, which is exactly what the compiler was told.
+            let module = named
+                .iter()
+                .find(|(_, path)| *path == source)
+                .map_or_else(|| parts.join(":"), |(name, _)| name.clone());
+            // Against the unqualified name, which is what the compiler was
+            // handed: an exclusion belongs to the root it was read from.
+            if excluded.contains(&module) {
+                continue;
+            }
             let name = namespace.map_or(module.clone(), |prefix| format!("{prefix}:{module}"));
             let text = fs::read_to_string(&source)
                 .map_err(|error| format!("cannot read `{}`: {error}", source.display()))?;
@@ -1056,11 +1079,23 @@ fn codegen_module_units(
     }
 
     let mut output = Vec::new();
-    modules(&project.source_root()?, None, &mut output)?;
+    modules(
+        &project.source_root()?,
+        None,
+        &selection.excluded,
+        &selection.named,
+        &mut output,
+    )?;
     for dependency in &dependencies.packages {
         match &dependency.source {
             ResolvedDependencySource::Path(root) => {
-                modules(root, Some(&dependency.namespace), &mut output)?;
+                modules(
+                    root,
+                    Some(&dependency.namespace),
+                    &dependency.excluded_modules,
+                    &dependency.named_modules,
+                    &mut output,
+                )?;
             }
             // A toolchain dependency's alias is its package name — `SL1077`
             // refuses any other — so the namespace names the bundled package.
@@ -1903,6 +1938,11 @@ struct ResolvedDependency {
     namespace: String,
     source: ResolvedDependencySource,
     manifest_source: Option<String>,
+    /// The modules of this dependency the selected target leaves out
+    /// (`D-135`). A library with a module per target is what this exists for.
+    excluded_modules: Vec<String>,
+    /// The file each of this dependency's named modules is, for this target.
+    named_modules: Vec<(String, PathBuf)>,
 }
 
 /// Everything resolution produced that the rest of the build consumes.
@@ -1917,7 +1957,11 @@ struct Dependencies {
 }
 
 /// Turn one member's resolved graph into what its build consumes.
-fn dependencies_of(project: &Project, resolution: &Resolution) -> Result<Dependencies, String> {
+fn dependencies_of(
+    project: &Project,
+    resolution: &Resolution,
+    target: &str,
+) -> Result<Dependencies, String> {
     reject_namespace_collisions(project, resolution)?;
 
     let mut packages = Vec::new();
@@ -1949,6 +1993,10 @@ fn dependencies_of(project: &Project, resolution: &Resolution) -> Result<Depende
                 ))
             }
         };
+        let selection = match &package.project {
+            Some(project) => target_selection(project, target)?,
+            None => TargetSelection::default(),
+        };
         packages.push(ResolvedDependency {
             namespace: package.namespace().to_owned(),
             source,
@@ -1956,6 +2004,8 @@ fn dependencies_of(project: &Project, resolution: &Resolution) -> Result<Depende
                 .project
                 .as_ref()
                 .map(|project| project.manifest_source.clone()),
+            excluded_modules: selection.excluded,
+            named_modules: selection.named,
         });
     }
     Ok(Dependencies {
@@ -1975,6 +2025,90 @@ fn c_source_paths(project: &Project) -> Vec<PathBuf> {
         .iter()
         .map(|path| project.root.join(path))
         .collect()
+}
+
+/// What `[target."<triple>"]` decides about one package's own modules
+/// (`D-135`).
+#[derive(Default)]
+struct TargetSelection {
+    /// Modules left out, by the name the compiler would have derived from the
+    /// path — which is how it knows them, since it names a module by where it
+    /// found it.
+    excluded: Vec<String>,
+    /// The file each named module is, for the target being built. The compiler
+    /// is told the name because the path no longer decides it.
+    named: Vec<(String, PathBuf)>,
+}
+
+/// Reads `[target."<triple>"]` for one package and one target (`D-135`).
+///
+/// The manifest says what each module *is* per target. Every file any target
+/// names is out of the build unless the target naming it is the one selected,
+/// and the file that is selected is handed over under the name the manifest
+/// gave it rather than the one its path would have produced. That is what lets
+/// the rest of a program write `(take arch ...)` once.
+///
+/// A target with no table of its own gets none of these files, which is the
+/// honest reading of "exactly one of them is in the build" and needs no list of
+/// known triples: a table for a target this toolchain cannot build for simply
+/// never names the selected one.
+///
+/// A path that names nothing is an error rather than a selection that quietly
+/// does nothing, the standard `D-128` set for a key nobody knows.
+fn target_selection(project: &Project, target: &str) -> Result<TargetSelection, String> {
+    if project.target_modules.is_empty() {
+        return Ok(TargetSelection::default());
+    }
+    let source_root = project.source_root()?;
+    let mut selection = TargetSelection::default();
+    let mut selected_paths = Vec::new();
+    for (triple, modules) in &project.target_modules {
+        for (module, path) in modules {
+            let absolute = project.root.join(path);
+            if !absolute.is_file() {
+                return Err(format!(
+                    "SL1102: `target.{triple}` module `{module}` of package `{}` names no file \
+                     at `{}`",
+                    project.name,
+                    path.display()
+                ));
+            }
+            let absolute = absolute
+                .canonicalize()
+                .map_err(|error| format!("cannot resolve `{}`: {error}", absolute.display()))?;
+            if !absolute.starts_with(&source_root) {
+                return Err(format!(
+                    "SL1102: `target.{triple}` module `{module}` of package `{}` is not under \
+                     its source root",
+                    project.name
+                ));
+            }
+            if triple == target {
+                selection.named.push((module.clone(), absolute.clone()));
+                selected_paths.push(absolute);
+            }
+        }
+    }
+    for modules in project.target_modules.values() {
+        for path in modules.values() {
+            let absolute = project.root.join(path);
+            let Ok(absolute) = absolute.canonicalize() else {
+                continue;
+            };
+            if selected_paths.contains(&absolute) {
+                continue;
+            }
+            let Some(module) = slopic_core::module_from_path(&source_root, &absolute) else {
+                continue;
+            };
+            selection.excluded.push(module);
+        }
+    }
+    selection.excluded.sort();
+    selection.excluded.dedup();
+    selection.named.sort();
+    selection.named.dedup();
+    Ok(selection)
 }
 
 /// A package's `[build] linker-script`, resolved against its root.
@@ -2522,6 +2656,19 @@ fn synchronize_lock(
         .map_err(|error| format!("cannot write `{}`: {error}", path.display()))
 }
 
+/// Tells the compiler which of the root package's modules this build is not
+/// made of, and which file each named one is (`D-135`).
+fn add_selection_args(command: &mut Command, selection: &TargetSelection) {
+    for module in &selection.excluded {
+        command.arg("--exclude-module").arg(module);
+    }
+    for (module, path) in &selection.named {
+        command
+            .arg("--module")
+            .arg(format!("{module}={}", path.display()));
+    }
+}
+
 fn add_dependency_args(command: &mut Command, dependencies: &Dependencies) {
     for dependency in &dependencies.packages {
         match &dependency.source {
@@ -2537,6 +2684,18 @@ fn add_dependency_args(command: &mut Command, dependencies: &Dependencies) {
                     .arg("--toolchain-dependency")
                     .arg(&dependency.namespace);
             }
+        }
+        for module in &dependency.excluded_modules {
+            command
+                .arg("--dependency-exclude")
+                .arg(format!("{}={module}", dependency.namespace));
+        }
+        for (module, path) in &dependency.named_modules {
+            command.arg("--dependency-module").arg(format!(
+                "{}={module}={}",
+                dependency.namespace,
+                path.display()
+            ));
         }
     }
     for (name, path) in &dependencies.language_items {
@@ -3117,7 +3276,7 @@ mod tests {
         let session = Session::open(Some(manifest.clone()), ResolveArgs::default()).unwrap();
         let project = session.workspace.member("application").unwrap();
         let namespaces = session
-            .dependencies(project)
+            .dependencies(project, "x86_64-unknown-linux-gnu")
             .unwrap()
             .packages
             .into_iter()
