@@ -219,14 +219,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
-          VERSION: ${{ needs.verify.outputs.version }}
           PRERELEASE: ${{ needs.verify.outputs.prerelease }}
         run: |
           set -eu
           flags="--draft"
           [ "$PRERELEASE" = "true" ] && flags="$flags --prerelease"
+          # The tag is the title. `release-check.sh --check-release` has already
+          # refused a tag that disagrees with the manifest, so the two say the
+          # same thing and the tag says it in the form everything else names a
+          # release by — the tag itself, the compare links at the foot of
+          # `CHANGELOG.md`, `git describe`.
           # shellcheck disable=SC2086
           gh release create "$TAG" $flags \
-            --title "slopium $VERSION" \
+            --title "$TAG" \
             --notes-file notes.md \
             dist/*.tar.gz dist/SHA256SUMS
