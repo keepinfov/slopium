@@ -56,6 +56,7 @@ const KEYWORDS: &[&str] = &[
     "match",
     "when",
     "do",
+    "defer",
     "true",
     "false",
     "_",
@@ -1165,6 +1166,9 @@ fn scan_expr_occurrences(
         }
         ExprKind::Set { value, .. } => {
             scan_expr_occurrences(workspace, modules, summary, file, value);
+        }
+        ExprKind::Defer(body) => {
+            scan_expr_occurrences(workspace, modules, summary, file, body);
         }
         ExprKind::Do(items) | ExprKind::Unsafe(items) => {
             for item in items {
