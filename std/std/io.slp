@@ -67,7 +67,6 @@
 (fn read-i64 () -> (Option i64)
   (match (read-line)
     ((Option:Some line)
-      (do
-        (let text (trim (& line)))
-        (to-i64 (& text))))
+      (let text (trim (& line)))
+      (to-i64 (& text)))
     ((Option:None) (Option:None))))

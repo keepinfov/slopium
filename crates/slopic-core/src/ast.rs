@@ -1500,15 +1500,51 @@ impl AstBuilder<'_> {
                         }
                         ExprKind::Unsafe(body)
                     }
+                    // The tail of an `if` is its `else` branch and takes as
+                    // many expressions as it needs; `then` stays one (`D-127`).
+                    // With an `else` that is never optional there is no second
+                    // boundary to find, and the shape this language writes is
+                    // an answer on one line above the work that follows it.
                     "if" => {
-                        if items.len() != 4 {
+                        if items.len() < 4 {
                             self.error(form.span, "`if` expects condition, then, and else");
                             return None;
                         }
                         ExprKind::If {
                             condition: Box::new(self.expr(&items[1])?),
                             then_expr: Box::new(self.expr(&items[2])?),
-                            else_expr: Box::new(self.expr(&items[3])?),
+                            else_expr: Box::new(self.body(&items[3..], form.span)?),
+                        }
+                    }
+                    // `when` is an `if` whose `else` is nothing, and it answers
+                    // `unit` however the condition falls (`D-127`). The body is
+                    // a `do` with a `unit` after it rather than a branch of its
+                    // own type, so a body that ends in a value drops it exactly
+                    // where a `do` would.
+                    "when" => {
+                        if items.len() < 3 {
+                            self.error(form.span, "`when` expects a condition and a body");
+                            return None;
+                        }
+                        let condition = Box::new(self.expr(&items[1])?);
+                        let mut body = Vec::new();
+                        for item in &items[2..] {
+                            body.push(self.expr(item)?);
+                        }
+                        body.push(Expr {
+                            kind: ExprKind::Unit,
+                            span: form.span,
+                        });
+                        ExprKind::If {
+                            condition,
+                            then_expr: Box::new(Expr {
+                                kind: ExprKind::Do(body),
+                                span: form.span,
+                            }),
+                            else_expr: Box::new(Expr {
+                                kind: ExprKind::Unit,
+                                span: form.span,
+                            }),
                         }
                     }
                     "and" | "or" => {
@@ -1728,17 +1764,23 @@ impl AstBuilder<'_> {
             let Some(parts) = self.list(item, "match arm") else {
                 continue;
             };
-            // Two elements is an arm, four with `when` in the second is a
-            // guarded one (`D-121`). Nothing else was ever legal here, so the
-            // guard costs no ambiguity.
-            let (guard_form, body_form) = match parts {
-                [_, body] => (None, body),
-                [_, marker, guard, body] if atom(marker) == Some("when") => (Some(guard), body),
+            // A pattern and a body is an arm, and `when` in the second place
+            // makes it a guarded one (`D-121`). The body is as many
+            // expressions as it needs (`D-127`), which is why the guard is
+            // found by the word rather than by counting: an arm of four
+            // elements is now a body of three.
+            let (guard_form, body_forms) = match parts {
+                [_, marker, guard, body @ ..]
+                    if atom(marker) == Some("when") && !body.is_empty() =>
+                {
+                    (Some(guard), body)
+                }
+                [_, body @ ..] if !body.is_empty() => (None, body),
                 _ => {
                     self.error(
                         item.span,
-                        "match arm syntax is `(pattern expression)` or \
-                         `(pattern when condition expression)`",
+                        "match arm syntax is `(pattern expression ...)` or \
+                         `(pattern when condition expression ...)`",
                     );
                     continue;
                 }
@@ -1748,7 +1790,7 @@ impl AstBuilder<'_> {
                 Some(form) => Some(self.expr(form)?),
                 None => None,
             };
-            let body = self.expr(body_form)?;
+            let body = self.body(body_forms, item.span)?;
             arms.push(MatchArm {
                 pattern,
                 guard,

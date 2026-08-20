@@ -33,13 +33,12 @@
   (let mut input items)
   (if (= (len (& input)) 0)
     (list)
-    (do
-      (let head (remove (&mut input) 0))
-      (let mut output (list (f head)))
-      (while (> (len (& input)) 0)
-        (let next (remove (&mut input) 0))
-        (push (&mut output) (f next)))
-      output)))
+    (let head (remove (&mut input) 0))
+    (let mut output (list (f head)))
+    (while (> (len (& input)) 0)
+      (let next (remove (&mut input) 0))
+      (push (&mut output) (f next)))
+    output))
 
 ; `keep` is asked about each element of the list as it arrived, before anything
 ; is removed, which is why every question is answered first and the removals
@@ -49,19 +48,17 @@
   (let size (len (& result)))
   (if (= size 0)
     result
-    (do
-      (let mut flags (list (keep (get-ref (& result) 0))))
-      (let mut index 1)
-      (while (< index size)
-        (push (&mut flags) (keep (get-ref (& result) index)))
-        (set index (+ index 1)))
-      (let mut back size)
-      (while (> back 0)
-        (set back (- back 1))
-        (if (get (& flags) back)
-          ()
-          (drop-at (&mut result) back)))
-      result)))
+    (let mut flags (list (keep (get-ref (& result) 0))))
+    (let mut index 1)
+    (while (< index size)
+      (push (&mut flags) (keep (get-ref (& result) index)))
+      (set index (+ index 1)))
+    (let mut back size)
+    (while (> back 0)
+      (set back (- back 1))
+      (when (not (get (& flags) back))
+        (drop-at (&mut result) back)))
+    result))
 
 ; Removing and discarding, as its own function because the discarded binding
 ; has to go out of scope for the loan to close.
@@ -85,11 +82,9 @@
   (let mut index 0)
   (let mut found -1)
   (while (< index size)
-    (if (holds (get-ref items index))
-      (do
-        (set found index)
-        (break))
-      ())
+    (when (holds (get-ref items index))
+      (set found index)
+      (break))
     (set index (+ index 1)))
   (if (< found 0)
     (Option:None)
@@ -112,9 +107,8 @@
   (let size (len (& source)))
   (if (< size 2)
     source
-    (do
-      (let order (selection-order (& source) before size))
-      (take-in-order source order))))
+    (let order (selection-order (& source) before size))
+    (take-in-order source order)))
 
 ; The indices of the list in sorted order. Nothing is moved out of `items`
 ; here, so `before` sees the same list for every comparison it is asked to
@@ -147,11 +141,10 @@
   (let mut best 0)
   (let mut slot 1)
   (while (< slot size)
-    (if (before
+    (when (before
         (get-ref items (get remaining slot))
         (get-ref items (get remaining best)))
-      (set best slot)
-      ())
+      (set best slot))
     (set slot (+ slot 1)))
   best)
 
@@ -176,8 +169,7 @@
   (let mut count 0)
   (let mut position 0)
   (while (< position size)
-    (if (< (get gone position) index)
-      (set count (+ count 1))
-      ())
+    (when (< (get gone position) index)
+      (set count (+ count 1)))
     (set position (+ position 1)))
   count)

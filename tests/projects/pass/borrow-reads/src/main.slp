@@ -34,11 +34,10 @@
     ; Nested: the `Point` behind the borrow is borrowed too, and so is each of
     ; its fields — one pointer-shaped and one not.
     ((Shape:Dot (Point :x x :label label))
-      (do
-        (let number (from-i64 (clone x)))
-        (let gap "@")
-        (let head (concat label (& gap)))
-        (concat (& head) (& number))))
+      (let number (from-i64 (clone x)))
+      (let gap "@")
+      (let head (concat label (& gap)))
+      (concat (& head) (& number)))
     ((Shape:Tag name) (clone name))))
 
 (fn none-i64 () -> (Option i64)

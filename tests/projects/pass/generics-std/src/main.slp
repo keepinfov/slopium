@@ -26,9 +26,8 @@
   (match result
     ((Result:Ok value) value)
     ((Result:Err error)
-      (do
-        (println (& error))
-        0))))
+      (println (& error))
+      0)))
 
 (fn main () -> i32
   (println-i64 (identity 42))

@@ -1,0 +1,4 @@
+when-without-body.slp:2:3: error[SL0100]: `when` expects a condition and a body
+  |
+ 2 |   (when (= 1 1))
+  |   ^^^^^^^^^^^^^^
