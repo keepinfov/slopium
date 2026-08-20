@@ -565,10 +565,22 @@ fi
 assert_patterns <(printf '%s\n' '"code":"SL0300"') "$emit_dir/diagnostic.jsonl"
 echo "project-tests: manager and slopic command surfaces ... ok"
 
+# A fixture directory with no manifest is almost always a *stranded* one: the
+# fixture was added on another branch, and switching away left its gitignored
+# `target/` and `Slopium.lock` behind. The walk then finds a directory and no
+# package, and `slopium` reports a missing file, which says nothing about why.
+require_manifest() {
+  [ -f "$2" ] && return 0
+  echo "project-tests: \`$1\` has no Slopium.toml" >&2
+  echo "project-tests: this is usually a build directory left behind by a branch that added the fixture; \`rm -rf\` it, it is build output" >&2
+  exit 1
+}
+
 pass_count=0
 while IFS= read -r -d '' project; do
   name="$(basename "$project")"
   manifest="$project/Slopium.toml"
+  require_manifest "$project" "$manifest"
   prefix="$result_dir/pass-$name"
   args=()
   project_arguments "$project" args
@@ -679,6 +691,7 @@ compile_fail_count=0
 while IFS= read -r -d '' project; do
   name="$(basename "$project")"
   manifest="$project/Slopium.toml"
+  require_manifest "$project" "$manifest"
   prefix="$result_dir/compile-fail-$name"
 
   run_manager_logged "compile-fail/$name clean" "$prefix.clean.stdout" \
@@ -701,6 +714,7 @@ runtime_fail_count=0
 while IFS= read -r -d '' project; do
   name="$(basename "$project")"
   manifest="$project/Slopium.toml"
+  require_manifest "$project" "$manifest"
   prefix="$result_dir/runtime-fail-$name"
   args=()
   project_arguments "$project" args
@@ -742,6 +756,7 @@ test_fail_count=0
 while IFS= read -r -d '' project; do
   name="$(basename "$project")"
   manifest="$project/Slopium.toml"
+  require_manifest "$project" "$manifest"
   prefix="$result_dir/test-fail-$name"
 
   run_manager_logged "test-fail/$name clean" "$prefix.clean.stdout" \
