@@ -136,11 +136,15 @@ The v0.2 package and language-core diagnostics reserve:
 - `SL0452`: generic declaration or instantiation;
 - `SL0453`: standard-library language-item contract.
 
-`SL0700` reports a failed internal consistency check, such as MIR verification.
-It is never caused by the source being wrong, only by a compiler bug, and
-should be reported as one. MIR verification runs in debug builds and whenever
+`SL0700` reports a failed internal consistency check, such as MIR verification
+or an optimizer analysis that did not settle within its bound. It is never
+caused by the source being wrong, only by a compiler bug, and should be
+reported as one. MIR verification runs in debug builds and whenever
 `SLOPIUM_VERIFY_MIR=1` is set, so a release compiler can be checked without
-paying for the analysis by default.
+paying for the analysis by default — with one exception: the check that every
+terminator names a block that exists runs in every profile, because the release
+optimizer indexes blocks by those targets and a bad one is a panic rather than
+a diagnostic (`D-132`).
 
 Compile-fail fixtures store expected codes and primary byte/line spans
 separately from rendered stderr. Intentional snapshot updates require:

@@ -13,6 +13,20 @@ rather than everything it touched.
 
 ## [Unreleased]
 
+### Fixed
+- A release build no longer folds a constant its analysis had not finished
+  proving. Constant propagation bails out at a bound, and until it settles its
+  states are optimistic, so a `Branch` could be rewritten into a `Goto` the
+  program never asked for; a run that reaches the bound now folds nothing and
+  reports `SL0700` instead. The bound has never been reached by a real
+  program, and reaching it would mean the bound is wrong.
+- A debug or continuous-integration build no longer aborts on a program that is
+  still worth optimizing after the last pipeline round. That was an assertion
+  about a legitimate outcome; the pipeline stops and keeps what it achieved.
+- A terminator naming a block that does not exist is reported as `SL0700`
+  rather than crashing the compiler in a release build, where the verification
+  that would have caught it does not run.
+
 ## [0.11.0] - 2026-08-20
 
 ### Added
