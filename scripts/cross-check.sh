@@ -125,6 +125,13 @@ for profile in dev release; do
     # A fixture with `c-sources` needs objects `slopic` alone does not link;
     # the FFI section below builds that shape itself, on both targets.
     grep -q '^c-sources' "$project/Slopium.toml" && continue
+    # A fixture that answers differently per target is not two backends
+    # disagreeing — it is two different programs, which is what a module named
+    # per target is for (`D-135`). What it claims is asserted by
+    # `project-tests.sh`, which builds it for each target and checks it answered
+    # that target's way. It is also built here through `slopic` directly, which
+    # is handed no manifest and so would compile every candidate file at once.
+    [[ -f "$project/target-dependent" ]] && continue
     if ! "$compiler" "$entry" --source-root "$project/src" --toolchain-dependency std \
       --emit check >/dev/null 2>&1; then
       continue

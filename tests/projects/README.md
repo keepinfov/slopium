@@ -29,6 +29,7 @@ scripts/project-tests.sh
 | `custom-std` | A path package supplying `[language-items]` in place of the bundled `std` |
 | `workspace` | A root package with a library member: inherited version and dependency, one lock, one `target/`, per-package tests |
 | `process-io` | stdin, `read-line`, `read-i64`, `parse-i64`, environment, argv |
+| `target-modules` | One module name that is a different file per target across three triples, built and run for both the host and the cross target, with a third file for a target this toolchain cannot build |
 
 `workspaces/virtual-root` is not a passing project, because its root defines no
 package to run: it has its own phase in the runner, which asserts that a command

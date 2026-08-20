@@ -144,6 +144,7 @@ of what was believed at the time is the part worth keeping.
 - [D-129 — hexadecimal is two functions and an uppercase table](#d-129--hexadecimal-is-two-functions-and-an-uppercase-table)
 - [D-130 — failing on purpose, and a failing test that says what it compared](#d-130--failing-on-purpose-and-a-failing-test-that-says-what-it-compared)
 - [D-131 — the release page is generated from the titles that were merged](#d-131--the-release-page-is-generated-from-the-titles-that-were-merged)
+- [D-135 — the manifest says what a module is for each target](#d-135--the-manifest-says-what-a-module-is-for-each-target)
 
 ## D-001 — a native compiler, without LLVM
 
@@ -2589,3 +2590,50 @@ than something the tag delivers. And the job that builds the page needs the
 whole history and every tag, where every other job in that workflow is happy
 with a shallow clone: a walk from the previous tag has neither end of it
 otherwise.
+\n
+## D-135 — the manifest says what a module is for each target
+
+Status: approved · 2026-08-20
+
+There is no conditional compilation in the language, and the library's answer —
+the `core`/`std` split — works because that split is a *dependency* rather than
+a condition. It does not scale to a hardware abstraction layer with a file per
+chip. The package format freezes with everything else, so the shape had to be
+decided even though the second architecture that needs it is further out.
+
+**The manifest says what a module is, not merely which files to keep.** A
+`[target."<triple>"]` table maps a module name to a file, and the rest of the
+program writes `(take arch ...)` once. Selection alone was tried first and does
+not work: files keep the names their paths give them — `arch:x86-64` and
+`arch:aarch64` — so a program still has to name the one it wants, which is the
+problem this was supposed to remove. Every file any target names is out of the
+build unless the target naming it is the one selected; the file that is selected
+is compiled as an ordinary module, checked and exported like every other, which
+is the property a `(target "...")` annotation on a declaration deliberately does
+not have (`D-136`).
+
+A triple this toolchain cannot build for needs no special case: its file is
+never the selected one. That is what makes the table forward-compatible with no
+version to check, and `D-128` covers the other direction — a toolchain older
+than the key warns `SL1200` and builds for the targets it knows. Each package's
+own table is read rather than the root's alone, unlike `[build] target` and
+`linker-script`, and the difference is the one `D-117` already draws: those
+describe the single image being built, this describes which of a package's own
+files it is made of. A library with a module per chip is the case, and a library
+is never the root.
+
+**The compiler still reads no manifest.** It discovers a package's modules by
+walking a source root it was handed (`D-002`), so the manager, which read the
+manifest, hands the answer over on the command line: `--exclude-module` for what
+this build is not made of, and `--module NAME=PATH` for the file a named module
+is, with `--dependency-exclude` and `--dependency-module` for the same about a
+dependency. The alias is a separate field rather than qualified into one string
+because a module name already holds colons and `a:b:c` would not say which part
+is which. Path derivation still names every file nobody said anything about,
+which is every file in almost every package.
+
+A path naming no file is refused, `SL1102`, whatever target is being built — the
+standard `D-128` set for a key nobody knows, because a selection that quietly
+does nothing is worse than one that is refused. The archive carries every
+target's file: a package is one thing wherever it is built, and what a build
+leaves out is decided when it runs.

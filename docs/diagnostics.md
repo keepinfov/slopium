@@ -123,7 +123,9 @@ The manifest, the workspace, the graph, the lock and the build:
 - `SL1082`: `--locked` was given and the lock would have to change;
 - `SL1090`: the compiler and the manager disagree about the protocol version;
 - `SL1100`: a `c-sources` entry is absolute or leaves the package;
-- `SL1101`: `[build] linker-script` is absolute or leaves the package.
+- `SL1101`: `[build] linker-script` is absolute or leaves the package;
+- `SL1102`: a `[target."<triple>"] modules` entry names no file, leaves the
+  package, or is absolute.
 
 Resolution is spread over two families: `SL103x` keeps the registry errors that
 happen during resolution, because a stable code that moves is not stable
