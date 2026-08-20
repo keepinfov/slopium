@@ -13,6 +13,66 @@ rather than everything it touched.
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-08-20
+
+### Added
+- `(defer body ...)` runs its body when the enclosing scope ends, whatever
+  ended it: falling off the end, a `break`, a `continue`, or the error arm of a
+  `try`. Deferred expressions run in the reverse of the order they were
+  written, and all of them run before the scope releases what it owns, so a
+  file descriptor, a socket or a lock behind an `i64` is released where it was
+  decided rather than wherever the scope happens to end.
+- A manifest can say what a module *is* for each target, so
+  `[target."x86_64-unknown-linux-gnu"]` names one file for `arch` and another
+  triple names a different one. The program writes `(take arch ...)`
+  once and never learns which file answered; the files that were not selected
+  are not compiled, and the one that was is an ordinary module, checked like
+  every other. A triple this toolchain cannot build for needs no special case.
+  An entry naming a file that is not there is refused as `SL1102` rather than
+  quietly doing nothing.
+- A comment beginning `;;`, on the lines directly above a declaration, is that
+  declaration's documentation, and the language server shows it on hover above
+  the type. A single `;` is an ordinary comment and still means nothing. A
+  blank line ends the block, and so does a comment sharing its line with code.
+  The formatter leaves a `;;` block exactly as it was written.
+- A declaration can say which target it is for: `(fn (target
+  "aarch64-unknown-linux-gnu") ...)`, and the same for a `const`, a `struct`,
+  an `enum`, an `extern` and a `test`. A declaration for another target is
+  removed before anything types it, so nothing downstream carries code nobody
+  compiles. The string is a target triple, spelled as `slopium targets` prints
+  it. A name whose only declaration was for another target is an unknown name,
+  and the refusal says which target declares it rather than leaving that to be
+  worked out.
+
+### Changed
+- A change writes its changelog entry into its own file under `changelog.d/`,
+  named for the issue it closes, instead of a line under `[Unreleased]` in
+  `CHANGELOG.md`. Two changes in flight no longer collide there, and a release
+  collects the files into that version's section. `CHANGELOG.md` itself is
+  written only by a release.
+
+### Fixed
+- A terminator naming a block that does not exist is reported as `SL0700`
+  rather than crashing the compiler in a release build, where the verification
+  that would have caught it does not run.
+- A release build no longer folds a constant its analysis had not finished
+  proving. Constant propagation bails out at a bound, and until it settles its
+  states are optimistic, so a `Branch` could be rewritten into a `Goto` the
+  program never asked for; a run that reaches the bound now folds nothing and
+  reports `SL0700` instead. The bound has never been reached by a real
+  program, and reaching it would mean the bound is wrong.
+- A debug or continuous-integration build no longer aborts on a program that is
+  still worth optimizing after the last pipeline round. That was an assertion
+  about a legitimate outcome; the pipeline stops and keeps what it achieved.
+- An aggregate index and a `Drop`'s type are checked against the layout the
+  module records. A field or payload index past the end of what it indexes
+  became an address in both backends with nothing having bounded it, and a
+  `Drop` picked its release helper from a type nothing compared to the local it
+  was dropping. No Slopium program could express either, so what changes is that
+  a mistake in the compiler is now an `SL0700` naming the instruction instead of
+  an out-of-bounds heap access.
+
+
 ## [0.11.0] - 2026-08-20
 
 ### Added
@@ -335,6 +395,7 @@ package manager, the language server and the Neovim plugin as they stood when
 tagging began.
 
 [Unreleased]: https://github.com/keepinfov/slopium/compare/v0.11.0...HEAD
+[0.12.0]: https://github.com/keepinfov/slopium/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/keepinfov/slopium/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/keepinfov/slopium/compare/v0.9.2...v0.10.0
 [0.9.2]: https://github.com/keepinfov/slopium/compare/v0.9.1...v0.9.2
