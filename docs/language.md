@@ -198,6 +198,31 @@ that answers: `(and (holds table key) (trust (lookup table key)))` does not
 look the key up when the table does not hold it. Each takes two operands or
 more and every one must be a `bool`. `not` is an ordinary operator over one.
 
+## Documentation comments
+
+A comment beginning `;;`, written on the lines directly above a declaration, is
+that declaration's documentation (`D-134`). The language server shows it on
+hover, above the type:
+
+```lisp
+;; The distance between two points, in whatever units they were given in.
+;; Negative coordinates are fine; the answer never is.
+(fn distance ((a (& Point)) (b (& Point))) -> f64
+  (sqrt (+ (square (- (. b x) (. a x))) (square (- (. b y) (. a y))))))
+```
+
+A single `;` is an ordinary comment and means nothing to any tool. The block is
+the run of `;;` lines immediately above the declaration: a blank line ends it,
+because a comment separated by one is about the file rather than about what
+follows, and so does a comment sharing its line with code, because
+`(fn a ...) ;; note` belongs to the line it is on.
+
+The block sits above a declaration's annotation slot rather than inside it, and
+it is read out of the source text rather than the syntax tree — which is why the
+formatter leaves it exactly as it was written. A `;;` inside a form, above a
+struct field or an enum variant, is an ordinary comment for now; reading one
+later stays compatible.
+
 ## Function types
 
 ```lisp

@@ -2,7 +2,11 @@ if exists("b:current_syntax")
   finish
 endif
 
-syntax match slopiumComment ";.*$" contains=slopiumTodo,@Spell
+" `;;` above a declaration is documentation and is highlighted apart from an
+" ordinary comment, so a file shows at a glance what carries prose (`D-134`).
+" Declared first, because a later `match` does not win against an earlier one.
+syntax match slopiumDoc ";;.*$" contains=slopiumTodo,@Spell
+syntax match slopiumComment ";\%(;\)\@!.*$" contains=slopiumTodo,@Spell
 syntax keyword slopiumTodo TODO FIXME NOTE SAFETY contained
 
 syntax region slopiumString start=+"+ skip=+\\\\\|\\"+ end=+"+ contains=slopiumEscape
@@ -71,6 +75,7 @@ syntax match slopiumArrow "->"
 syntax match slopiumWildcard "\v<_>"
 
 highlight default link slopiumComment Comment
+highlight default link slopiumDoc SpecialComment
 highlight default link slopiumTodo Todo
 highlight default link slopiumString String
 highlight default link slopiumEscape SpecialChar

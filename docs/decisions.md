@@ -146,6 +146,7 @@ of what was believed at the time is the part worth keeping.
 - [D-131 — the release page is generated from the titles that were merged](#d-131--the-release-page-is-generated-from-the-titles-that-were-merged)
 - [D-132 — an optimistic analysis that did not settle is an error, not a result](#d-132--an-optimistic-analysis-that-did-not-settle-is-an-error-not-a-result)
 - [D-133 — a deferred expression runs before the scope's drops, and may not move](#d-133--a-deferred-expression-runs-before-the-scopes-drops-and-may-not-move)
+- [D-134 — `;;` above a declaration is documentation, read out of the trivia](#d-134--above-a-declaration-is-documentation-read-out-of-the-trivia)
 
 ## D-001 — a native compiler, without LLVM
 
@@ -2686,3 +2687,37 @@ one had nowhere to put a deferred expression, because it did not know where a
 scope began. Both are `unwind_scopes` now, which ends a range of scopes two
 phases at a time, and the `try` arm reaches it with the same range a `break`
 does.
+
+## D-134 — `;;` above a declaration is documentation, read out of the trivia
+
+Status: approved · 2026-08-20
+
+Hover showed a type and never a sentence, and `;;` meant nothing — a comment
+starting with one more semicolon than it needed. Claiming it now is free,
+because every program that wrote `;;` wrote a comment and still has one;
+claiming it after the freeze would be a compatibility break, since a program may
+have used the spelling for something else. So the syntax is taken now, and what
+it costs is one rule about where a block begins and ends.
+
+The block is the run of `;;` lines immediately above a declaration. A blank line
+ends it, because a comment separated by one is about the file rather than about
+what follows — the header at the top of every module in this repository is
+exactly that. So does a comment sharing its line with code: `(fn a ...) ;; note`
+belongs to the line it is on and not to whatever is declared next, which is a
+mistake worth refusing rather than a case worth supporting.
+
+**It is read out of the lossless tokens rather than out of the syntax tree.**
+The tree carries no trivia, so an AST field would have meant threading a
+`doc` through six declaration structs, the parser, and every pass that rebuilds
+one. The tokens are already in `Analysis`, and `SymbolIndexBuilder` already
+walks them to narrow a declaration's span to its name; the same walk, one step
+backwards, is the whole implementation. The two hold identical information, so
+promoting it to an AST field when a `slopium doc` wants one stays additive.
+
+Two things fall out. The formatter is untouched, which is the point: what hover
+shows is the bytes somebody wrote, and a pass that reflowed or re-indented a
+block would be editing the sentence. And a `;;` inside a form — above a struct
+field or an enum variant — is still an ordinary comment, because the walk
+backwards from a field reaches its parent's open parenthesis rather than a
+comment. Reading those later is additive too, and it wants a rule about what a
+comment inside a form means, which nothing needs yet.

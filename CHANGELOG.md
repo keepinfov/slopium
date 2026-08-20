@@ -14,6 +14,11 @@ rather than everything it touched.
 ## [Unreleased]
 
 ### Added
+- A comment beginning `;;`, on the lines directly above a declaration, is that
+  declaration's documentation, and the language server shows it on hover above
+  the type. A single `;` is an ordinary comment and still means nothing. A
+  blank line ends the block, and so does a comment sharing its line with code.
+  The formatter leaves a `;;` block exactly as it was written.
 - `(defer body ...)` runs its body when the enclosing scope ends, whatever
   ended it: falling off the end, a `break`, a `continue`, or the error arm of a
   `try`. Deferred expressions run in the reverse of the order they were
