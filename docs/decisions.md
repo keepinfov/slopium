@@ -153,6 +153,7 @@ of what was believed at the time is the part worth keeping.
 - [D-138 — the verifier bounds every index it can, and says which it cannot](#d-138--the-verifier-bounds-every-index-it-can-and-says-which-it-cannot)
 - [D-139 — composition is a form, and applied it is the nesting](#d-139--composition-is-a-form-and-applied-it-is-the-nesting)
 - [D-140 — a fieldless enum is its tag, and `=` reaches one](#d-140--a-fieldless-enum-is-its-tag-and--reaches-one)
+- [D-141 — a call through a block built in the same breath names its symbol](#d-141--a-call-through-a-block-built-in-the-same-breath-names-its-symbol)
 
 ## D-001 — a native compiler, without LLVM
 
@@ -2995,3 +2996,43 @@ What this deliberately does not do is make `(clone status)` an error. A
 fieldless enum joining `is_nothing_to_clone` would refuse a program that
 compiles today, and a representation change is a poor reason to break source;
 cloning one is a copy that costs nothing, which is what it already was.
+
+## D-141 — a call through a block built in the same breath names its symbol
+
+Status: approved · 2026-08-20
+
+A call through a function value was indirect even when the block it read the
+address out of had been built three instructions earlier, because the callee was
+a local and nothing looked at where the local came from. When it came from a
+`StructNew` of a closure layout whose code word is a known `FnAddr`, the symbol
+is known at that point and the call names it.
+
+The order matters more than the rewrite. It runs **before** inlining, because an
+ordinary `Call` is the only shape the inliner matches — so a devirtualized call
+becomes an inlining candidate, and the body it was going to jump to gets spliced
+in instead. That is where the win is: an unapplied composition of two top-level
+functions now lowers to the same two direct calls the applied form does, which
+is the cost `D-139` explicitly left on the table.
+
+**Only within one basic block, and only in order.** Tracing across blocks would
+have to prove the definition dominates the call and that nothing reassigned it
+on the way; a straight line needs neither. A closure built and called in the same
+breath — every composition, every `map` over a lambda written where it is used —
+is a straight line, and a callee that arrives as a parameter is not traceable by
+anything and stays indirect.
+
+**A direct call adopts the callee's declared parameter types, and that is not a
+detail.** A lifted body takes its block as an `i64` so that returning does not
+drop what it was handed (`D-101`), while the value passed is typed as the `Fn`
+it is: the same word under two conventions, and the two are checked by different
+rules — `verify_indirect_calls` against the callee local's `Fn` type,
+`verify_direct_calls` against the callee's parameters. Rewriting without
+retyping produced MIR that failed verification immediately, which is the
+verifier doing precisely what it is for.
+
+**What this does not do is remove the allocation.** The block is still built and
+still dropped, because a `Drop` is observable and `opt.rs` has never removed one
+— that rule is what keeps memory released where the program says it is. Taking
+the allocation as well means proving the block's captures own nothing and that
+its only remaining use is that drop, which is dead-allocation elimination rather
+than devirtualization, and is worth doing on its own terms.
