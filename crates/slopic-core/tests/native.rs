@@ -902,3 +902,26 @@ fn a_raw_pointer_reads_back_what_it_wrote_at_every_width() {
     );
     fs::remove_dir_all(directory).unwrap();
 }
+
+/// An object carries no debug information, so asking for both is refused
+/// rather than answered with a stripped object (`D-142`).
+#[test]
+fn an_object_asked_for_with_debug_information_is_refused() {
+    let source = "(fn main () -> i32 0)";
+    let options = CompileOptions {
+        debug: true,
+        ..CompileOptions::default()
+    };
+    let error = slopic_core::compile_to_object("test.slp", source, &options)
+        .expect_err("an object cannot carry debug information");
+    assert_eq!(error[0].code, "SL0602");
+    assert!(
+        error[0].message.contains("no debug information"),
+        "unexpected message: {}",
+        error[0].message
+    );
+
+    // Without it, the same request is an ordinary object.
+    slopic_core::compile_to_object("test.slp", source, &CompileOptions::default())
+        .expect("an object with no debug information asked for");
+}
