@@ -13,6 +13,13 @@ rather than everything it touched.
 
 ## [Unreleased]
 
+### Added
+- A comment beginning `;;`, on the lines directly above a declaration, is that
+  declaration's documentation, and the language server shows it on hover above
+  the type. A single `;` is an ordinary comment and still means nothing. A
+  blank line ends the block, and so does a comment sharing its line with code.
+  The formatter leaves a `;;` block exactly as it was written.
+
 ## [0.11.0] - 2026-08-20
 
 ### Added
