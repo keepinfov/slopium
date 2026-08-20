@@ -844,6 +844,24 @@ pub enum ExprKind {
     /// the enclosing scope, and naming it there moves it in — which is why it
     /// is written rather than inferred, since every other move in the language
     /// is written too.
+    /// `(<< f g h)` or `(>> f g h)`, not applied to anything (`D-139`).
+    ///
+    /// Applied straight away — `((<< f g h) x)` — it never gets here: that is
+    /// nested calls, and the parser writes them. This is the value, and it
+    /// becomes a `lambda` in `sema`, where the operands' declared types are
+    /// known and this file's are not.
+    ///
+    /// The operands are names rather than arbitrary expressions, because what
+    /// this becomes closes over the ones that are local and calls the ones that
+    /// are not, and a `lambda` captures names (`D-102`). Each is held as the
+    /// `Var` it is so that a module-qualified one is resolved by the pass that
+    /// resolves every other name.
+    Compose {
+        /// `>>` reads in the order things happen, so it composes the other way
+        /// round from `<<`, which keeps the order of names a nested call has.
+        rightward: bool,
+        operands: Vec<Expr>,
+    },
     Lambda {
         captures: Vec<Capture>,
         params: Vec<Param>,
@@ -1556,6 +1574,94 @@ impl AstBuilder<'_> {
         }
     }
 
+    /// `((<< f g h) x)` — composition applied where it is written (`D-139`).
+    ///
+    /// It expands here, to `(f (g (h x)))`, because that is what it means and
+    /// the nesting is what it would have cost anyway. Nothing downstream learns
+    /// that a composition was written: no allocation, no indirect call, no
+    /// lifted lambda. `Ok(None)` means this form is not one.
+    fn applied_composition(&mut self, span: Span, items: &[SExpr]) -> Option<Option<Expr>> {
+        let Some(SExprKind::List(head)) = items.first().map(|item| &item.kind) else {
+            return Some(None);
+        };
+        let Some(word) = head.first().and_then(atom) else {
+            return Some(None);
+        };
+        if word != "<<" && word != ">>" {
+            return Some(None);
+        }
+        let operands = self.composition_operands(span, word, &head[1..])?;
+        if items.len() != 2 {
+            self.error(
+                span,
+                format!(
+                    "`{word}` composes functions of one argument, so applying it takes one \
+                     argument and {} were given",
+                    items.len() - 1
+                ),
+            );
+            return None;
+        }
+        // Innermost first: the last function in the chain is the one the
+        // argument reaches.
+        let mut expression = self.expr(&items[1])?;
+        for operand in operands.into_iter().rev() {
+            let ExprKind::Var { name, .. } = operand.kind else {
+                return None;
+            };
+            expression = Expr {
+                kind: ExprKind::Call {
+                    callee: name,
+                    args: vec![expression],
+                },
+                span: operand.span,
+            };
+        }
+        Some(Some(expression))
+    }
+
+    /// The names `<<` or `>>` composes, in the order they are to be applied.
+    ///
+    /// `>>` reads in the order things happen and `<<` keeps the order a nested
+    /// call has, so one is the other reversed and that is the whole difference
+    /// between them.
+    ///
+    /// They are names and not expressions: what an unapplied composition becomes
+    /// closes over them, and a `lambda` captures names (`D-102`). A composition
+    /// of something without a name is a `let` away from being one.
+    fn composition_operands(
+        &mut self,
+        span: Span,
+        word: &str,
+        items: &[SExpr],
+    ) -> Option<Vec<Expr>> {
+        if items.is_empty() {
+            self.error(span, format!("`{word}` composes at least one function"));
+            return None;
+        }
+        let mut operands = Vec::with_capacity(items.len());
+        for item in items {
+            let Some(name) = atom(item) else {
+                self.error(
+                    item.span,
+                    format!("`{word}` composes functions by name; give this one a name with `let`"),
+                );
+                return None;
+            };
+            operands.push(Expr {
+                kind: ExprKind::Var {
+                    name: name.to_owned(),
+                    resolved: None,
+                },
+                span: item.span,
+            });
+        }
+        if word == ">>" {
+            operands.reverse();
+        }
+        Some(operands)
+    }
+
     fn body(&mut self, forms: &[SExpr], span: Span) -> Option<Expr> {
         if forms.is_empty() {
             self.error(span, "body cannot be empty");
@@ -1602,6 +1708,13 @@ impl AstBuilder<'_> {
             }
             SExprKind::List(items) if items.is_empty() => ExprKind::Unit,
             SExprKind::List(items) => {
+                // `((<< f g) x)` is the one shape whose head is a list rather
+                // than a name, and it is composition applied straight away —
+                // which is nested calls and nothing else, so it never reaches
+                // `sema` as a composition at all (`D-139`).
+                if let Some(applied) = self.applied_composition(form.span, items)? {
+                    return Some(applied);
+                }
                 let Some(head) = items.first().and_then(atom) else {
                     self.error(form.span, "call head must be a name");
                     return None;
@@ -1689,6 +1802,24 @@ impl AstBuilder<'_> {
                             return None;
                         }
                         ExprKind::Defer(Box::new(self.body(&items[1..], form.span)?))
+                    }
+                    // Composition, not applied to anything yet: a value, and
+                    // the only shape that has to reach `sema`, because a
+                    // lambda needs the types its operands are declared with
+                    // and this file has none (`D-139`).
+                    "<<" | ">>" => {
+                        let operands = self.composition_operands(form.span, head, &items[1..])?;
+                        // `(<< f)` is `f`. Composing one function is the
+                        // function, and refusing it would be a rule about
+                        // arity where there is no question of meaning.
+                        if operands.len() == 1 {
+                            return operands.into_iter().next();
+                        } else {
+                            ExprKind::Compose {
+                                rightward: head == ">>",
+                                operands,
+                            }
+                        }
                     }
                     "and" | "or" => {
                         let op = if head == "and" {

@@ -1,0 +1,4 @@
+compose-without-a-function.slp:4:10: error[SL0100]: `<<` composes at least one function
+  |
+ 4 |   (let f (<<))
+  |          ^^^^

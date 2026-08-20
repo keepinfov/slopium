@@ -7,6 +7,7 @@ local kinds = {
   Keyword = 14,
   Snippet = 15,
   Struct = 22,
+  Operator = 24,
   TypeParameter = 25,
 }
 
@@ -31,6 +32,8 @@ local static_items = {
   { label = ":", kind = kinds.Keyword, detail = "the type of the value before it" },
   { label = "lambda", kind = kinds.Snippet, detail = "closure over named captures", insertText = "lambda (${1:capture}) ((${2:arg} ${3:type})) -> ${4:type}\n    ${0:body}", insertTextFormat = 2 },
   { label = "do", kind = kinds.Keyword, detail = "expression sequence" },
+  { label = "<<", kind = kinds.Operator, detail = "compose functions, right to left" },
+  { label = ">>", kind = kinds.Operator, detail = "compose functions, left to right" },
   { label = "defer", kind = kinds.Snippet, detail = "run this when the scope ends, however it ends", insertText = "defer ${0:expression}", insertTextFormat = 2 },
   { label = "and", kind = kinds.Snippet, detail = "short-circuiting conjunction", insertText = "and ${1:left} ${0:right}", insertTextFormat = 2 },
   { label = "or", kind = kinds.Snippet, detail = "short-circuiting disjunction", insertText = "or ${1:left} ${0:right}", insertTextFormat = 2 },

@@ -31,6 +31,7 @@ scripts/project-tests.sh
 | `process-io` | stdin, `read-line`, `read-i64`, `parse-i64`, environment, argv |
 | `defer` | A `defer` on each of the four ways a scope ends, registration order against running order, a nested scope, and a C handle with no destructor |
 | `target-modules` | One module name that is a different file per target across three triples, built and run for both the host and the cross target, with a third file for a target this toolchain cannot build |
+| `composition` | `<<` and `>>` applied and unapplied, both directions, three operands, one operand, and two locals of `Fn` type composed |
 | `target-selection` | A `fn` and a `const` selected by target across three triples, and an unannotated declaration that every target gets; built and run for both the host and the cross target |
 
 `workspaces/virtual-root` is not a passing project, because its root defines no

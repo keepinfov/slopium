@@ -1,0 +1,49 @@
+; `<<` and `>>` compose functions, and take as many as you give them (`D-139`).
+;
+; Applied where it is written, a composition is the nesting and costs exactly
+; what the nesting costs: the parser expands it, so nothing downstream learns a
+; composition was written. Left as a value it becomes a `lambda`, and only the
+; operands that are local are captured — a top-level `fn` is callable from
+; inside one without being closed over.
+
+(take std:io println-i64 println-bool)
+
+(fn double ((n i64)) -> i64 (* n 2))
+
+(fn increment ((n i64)) -> i64 (+ n 1))
+
+(fn negate ((n i64)) -> i64 (- 0 n))
+
+(fn apply-to ((f (Fn (i64) i64)) (n i64)) -> i64 (f n))
+
+; `<<` keeps the order of names a nested call has: this is
+; `(double (increment n))`.
+(fn leftward ((n i64)) -> i64 ((<< double increment) n))
+
+; `>>` reads in the order things happen, so the same computation reverses.
+(fn rightward ((n i64)) -> i64 ((>> increment double) n))
+
+; As many as you give it.
+(fn three ((n i64)) -> i64 ((<< negate double increment) n))
+
+; Composing one function is that function.
+(fn one ((n i64)) -> i64 ((<< double) n))
+
+(fn main () -> i32
+  (println-i64 (leftward 20))
+  (println-i64 (rightward 20))
+  (println-i64 (three 20))
+  (println-i64 (one 21))
+  ; Unapplied: a value, passed along and called elsewhere.
+  (let composed (<< double increment))
+  (println-i64 (apply-to composed 20))
+  ; Two locals of `Fn` type compose too, and those are captured by move.
+  (let d double)
+  (let i increment)
+  (println-i64 (apply-to (<< d i) 20))
+  (println-bool (= (leftward 20) (rightward 20)))
+  0)
+
+(test "composition answers what the nesting answers"
+  (and (= (leftward 20) (double (increment 20)))
+    (= (rightward 20) (double (increment 20)))))

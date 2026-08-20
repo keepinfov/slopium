@@ -1,0 +1,9 @@
+compose-takes-more-than-one.slp:8:21: error[SL0200]: `add` takes 2 arguments, and a composition passes one along
+  |
+ 8 |   (let f (<< double add))
+  |                     ^^^
+
+compose-takes-more-than-one.slp:8:3: error[SL0200]: cannot bind a value of type `unit`
+  |
+ 8 |   (let f (<< double add))
+  |   ^^^^^^^^^^^^^^^^^^^^^^^

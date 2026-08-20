@@ -1,0 +1,8 @@
+; An unapplied composition becomes a `lambda` that closes over its operands, and
+; a `lambda` captures names (`D-102`), so a composition operand is a name
+; (`D-139`). Anything else is a `let` away from being one.
+(fn double ((n i64)) -> i64 (* n 2))
+
+(fn main () -> i32
+  (let f (<< double (lambda () ((x i64)) -> i64 x)))
+  0)

@@ -1,0 +1,6 @@
+; A composition of functions of one argument is a function of one argument, so
+; applying it to two is asking it for something it cannot be (`D-139`).
+(fn double ((n i64)) -> i64 (* n 2))
+
+(fn main () -> i32
+  (as i32 ((<< double) 1 2)))

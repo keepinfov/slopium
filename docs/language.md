@@ -293,6 +293,40 @@ taken, because a value is the address of one monomorphized body. Where the
 expected type says which instance that is, it is taken; where it does not, it is
 refused with `SL0452` rather than guessed at.
 
+### Composing functions
+
+`<<` and `>>` compose functions, and take as many as you give them (`D-139`):
+
+```lisp
+((<< f g h) x)   ; f(g(h(x))) — right to left, the order a nested call reads in
+((>> f g h) x)   ; h(g(f(x))) — left to right, the order things happen in
+```
+
+Each is the other reversed; `<<` keeps the order of names a nested call has, and
+`>>` reads in the order the work happens. They are spelled with symbols that are
+free because the shifts are the words `shl` and `shr` (`D-106`), and not with
+`.`, which is field access and would typecheck two ways in a struct whose field
+holds a function.
+
+**Applied where it is written, a composition costs nothing.** It expands to the
+nesting before anything types it, so `((<< double increment) n)` compiles to
+exactly what `(double (increment n))` compiles to — two direct calls, no
+allocation, no indirect call.
+
+Left as a value it becomes a closure, and only the operands that are *local* are
+captured, because a top-level `fn` is callable without being closed over:
+
+```lisp
+(let composed (<< double increment))
+(apply-to composed 20)
+```
+
+The operands are names. An unapplied composition closes over them and a closure
+captures names (`D-102`), so a composition of something without one is a `let`
+away from being written. Composing one function is that function, composing none
+is refused, and every operand takes exactly one argument — a composition passes
+one value along the chain and has nowhere to take a second from.
+
 ## Closures
 
 ```lisp
