@@ -674,6 +674,32 @@ done < <(
   find "$projects_dir/runtime-fail" -mindepth 1 -maxdepth 1 -type d -print0 | sort -z
 )
 
+# A test suite with a failure in it. Every other fixture asserts that the tests
+# pass, which is the one case where the harness prints nothing beyond the
+# verdict, so what a *failing* test says was held to nothing until `D-130`.
+test_fail_count=0
+while IFS= read -r -d '' project; do
+  name="$(basename "$project")"
+  manifest="$project/Slopium.toml"
+  prefix="$result_dir/test-fail-$name"
+
+  run_manager_logged "test-fail/$name clean" "$prefix.clean.stdout" \
+    "$prefix.clean.stderr" "$manifest" clean
+  run_manager_logged "test-fail/$name fmt" "$prefix.fmt.stdout" \
+    "$prefix.fmt.stderr" "$manifest" fmt --check
+  if run_manager "$manifest" test >"$prefix.test.stdout" 2>"$prefix.test.stderr"; then
+    echo "project-tests: test-fail/$name unexpectedly passed" >&2
+    sed -n '1,160p' "$prefix.test.stdout" >&2
+    exit 1
+  fi
+  assert_patterns "$project/expected.stdout" "$prefix.test.stdout"
+
+  echo "project-tests: test-fail/$name ... ok"
+  test_fail_count=$((test_fail_count + 1))
+done < <(
+  find "$projects_dir/test-fail" -mindepth 1 -maxdepth 1 -type d -print0 | sort -z
+)
+
 # ---------------------------------------------------------------------------
 # Freestanding: the manager links a program with no C library under it.
 #
@@ -770,4 +796,4 @@ else
   )
 fi
 
-echo "project-tests: $pass_count pass, $compile_fail_count compile-fail, $runtime_fail_count runtime-fail, $freestanding_count freestanding, $dependency_count dependency fixtures"
+echo "project-tests: $pass_count pass, $compile_fail_count compile-fail, $runtime_fail_count runtime-fail, $test_fail_count test-fail, $freestanding_count freestanding, $dependency_count dependency fixtures"

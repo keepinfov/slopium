@@ -1,0 +1,5 @@
+test main:a comparison that holds says nothing extra ... ok
+test main:a number says both sides ... FAILED: expected 42, got 41
+test main:an unsigned number says both sides ... FAILED: expected 9, got 7
+test main:text says both sides in quotes ... FAILED: expected "42", got "41"
+test main:a bare condition still fails with nothing to say ... FAILED

@@ -56,7 +56,16 @@ removed v0.1 syntax.
 
 `runtime-fail` projects compile successfully, then assert native exit status
 101 and the normalized runtime message for bounds, input, process API, and
-arithmetic failures.
+arithmetic failures. `deliberate-panic` is the one that fails because it
+decided to rather than because it tripped over a trap: `assert` and `panic`
+exit with the same 101 and say why.
+
+`test-fail` projects have a failing test in them on purpose, and assert what
+the harness printed. Every other fixture asserts that its tests pass, which is
+the one case where a failure has nothing to report, so what a *failing* test
+says was held to nothing until `test-fail` existed. `failing-comparison`
+covers a number, an unsigned number, text in quotes, and a bare condition with
+nothing to say.
 
 ## Freestanding projects
 

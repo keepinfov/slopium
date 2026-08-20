@@ -57,6 +57,7 @@ cat > "$work/program.slp" <<'SLP'
 (take core:string from-i64 to-i64 from-u64 to-u64 hash equals)
 (take core:float from-f64 to-f64)
 (take core:map Map new insert lookup)
+(take core:panic assert)
 
 ; Named `main` and exported, because the link below is asked to validate an
 ; entry point rather than to skip the question with `--library`.
@@ -99,6 +100,10 @@ cat > "$work/program.slp" <<'SLP'
       0)))
 
 (fn main () -> i64
+  ; `core:panic` is `core` because the failure path is (`D-080`), and the way
+  ; to prove that here is to link it: the assertion holds, so nothing fires,
+  ; and `nm -u` above still sees no fifth undefined symbol (`D-130`).
+  (assert (> (len (& "check")) 0) (& "a literal has bytes"))
   (let mut values (list 3 4))
   (push (&mut values) 35)
   (let total (+ (get (& values) 0) (+ (get (& values) 1) (get (& values) 2))))

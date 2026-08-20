@@ -1,0 +1,28 @@
+; A test suite with a failure in it, so that what the harness prints when a
+; test fails is held to something (`D-130`). Every other fixture asserts that
+; the tests pass, which is exactly the case where the note is not printed.
+
+(take std:io println-i64)
+(take std:test equal-i64 equal-u64 equal-text)
+(take std:string from-i64)
+
+(fn sum ((a i64) (b i64)) -> i64 (+ a b))
+
+(fn main () -> i32
+  (println-i64 (sum 20 22))
+  0)
+
+(test "a comparison that holds says nothing extra"
+  (equal-i64 (sum 20 22) 42))
+
+(test "a number says both sides"
+  (equal-i64 (sum 20 21) 42))
+
+(test "an unsigned number says both sides"
+  (equal-u64 (as u64 7) (as u64 9)))
+
+(test "text says both sides in quotes"
+  (equal-text (& (from-i64 41)) (& "42")))
+
+(test "a bare condition still fails with nothing to say"
+  false)

@@ -261,7 +261,29 @@ SlString *sl_rt_arg(int64_t index) {
     return sl_rt_string_new(value, (uint64_t)strlen(value));
 }
 
+/* What a failing test compared, left by `std:test` and printed beside the
+ * verdict (`D-130`). One slot is enough because the harness runs one test at a
+ * time and clears the note as it reports, and the copy is bounded because a
+ * note is a diagnostic rather than a value the program computes with. */
+static char sl_test_note[192];
+static int sl_test_noted;
+
+void sl_rt_test_note(const char *message) {
+    size_t length = strlen(message);
+    if (length >= sizeof sl_test_note) {
+        length = sizeof sl_test_note - 1;
+    }
+    memcpy(sl_test_note, message, length);
+    sl_test_note[length] = '\0';
+    sl_test_noted = 1;
+}
+
 int32_t sl_rt_test_result(const char *name, int32_t passed) {
-    printf("test %s ... %s\n", name, passed ? "ok" : "FAILED");
+    if (!passed && sl_test_noted) {
+        printf("test %s ... FAILED: %s\n", name, sl_test_note);
+    } else {
+        printf("test %s ... %s\n", name, passed ? "ok" : "FAILED");
+    }
+    sl_test_noted = 0;
     return passed ? 0 : 1;
 }
