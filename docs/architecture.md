@@ -103,6 +103,10 @@ command-line protocol is internal and versioned.
    heap block the drop glue will follow, and the enum case can only be checked
    as far as the instruction names a layout, since the variant decides a payload
    slot's type and the instruction does not name one (`D-120`). So is every
+   aggregate *read* and every aggregate built, against the same layouts, and
+   every `Drop` against the local it drops — an index nothing bounded becomes
+   `index * 8` in both backends, and a `Drop` whose type disagrees with its
+   local releases one shape with another's helper (`D-138`). So is every
    volatile
    access, whose width has to agree with what the pointer points at and with
    the local the value came from or went to: a width one size wrong does not

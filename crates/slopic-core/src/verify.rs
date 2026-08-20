@@ -15,7 +15,7 @@
 use crate::ast::Type;
 use crate::cfg::{defs, successors, terminator_uses, uses, Cfg};
 use crate::diagnostic::{codes, Diagnostic};
-use crate::mir::{BinaryOp, Instruction, MirFunction, MirModule, Terminator};
+use crate::mir::{BinaryOp, Instruction, LocalId, MirFunction, MirModule, Terminator};
 
 /// Whether MIR verification should run.
 ///
@@ -55,6 +55,7 @@ fn verify_module_after(file: &str, module: &MirModule, phase: Option<&str>) -> V
         verify_returns(file, function, phase, &mut errors);
         verify_borrow_reads(file, function, phase, &mut errors);
         verify_field_stores(file, module, function, phase, &mut errors);
+        verify_aggregate_access(file, module, function, phase, &mut errors);
         verify_volatile_accesses(file, function, phase, &mut errors);
     }
     errors
@@ -452,6 +453,202 @@ fn verify_field_stores(
                 report(format!(
                     "{where_} writes `{src_ty:?}` into a field of `{field_ty:?}`"
                 ));
+            }
+        }
+    }
+}
+
+/// Checks every aggregate index and every `Drop` against the layout the module
+/// records.
+///
+/// These are the operands that become an address without anything having agreed
+/// they could. `FieldLoad`, `FieldAddr`, `EnumFieldLoad` and `EnumFieldAddr`
+/// each become `index * 8` in both backends with no bound, `StructNew` and
+/// `EnumNew` are handed a field list nothing sizes, and `Drop`'s `ty` picks the
+/// runtime release helper through `lowering::drop_function` with nothing
+/// comparing it to the local it is dropping — so a mismatch there frees a
+/// `String` with the list dropper. Nothing but `mir::lower` produces MIR today,
+/// which makes all of this a guarded convention; `D-031`'s standard is that the
+/// compiler defends its invariants rather than assuming them, and every check
+/// here is a lookup in a pass that already holds the layouts.
+///
+/// What it cannot check is which *variant* an enum value holds: `EnumFieldLoad`
+/// carries an index and no tag, because which variant is there is a run-time
+/// question that `match` answers. So a payload index is checked against the
+/// widest variant — which is the bound that keeps the access inside the block —
+/// and a payload type against the set of types some variant has at that index.
+/// `EnumNew` is the exception and is checked exactly, because it names its tag.
+fn verify_aggregate_access(
+    file: &str,
+    module: &MirModule,
+    function: &MirFunction,
+    phase: Option<&str>,
+    errors: &mut Vec<Diagnostic>,
+) {
+    let after = phase.map_or(String::new(), |phase| format!(" after {phase}"));
+    let mut report = |message: String| {
+        errors.push(Diagnostic::error(
+            codes::INTERNAL,
+            file,
+            function.span,
+            format!(
+                "internal compiler error: MIR verification failed{after} in `{}`: {message}; \
+                 this is a compiler bug",
+                function.name
+            ),
+        ));
+    };
+
+    let type_of = |local: LocalId| function.locals.get(local).map(|local| &local.ty);
+    // The layout a local's own type names, when it names one this module holds.
+    // A closure's capture block is deliberately typed `i64` so that a body does
+    // not drop what it was handed, and a closure value carries its `Fn` type, so
+    // neither says which struct it is and neither is checked here.
+    let structure = |local: LocalId| {
+        let Type::Named(name) = type_of(local)?.strip_ref() else {
+            return None;
+        };
+        module.structs.iter().find(|item| item.name == *name)
+    };
+    let enumeration = |local: LocalId| {
+        let Type::Named(name) = type_of(local)?.strip_ref() else {
+            return None;
+        };
+        module.enums.iter().find(|item| item.name == *name)
+    };
+
+    for (block_index, block) in function.blocks.iter().enumerate() {
+        for (position, instruction) in block.instructions().enumerate() {
+            let where_ = format!("block {block_index} instruction {position}");
+            match instruction {
+                Instruction::FieldLoad { dst, base, index }
+                | Instruction::FieldAddr { dst, base, index } => {
+                    let Some(layout) = structure(*base) else {
+                        continue;
+                    };
+                    let Some((_, field_ty)) = layout.fields.get(*index) else {
+                        report(format!(
+                            "{where_} reads field {index} of `{}`, which has {} of them",
+                            layout.name,
+                            layout.fields.len()
+                        ));
+                        continue;
+                    };
+                    // Only the load answers with a type of its own; the
+                    // address of a field is a pointer, which
+                    // `verify_borrow_reads` is the judge of.
+                    //
+                    // Read through a borrow, a pointer-shaped field comes back
+                    // as a borrow of itself — borrowing one copies the word, so
+                    // the load *is* the borrow (`D-099`). So the destination
+                    // holds the field's type or a borrow of it, and what this
+                    // catches is a load that answers with neither.
+                    let loaded = matches!(instruction, Instruction::FieldLoad { .. })
+                        .then(|| type_of(*dst))
+                        .flatten();
+                    if let Some(loaded) = loaded {
+                        if loaded != field_ty && loaded.strip_ref() != field_ty {
+                            report(format!(
+                                "{where_} reads field {index} of `{}`, which holds \
+                                 `{field_ty:?}`, into a local holding `{loaded:?}`",
+                                layout.name
+                            ));
+                        }
+                    }
+                }
+                Instruction::EnumFieldLoad { base, index, .. }
+                | Instruction::EnumFieldAddr { base, index, .. }
+                | Instruction::EnumFieldStore { base, index, .. } => {
+                    let Some(layout) = enumeration(*base) else {
+                        continue;
+                    };
+                    let widest = layout
+                        .variants
+                        .iter()
+                        .map(|variant| variant.fields.len())
+                        .max()
+                        .unwrap_or(0);
+                    if *index >= widest {
+                        report(format!(
+                            "{where_} reaches payload {index} of `{}`, whose widest variant has \
+                             {widest} of them",
+                            layout.name
+                        ));
+                    }
+                }
+                Instruction::StructNew { name, fields, .. } => {
+                    let Some(layout) = module.structs.iter().find(|item| &item.name == name) else {
+                        report(format!(
+                            "{where_} builds `{name}`, which the module does not hold"
+                        ));
+                        continue;
+                    };
+                    if fields.len() != layout.fields.len() {
+                        report(format!(
+                            "{where_} builds `{name}` from {} fields; it has {}",
+                            fields.len(),
+                            layout.fields.len()
+                        ));
+                        continue;
+                    }
+                    for (field, (field_name, field_ty)) in fields.iter().zip(&layout.fields) {
+                        if type_of(*field) != Some(field_ty) {
+                            report(format!(
+                                "{where_} builds `{name}` with `{:?}` in `{field_name}`, which \
+                                 holds `{field_ty:?}`",
+                                type_of(*field)
+                            ));
+                        }
+                    }
+                }
+                Instruction::EnumNew {
+                    enum_name,
+                    tag,
+                    fields,
+                    ..
+                } => {
+                    let Some(layout) = module.enums.iter().find(|item| &item.name == enum_name)
+                    else {
+                        report(format!(
+                            "{where_} builds `{enum_name}`, which the module does not hold"
+                        ));
+                        continue;
+                    };
+                    let Some(variant) = layout.variants.iter().find(|item| item.tag == *tag) else {
+                        report(format!(
+                            "{where_} builds `{enum_name}` with tag {tag}, which names no variant"
+                        ));
+                        continue;
+                    };
+                    if fields.len() != variant.fields.len() {
+                        report(format!(
+                            "{where_} builds `{enum_name}:{}` from {} fields; it has {}",
+                            variant.name,
+                            fields.len(),
+                            variant.fields.len()
+                        ));
+                        continue;
+                    }
+                    for (field, (field_name, field_ty)) in fields.iter().zip(&variant.fields) {
+                        if type_of(*field) != Some(field_ty) {
+                            report(format!(
+                                "{where_} builds `{enum_name}:{}` with `{:?}` in `{field_name}`, \
+                                 which holds `{field_ty:?}`",
+                                variant.name,
+                                type_of(*field)
+                            ));
+                        }
+                    }
+                }
+                // The type is what selects the release helper, so disagreeing
+                // with the local releases one shape as another.
+                Instruction::Drop { local, ty } if type_of(*local) != Some(ty) => {
+                    report(format!(
+                        "{where_} drops _{local} as `{ty:?}`, and it holds `{:?}`",
+                        type_of(*local)
+                    ));
+                }
+                _ => {}
             }
         }
     }
@@ -1106,6 +1303,120 @@ mod tests {
         "#;
         let mir = compile_to_mir("test.slp", source, &CompileOptions::default()).unwrap();
         assert_eq!(verify_module("test.slp", &mir), Vec::new());
+    }
+
+    /// A program with one of every aggregate shape, for the tests below to
+    /// corrupt. None of the mistakes they make is expressible in Slopium, which
+    /// is the whole reason the verifier is what catches them.
+    fn aggregates() -> MirModule {
+        let source = r#"
+            (struct Holder ((name String) (size i64)))
+            (enum Shape Empty (Sized ((size i64))))
+            (fn note ((value i64)) -> unit ())
+            (fn main () -> i32
+              (let holder (Holder :name "held" :size 3))
+              (note (. holder size))
+              (let shape (Shape:Sized 7))
+              (note (match shape ((Shape:Sized size) size) ((Shape:Empty) 0)))
+              0)
+        "#;
+        compile_to_mir("test.slp", source, &CompileOptions::default()).unwrap()
+    }
+
+    /// Walks every instruction of every function, so a test can corrupt the
+    /// first one of a shape without knowing which block it landed in.
+    fn corrupt(module: &mut MirModule, mut edit: impl FnMut(&mut Instruction) -> bool) {
+        for function in &mut module.functions {
+            for block in &mut function.blocks {
+                for statement in &mut block.statements {
+                    if edit(&mut statement.instruction) {
+                        return;
+                    }
+                }
+            }
+        }
+        panic!("no instruction of that shape to corrupt");
+    }
+
+    fn complaint(module: &MirModule, wanted: &str) {
+        let errors = verify_module("test.slp", module);
+        assert!(
+            errors.iter().any(|error| error.message.contains(wanted)),
+            "expected a complaint containing {wanted:?}, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn a_field_index_past_the_end_of_its_struct_is_reported() {
+        let mut mir = aggregates();
+        assert_eq!(verify_module("test.slp", &mir), Vec::new());
+        corrupt(&mut mir, |instruction| match instruction {
+            Instruction::FieldLoad { index, .. } => {
+                *index = 9;
+                true
+            }
+            _ => false,
+        });
+        complaint(&mir, "which has 2 of them");
+    }
+
+    #[test]
+    fn an_enum_payload_past_the_widest_variant_is_reported() {
+        let mut mir = aggregates();
+        corrupt(&mut mir, |instruction| match instruction {
+            Instruction::EnumFieldLoad { index, .. } => {
+                *index = 4;
+                true
+            }
+            _ => false,
+        });
+        complaint(&mir, "whose widest variant has 1 of them");
+    }
+
+    #[test]
+    fn building_a_struct_from_the_wrong_fields_is_reported() {
+        let mut mir = aggregates();
+        corrupt(&mut mir, |instruction| match instruction {
+            Instruction::StructNew { fields, .. } => {
+                fields.pop();
+                true
+            }
+            _ => false,
+        });
+        complaint(&mir, "fields; it has 2");
+    }
+
+    #[test]
+    fn building_an_enum_with_a_tag_that_names_no_variant_is_reported() {
+        let mut mir = aggregates();
+        corrupt(&mut mir, |instruction| match instruction {
+            Instruction::EnumNew { tag, .. } => {
+                *tag = 7;
+                true
+            }
+            _ => false,
+        });
+        complaint(&mir, "tag 7, which names no variant");
+    }
+
+    #[test]
+    fn dropping_a_local_as_the_wrong_type_is_reported() {
+        // The one that costs memory rather than a wrong answer: `ty` is what
+        // picks the release helper, so a `String` dropped as a `List` is freed
+        // by the wrong one.
+        let mut mir = aggregates();
+        corrupt(&mut mir, |instruction| match instruction {
+            Instruction::Drop { ty, .. } => {
+                *ty = if *ty == Type::String {
+                    Type::List(Box::new(Type::I64))
+                } else {
+                    Type::String
+                };
+                true
+            }
+            _ => false,
+        });
+        complaint(&mir, "and it holds");
     }
 
     #[test]

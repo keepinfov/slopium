@@ -150,6 +150,7 @@ of what was believed at the time is the part worth keeping.
 - [D-135 — the manifest says what a module is for each target](#d-135--the-manifest-says-what-a-module-is-for-each-target)
 - [D-136 — a declaration says which target it is for, and `cfg` is not built](#d-136--a-declaration-says-which-target-it-is-for-and-cfg-is-not-built)
 - [D-137 — a changelog entry is a file, because two of them are not a conflict](#d-137--a-changelog-entry-is-a-file-because-two-of-them-are-not-a-conflict)
+- [D-138 — the verifier bounds every index it can, and says which it cannot](#d-138--the-verifier-bounds-every-index-it-can-and-says-which-it-cannot)
 
 ## D-001 — a native compiler, without LLVM
 
@@ -2864,3 +2865,40 @@ resolution above with nobody to notice it. Generating the changelog from commit
 subjects is what `D-131` deliberately declined: it generates the release page's
 first half from titles and keeps the changelog as the half a person writes,
 because a subject line cannot carry why a change was worth making.
+
+## D-138 — the verifier bounds every index it can, and says which it cannot
+
+Status: approved · 2026-08-20
+
+`FieldLoad`, `FieldAddr`, `EnumFieldLoad` and `EnumFieldAddr` became `index * 8`
+in both backends with nothing having bounded the index; `StructNew` and
+`EnumNew` were handed a field list nothing sized; and `Drop`'s `ty` selected the
+runtime release helper through `lowering::drop_function` with nothing comparing
+it to the local being dropped, so a mismatch freed a `String` with the list
+dropper. `verify_field_stores` already did this work for a struct's *writes*,
+which is what made the gap visible: the same lookup, in a pass already holding
+the same layouts, was missing for every read and every construction.
+
+Nothing but `mir::lower` produces MIR, so all of it was a guarded convention
+rather than a live defect. `D-031`'s standard is that the compiler defends its
+invariants rather than assuming them, and an out-of-bounds heap access is a poor
+thing to be assuming in a language whose argument is that bounds checks are
+untouchable.
+
+**What cannot be checked is written down rather than skipped silently.** An
+enum's payload instructions carry an index and no tag, because which variant is
+present is a run-time question that `match` answers — so a payload index is
+bounded by the *widest* variant, which is the bound that keeps the access inside
+the block, and its type is not checked at all. `EnumNew` is the exception and is
+checked exactly, because it is the one enum instruction that names its tag. The
+previous rule expressed this as `if enumeration { continue; }`, which said the
+same thing by saying nothing.
+
+Two shapes the checks had to learn rather than refuse. A field read through a
+borrow answers with a borrow of the field's type, not the field's type, because
+borrowing a pointer-shaped value copies the word and the load *is* the borrow
+(`D-099`) — the first draft rejected `core:map`'s own lowering over it. And a
+lifted lambda's capture block is deliberately typed `i64` so that a body does
+not drop what it was handed (`D-101`), so a `FieldLoad` base does not always
+name a layout; where the type does not say which aggregate it is, nothing is
+claimed about it.
