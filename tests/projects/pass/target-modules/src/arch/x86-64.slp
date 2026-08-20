@@ -1,0 +1,7 @@
+; The `arch` module for `x86_64-unknown-linux-gnu`. An ordinary module in every
+; other respect: exported, checked, and compiled to its own object.
+(export name pointer-bits)
+
+(fn name () -> String "x86-64")
+
+(fn pointer-bits () -> i64 64)

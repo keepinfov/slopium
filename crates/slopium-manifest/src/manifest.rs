@@ -39,6 +39,15 @@ pub struct Manifest {
     pub language_items: LanguageItemSection,
     #[serde(default)]
     pub build: BuildSection,
+    /// Modules that belong to one target, keyed by triple (`D-135`).
+    ///
+    /// Ordered rather than hashed, because the exclusions it produces become
+    /// command-line arguments and a build's arguments may not depend on hash
+    /// iteration order. The same table name `.slopium/config.toml` uses for a
+    /// per-target `cc`, deliberately: one spelling for "this is about one
+    /// target" across both files.
+    #[serde(default)]
+    pub target: BTreeMap<String, TargetSection>,
     #[serde(default)]
     pub profile: BTreeMap<String, Profile>,
 }
@@ -59,6 +68,9 @@ impl Manifest {
         }
         collect(&mut keys, "language-items", &self.language_items.unknown);
         collect(&mut keys, "build", &self.build.unknown);
+        for (triple, section) in &self.target {
+            collect(&mut keys, &format!("target.{triple}"), &section.unknown);
+        }
         for (name, spec) in &self.dependencies {
             collect(&mut keys, &format!("dependencies.{name}"), &spec.unknown);
         }
@@ -514,6 +526,29 @@ pub struct BuildSection {
     pub linker_script: Option<PathBuf>,
 }
 
+/// `[target."<triple>"]`: what belongs to one target and to no other
+/// (`D-135`).
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct TargetSection {
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, toml::Value>,
+    /// What each module *is* for this target: a module name, and the file it is
+    /// written in, relative to the package root as `entry` and `c-sources` are.
+    ///
+    /// A name rather than a bare list, because selecting files alone leaves them
+    /// named after their paths — `arch:x86-64` and `arch:aarch64` — and a
+    /// program would still have to name the one it wanted, which is the problem
+    /// this exists to remove. Written this way the rest of the program says
+    /// `(take arch ...)` and never learns which file answered.
+    ///
+    /// A file named under any target's table is out of every build but that
+    /// one. A triple this toolchain cannot build for needs no special case —
+    /// its file is simply never the selected one — which is what makes the
+    /// table forward-compatible with no version to check.
+    #[serde(default)]
+    pub modules: BTreeMap<String, PathBuf>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct Profile {
     #[serde(flatten)]
@@ -653,6 +688,12 @@ impl RawManifest {
             .map_err(|error| format!("`{}`: {error}", self.manifest_path.display()))?;
         let linker_script = validate_linker_script(self.manifest.build.linker_script.as_deref())
             .map_err(|error| format!("`{}`: {error}", self.manifest_path.display()))?;
+        let mut target_modules = BTreeMap::new();
+        for (triple, section) in &self.manifest.target {
+            let modules = validate_target_modules(triple, &section.modules)
+                .map_err(|error| format!("`{}`: {error}", self.manifest_path.display()))?;
+            target_modules.insert(triple.clone(), modules);
+        }
         Ok(Project {
             root: self.root,
             manifest_path: self.manifest_path,
@@ -665,6 +706,7 @@ impl RawManifest {
             source: package.source,
             c_sources,
             linker_script,
+            target_modules,
             dependencies,
         })
     }
@@ -700,6 +742,47 @@ fn validate_c_sources(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
         }
     }
     Ok(paths.to_vec())
+}
+
+/// Checks that every `[target."<triple>"] modules` path names a file inside the
+/// package (`D-135`).
+///
+/// The same three lexical checks `c-sources` gets and at the same time, because
+/// the reason is the same: the archive walks the package root, so a path that
+/// leaves it names a file the package cannot carry. The code differs because
+/// the key does — a diagnostic naming `c-sources` would send the author to the
+/// wrong line.
+fn validate_target_modules(
+    triple: &str,
+    modules: &BTreeMap<String, PathBuf>,
+) -> Result<BTreeMap<String, PathBuf>, String> {
+    for (module, path) in modules {
+        let display = path.display();
+        if module.is_empty() {
+            return Err(format!("SL1102: `target.{triple}` names an empty module"));
+        }
+        if path.is_absolute() {
+            return Err(format!(
+                "SL1102: `target.{triple}` module `{display}` is absolute; \
+                 it must be relative to the package root"
+            ));
+        }
+        if path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
+        {
+            return Err(format!(
+                "SL1102: `target.{triple}` module `{display}` leaves the package; \
+                 a package may only select its own files"
+            ));
+        }
+        if path.as_os_str().is_empty() {
+            return Err(format!(
+                "SL1102: `target.{triple}` module `{module}` names an empty path"
+            ));
+        }
+    }
+    Ok(modules.clone())
 }
 
 /// Checks that `[build] linker-script` names a file inside the package.
@@ -753,6 +836,15 @@ pub struct Project {
     /// The linker script this package lays its image out with, relative to
     /// [`Self::root`]. Read from the root package only, like `[build] target`.
     pub linker_script: Option<PathBuf>,
+    /// `[target."<triple>"] modules`, by triple then by module name, each path
+    /// relative to [`Self::root`] (`D-135`).
+    ///
+    /// Read from every package rather than the root alone, unlike `target` and
+    /// `linker-script` beside it, and the difference is the same one `D-117`
+    /// draws: those describe the one image being built, and this describes
+    /// which of a package's own files it is made of. A library with a module
+    /// per target is the case this exists for.
+    pub target_modules: BTreeMap<String, BTreeMap<String, PathBuf>>,
     /// `[dependencies]` with workspace inheritance applied.
     pub dependencies: BTreeMap<String, DependencySpec>,
 }

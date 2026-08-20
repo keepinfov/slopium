@@ -487,6 +487,39 @@ if command -v readelf >/dev/null 2>&1; then
     echo "project-tests: manager builds and runs for $target ... ok"
   done
 
+  # The same `(take arch ...)` has to reach a different file for each target,
+  # which is the whole claim of `[target."<triple>"] modules` (`D-135`). A
+  # fixture whose output did not depend on the target could not prove it.
+  for target in "${targets[@]}"; do
+    modules_project="$result_dir/modules-$target"
+    cp -R "$projects_dir/pass/target-modules" "$modules_project"
+    run_manager_logged "target modules for $target" \
+      "$result_dir/modules-$target.stdout" "$result_dir/modules-$target.stderr" \
+      "$modules_project/Slopium.toml" build --target "$target"
+    artifact="$modules_project/target/$target/dev/target-modules"
+    if [[ "$target" == "$host_target" ]]; then
+      "$artifact" >"$result_dir/modules-$target.run"
+    else
+      "$qemu" "$artifact" >"$result_dir/modules-$target.run"
+    fi
+    case "$target" in
+      "$host_target") expected_architecture="x86-64" ;;
+      "$cross_target") expected_architecture="aarch64" ;;
+    esac
+    if [[ "$(head -n 1 "$result_dir/modules-$target.run")" != "$expected_architecture" ]]; then
+      echo "project-tests: $target selected the wrong module for \`arch\`" >&2
+      cat "$result_dir/modules-$target.run" >&2
+      exit 1
+    fi
+    echo "project-tests: a module named per target, built for $target ... ok"
+  done
+
+  # A module named for a target this toolchain cannot build for is never
+  # compiled, so a file that would not typecheck anywhere else costs nothing.
+  if grep -q 'riscv32-unknown-none' "$projects_dir/pass/target-modules/Slopium.toml"; then
+    echo "project-tests: a module for an unbuildable target is not compiled ... ok"
+  fi
+
   # The same source, built for each target, has to answer differently — which is
   # the whole claim of `(target "...")` (`D-136`). `basics` above proves the
   # manager can drive every target; this proves the *program* changed with it,

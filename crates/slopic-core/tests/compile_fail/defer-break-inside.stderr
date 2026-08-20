@@ -1,0 +1,4 @@
+defer-break-inside.slp:5:12: error[SL0200]: `break` cannot leave the scope a `defer` is running in; the scope is already ending
+  |
+ 5 |     (defer (break)))
+  |            ^^^^^^^

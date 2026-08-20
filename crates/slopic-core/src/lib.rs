@@ -156,6 +156,21 @@ pub enum EmitKind {
 pub struct CompileRequest {
     pub input: PathBuf,
     pub source_root: Option<PathBuf>,
+    /// Modules under `source_root` this build is not made of (`D-135`).
+    ///
+    /// The compiler discovers a package's modules by walking, and never reads a
+    /// manifest (`D-002`), so target selection reaches it as a list rather than
+    /// as a condition: whoever read the manifest decided, and this is the
+    /// answer. An entry that names no module is not an error — a package may
+    /// name a module for a target whose file another package supplies.
+    pub excluded_modules: Vec<String>,
+    /// The module name a file under `source_root` has, when the manifest gave
+    /// it one rather than letting its path decide (`D-135`).
+    ///
+    /// This is what makes a module mean a different file per target without
+    /// the rest of the program knowing: the file changes, the name does not.
+    /// Path derivation (`D-009`) still names every other file.
+    pub named_modules: Vec<(String, PathBuf)>,
     pub dependencies: Vec<DependencySource>,
     pub toolchain_dependencies: Vec<String>,
     pub output: Option<PathBuf>,
@@ -172,6 +187,11 @@ pub struct CompileRequest {
 pub struct DependencySource {
     pub namespace: String,
     pub source_root: PathBuf,
+    /// Modules of this dependency the build is not made of (`D-135`).
+    pub excluded_modules: Vec<String>,
+    /// The module name a file of this dependency has, when its manifest gave it
+    /// one (`D-135`).
+    pub named_modules: Vec<(String, PathBuf)>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -771,16 +791,32 @@ fn package_input(request: &CompileRequest) -> CompileResult<Option<package::Pack
         paths.sort();
     }
     for path in paths {
-        let module = module_from_path(&root, &path).ok_or_else(|| {
-            vec![Diagnostic::error(
-                codes::MODULE,
-                path.display().to_string(),
-                Default::default(),
-                "source path cannot be mapped to a module",
-            )]
-        })?;
+        // A file the manifest named is that module; a path names every other
+        // one (`D-009`, `D-135`).
+        let module = match request
+            .named_modules
+            .iter()
+            .find(|(_, named)| *named == path)
+        {
+            Some((name, _)) => name.clone(),
+            None => module_from_path(&root, &path).ok_or_else(|| {
+                vec![Diagnostic::error(
+                    codes::MODULE,
+                    path.display().to_string(),
+                    Default::default(),
+                    "source path cannot be mapped to a module",
+                )]
+            })?,
+        };
         if path == entry {
             entry_module = Some(module.clone());
+        }
+        // Whoever read the manifest decided this module is not part of a build
+        // for the selected target (`D-135`). The entry is never excluded — a
+        // package whose entry belongs to one target has nothing to build at
+        // all — so the walk keeps it and the check below reports it.
+        if request.excluded_modules.contains(&module) && path != entry {
+            continue;
         }
         let source = fs::read_to_string(&path).map_err(|error| {
             vec![Diagnostic::error(
@@ -823,14 +859,24 @@ fn package_input(request: &CompileRequest) -> CompileResult<Option<package::Pack
         })?;
         dependency_paths.sort();
         for path in dependency_paths {
-            let module = module_from_path(&dependency_root, &path).ok_or_else(|| {
-                vec![Diagnostic::error(
-                    codes::DEPENDENCY,
-                    path.display().to_string(),
-                    Default::default(),
-                    "dependency source path cannot be mapped to a module",
-                )]
-            })?;
+            let module = match dependency
+                .named_modules
+                .iter()
+                .find(|(_, named)| *named == path)
+            {
+                Some((name, _)) => name.clone(),
+                None => module_from_path(&dependency_root, &path).ok_or_else(|| {
+                    vec![Diagnostic::error(
+                        codes::DEPENDENCY,
+                        path.display().to_string(),
+                        Default::default(),
+                        "dependency source path cannot be mapped to a module",
+                    )]
+                })?,
+            };
+            if dependency.excluded_modules.contains(&module) {
+                continue;
+            }
             let source = fs::read_to_string(&path).map_err(|error| {
                 vec![Diagnostic::error(
                     codes::INPUT_IO,
@@ -925,7 +971,14 @@ fn collect_sources(directory: &Path, output: &mut Vec<PathBuf>) -> std::io::Resu
     collect_slp_sources(directory, output)
 }
 
-fn module_from_path(root: &Path, path: &Path) -> Option<String> {
+/// The module name a source file has under `root`, path components joined with
+/// `:` and the extension dropped (`D-009`).
+///
+/// Public because the manager asks the same question of a file a manifest
+/// names: a `[target."<triple>"]` table is written in paths, because that is
+/// what a person edits, and reaches the compiler as module names, because that
+/// is what it knows (`D-135`). Two spellings of one rule is how they drift.
+pub fn module_from_path(root: &Path, path: &Path) -> Option<String> {
     let relative = path.strip_prefix(root).ok()?;
     let mut parts = relative
         .components()

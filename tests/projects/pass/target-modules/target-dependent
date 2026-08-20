@@ -1,0 +1,4 @@
+This fixture answers differently for each target on purpose, so the two backends
+are not expected to agree: `cross-check.sh` compares one program compiled twice,
+and a module that is a different file per target makes this two programs.
+`project-tests.sh` asserts what it does instead, once per target.

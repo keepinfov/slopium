@@ -5,6 +5,7 @@ use slopic_core::{
     compile, compiler_info, CompileOptions, CompileRequest, DependencySource, EmitKind,
     LanguageItems, COMPILER_PROTOCOL,
 };
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -20,6 +21,37 @@ struct Cli {
 
     #[arg(long = "toolchain-dependency", value_name = "ALIAS")]
     toolchain_dependencies: Vec<String>,
+
+    /// A module of the package under `--source-root` to leave out of the build.
+    ///
+    /// The compiler discovers a package's modules by walking its source root
+    /// and has no manifest to consult (`D-002`), so a package that names a
+    /// module per target is resolved by the manager, which says here which ones
+    /// this build is not made of (`D-135`).
+    #[arg(long = "exclude-module", value_name = "MODULE")]
+    exclude_modules: Vec<String>,
+
+    /// The same, for a module of a dependency.
+    ///
+    /// Named by alias rather than qualified into one string, because a module
+    /// name already holds colons and `a:b:c` would not say which part is the
+    /// alias.
+    #[arg(long = "dependency-exclude", value_name = "ALIAS=MODULE")]
+    dependency_excludes: Vec<String>,
+
+    /// The module name a source file has, overriding the one its path would
+    /// give it.
+    ///
+    /// A manifest may say what a module *is* per target, so that a program can
+    /// name one module and get a different file depending on what is being
+    /// built (`D-135`). Path derivation still names every file nobody said
+    /// anything about.
+    #[arg(long = "module", value_name = "MODULE=PATH")]
+    named_modules: Vec<String>,
+
+    /// The same, for a file of a dependency.
+    #[arg(long = "dependency-module", value_name = "ALIAS=MODULE=PATH")]
+    dependency_modules: Vec<String>,
 
     /// Compile a lone file without the bundled library. A file has no manifest
     /// to declare a dependency in, so it gets the library by default (`D-077`);
@@ -114,6 +146,28 @@ enum DiagnosticFormat {
     Json,
 }
 
+/// `MODULE=PATH`, with the path canonicalized so it compares equal to what the
+/// source walk found (`D-135`).
+fn parse_named_modules(values: &[String]) -> Result<Vec<(String, PathBuf)>, String> {
+    values
+        .iter()
+        .map(|value| {
+            let (module, path) = value
+                .split_once('=')
+                .ok_or_else(|| format!("invalid module `{value}`; expected MODULE=PATH"))?;
+            if module.is_empty() || path.is_empty() {
+                return Err(format!(
+                    "invalid module `{value}`; a name and a path are required"
+                ));
+            }
+            let resolved = PathBuf::from(path).canonicalize().map_err(|error| {
+                format!("cannot resolve module `{module}` at `{path}`: {error}")
+            })?;
+            Ok((module.to_owned(), resolved))
+        })
+        .collect()
+}
+
 fn main() {
     let cli = Cli::parse();
     if let Some(shell) = cli.completions {
@@ -135,6 +189,51 @@ fn main() {
     };
     let source = std::fs::read_to_string(&input).unwrap_or_default();
     let input_name = input.display().to_string();
+    let named_modules = match parse_named_modules(&cli.named_modules) {
+        Ok(named) => named,
+        Err(error) => {
+            eprintln!("slopic: {error}");
+            std::process::exit(2);
+        }
+    };
+    let mut dependency_modules: BTreeMap<String, Vec<(String, PathBuf)>> = BTreeMap::new();
+    for value in &cli.dependency_modules {
+        let Some((namespace, rest)) = value.split_once('=') else {
+            eprintln!("slopic: invalid dependency module `{value}`; expected ALIAS=MODULE=PATH");
+            std::process::exit(2);
+        };
+        if namespace.is_empty() {
+            eprintln!("slopic: invalid dependency module `{value}`; an alias is required");
+            std::process::exit(2);
+        }
+        match parse_named_modules(&[rest.to_owned()]) {
+            Ok(mut named) => dependency_modules
+                .entry(namespace.to_owned())
+                .or_default()
+                .append(&mut named),
+            Err(error) => {
+                eprintln!("slopic: {error}");
+                std::process::exit(2);
+            }
+        }
+    }
+    let mut dependency_excludes: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for value in &cli.dependency_excludes {
+        let Some((namespace, module)) = value.split_once('=') else {
+            eprintln!("slopic: invalid dependency exclusion `{value}`; expected ALIAS=MODULE");
+            std::process::exit(2);
+        };
+        if namespace.is_empty() || module.is_empty() {
+            eprintln!(
+                "slopic: invalid dependency exclusion `{value}`; alias and module are required"
+            );
+            std::process::exit(2);
+        }
+        dependency_excludes
+            .entry(namespace.to_owned())
+            .or_default()
+            .push(module.to_owned());
+    }
     let dependencies = match cli
         .dependencies
         .iter()
@@ -148,6 +247,14 @@ fn main() {
                 ));
             }
             Ok(DependencySource {
+                excluded_modules: dependency_excludes
+                    .get(namespace)
+                    .cloned()
+                    .unwrap_or_default(),
+                named_modules: dependency_modules
+                    .get(namespace)
+                    .cloned()
+                    .unwrap_or_default(),
                 namespace: namespace.to_owned(),
                 source_root: PathBuf::from(path),
             })
@@ -207,6 +314,8 @@ fn main() {
     let request = CompileRequest {
         input,
         source_root: cli.source_root,
+        excluded_modules: cli.exclude_modules,
+        named_modules,
         dependencies,
         toolchain_dependencies,
         output: cli.output,

@@ -118,6 +118,13 @@ pub enum TExprKind {
         value: Box<TExpr>,
     },
     Do(Vec<TExpr>),
+    /// Work registered to run when the enclosing scope ends (`D-133`).
+    ///
+    /// It survives to MIR rather than being desugared here, because there is
+    /// nothing in this language to desugar it into: the exits a scope has are
+    /// only spelled out in lowering, and a form that must run on all of them
+    /// has to be lowered at each.
+    Defer(Box<TExpr>),
     If {
         condition: Box<TExpr>,
         then_expr: Box<TExpr>,
@@ -394,6 +401,24 @@ struct Binding {
     place: bool,
 }
 
+/// What was already open when a `defer` body started being typed (`D-133`).
+#[derive(Clone, Copy)]
+struct DeferFrame {
+    /// The first binding id that did not exist yet.
+    ///
+    /// The same shape as `guards` and for the same reason: the body runs later
+    /// than where it is written, so consuming a name it found already there
+    /// would take a value the scope's own drop still releases. A name the body
+    /// made is its own, and ids only ever go up.
+    bindings: BindingId,
+    /// How many loops were open.
+    ///
+    /// A `break` below this belongs to a loop *outside* the `defer`, and the
+    /// body runs while that loop's scope is already on its way out. A loop the
+    /// body wrote for itself is fine.
+    loops: usize,
+}
+
 #[derive(Clone, Debug, Default)]
 struct Scope {
     names: HashMap<String, BindingId>,
@@ -646,6 +671,15 @@ struct Analyzer<'a> {
     /// against. A name the guard *made* is its own, which is what the floor
     /// distinguishes: ids only ever go up.
     guards: Vec<BindingId>,
+    /// One entry per `defer` body being typed (`D-133`).
+    defers: Vec<DeferFrame>,
+    /// Where the `defer` is that reads each binding it borrowed (`D-133`).
+    ///
+    /// The borrow it takes has nothing on the page to point at — no `&` was
+    /// written — so a move refused because of it would otherwise name a
+    /// borrow the reader cannot find. Ids are unique, so nothing is ever
+    /// removed from here.
+    deferred_reads: HashMap<BindingId, Span>,
     /// How many `unsafe` blocks enclose the expression being typed (`D-067`).
     ///
     /// A raw-pointer operation is refused at zero. It is a depth rather than a
@@ -815,6 +849,8 @@ impl<'a> Analyzer<'a> {
                 .map(|omission| (omission.name.clone(), omission.target.clone()))
                 .collect(),
             guards: Vec::new(),
+            defers: Vec::new(),
+            deferred_reads: HashMap::new(),
             unsafe_depth: 0,
             diagnostics: Vec::new(),
             warnings: Vec::new(),
@@ -1518,6 +1554,7 @@ impl<'a> Analyzer<'a> {
             }
             ExprKind::Set { name, value } => self.set(expr, name, value),
             ExprKind::Do(expressions) => self.do_expr(expr, expressions, expected),
+            ExprKind::Defer(body) => self.defer(expr, body),
             // `unsafe` leaves nothing behind in the typed IR. The permission is
             // spent here, at the point the operations inside it are checked, so
             // the block is a `do` by the time anything downstream sees it and
@@ -1539,6 +1576,7 @@ impl<'a> Analyzer<'a> {
             }
             ExprKind::Break(value) => self.break_expr(expr, value.as_deref()),
             ExprKind::Continue => {
+                self.refuse_leaving_a_defer(expr.span, "continue");
                 if self.loops.is_empty() {
                     self.error(expr.span, "`continue` can only be used inside a loop");
                 }
@@ -1739,10 +1777,27 @@ impl<'a> Analyzer<'a> {
                 );
             }
             OwnershipState::SharedBorrowed(_) if consume && !binding.ty.is_copy() => {
-                self.error(
-                    expr.span,
-                    format!("cannot move `{name}` while it is borrowed"),
-                );
+                match self.deferred_reads.get(&id).copied() {
+                    Some(deferred) => self.diagnostics.push(
+                        Diagnostic::error(
+                            codes::OWNERSHIP,
+                            self.file,
+                            expr.span,
+                            format!(
+                                "cannot move `{name}`, which a `defer` reads when the scope ends"
+                            ),
+                        )
+                        .with_label(deferred, "deferred here")
+                        .with_help(
+                            "borrow it or `clone` it; the deferred expression still needs \
+                             the value",
+                        ),
+                    ),
+                    None => self.error(
+                        expr.span,
+                        format!("cannot move `{name}` while it is borrowed"),
+                    ),
+                }
             }
             _ => {}
         }
@@ -1767,6 +1822,29 @@ impl<'a> Analyzer<'a> {
         // by what state the binding is in — the same shape the capture above
         // uses, and for the same reason: the damage is to the arm that runs
         // afterwards.
+        // A deferred expression runs at the end of the scope, after everything
+        // written below it and before the scope's own drops (`D-133`). Moving a
+        // name it found already there would consume a value that is still
+        // going to be dropped, so it is refused by where it is written, the
+        // same shape the guard below uses.
+        if consume
+            && !binding.ty.is_copy()
+            && self.defers.last().is_some_and(|frame| id < frame.bindings)
+        {
+            self.diagnostics.push(
+                Diagnostic::error(
+                    codes::OWNERSHIP,
+                    self.file,
+                    expr.span,
+                    format!("cannot move `{name}` inside a `defer`"),
+                )
+                .with_label(binding.definition, "value was declared here")
+                .with_help(
+                    "a deferred expression runs before the scope releases what it owns, \
+                     so the value has to still be there; borrow it or `clone` it",
+                ),
+            );
+        }
         if consume && !binding.ty.is_copy() && self.guards.last().is_some_and(|floor| id < *floor) {
             self.diagnostics.push(
                 Diagnostic::error(
@@ -2001,6 +2079,94 @@ impl<'a> Analyzer<'a> {
         self.typed(expr, ty, TExprKind::Do(typed))
     }
 
+    /// `(defer expr)` — work the enclosing scope runs on its way out (`D-133`).
+    ///
+    /// Nothing is captured and nothing is evaluated here: the whole expression
+    /// runs at the end of the scope, so what it reads is what its operands hold
+    /// then. Two rules keep that honest, and both are about the same hazard —
+    /// the scope is still going to drop what it owns, after the deferred
+    /// expression has run.
+    ///
+    /// The body may not move a name it found already in scope, refused where
+    /// the move is written, the shape a `when` guard already uses. And every
+    /// name it reads that owns something is share-borrowed for the rest of the
+    /// scope, so it cannot be moved out from under the deferred expression by
+    /// anything written below it either. The loan is recorded on the scope,
+    /// which is what releases it.
+    ///
+    /// A `defer` inside a `defer` is refused: the inner one would register into
+    /// the scope that is already unwinding, which is a question about ordering
+    /// nobody has asked yet and is cheaper to keep open than to answer wrong.
+    fn defer(&mut self, expr: &Expr, body: &Expr) -> TExpr {
+        if !self.defers.is_empty() {
+            self.error(expr.span, "`defer` cannot be written inside a `defer`");
+        }
+        let floor = self.next_binding;
+        self.defers.push(DeferFrame {
+            bindings: floor,
+            loops: self.loops.len(),
+        });
+        // No expected type: a deferred expression is read for its effect, and
+        // whatever it answers is dropped where it runs, exactly as a `do`
+        // drops everything but its last expression.
+        let typed = self.expr(body, None);
+        self.defers.pop();
+
+        let mut names = HashSet::new();
+        collect_variable_names(body, &mut names);
+        let mut read = names
+            .iter()
+            .filter_map(|name| self.env.lookup_id(name))
+            // A name the body made is its own and is gone by now; the floor is
+            // what tells the two apart, since ids only ever go up.
+            .filter(|id| *id < floor)
+            .collect::<Vec<_>>();
+        read.sort_unstable();
+        read.dedup();
+        for id in read {
+            let Some(binding) = self.env.bindings.get(&id) else {
+                continue;
+            };
+            if binding.ty.is_copy() {
+                continue;
+            }
+            let next_state = match binding.state {
+                OwnershipState::Available => OwnershipState::SharedBorrowed(1),
+                OwnershipState::SharedBorrowed(count) => OwnershipState::SharedBorrowed(count + 1),
+                other => other,
+            };
+            if let Some(binding) = self.env.bindings.get_mut(&id) {
+                binding.state = next_state;
+            }
+            self.env.add_loan(id);
+            self.deferred_reads.insert(id, expr.span);
+        }
+        self.typed(expr, Type::Unit, TExprKind::Defer(Box::new(typed)))
+    }
+
+    /// Refuses a `break` or a `continue` that would leave the scope a `defer`
+    /// is already leaving (`D-133`).
+    ///
+    /// A deferred expression runs *during* a scope's exit, so jumping out of
+    /// that scope from inside it would ask the exit to run the same deferred
+    /// expression again. A loop the body opened for itself is a different
+    /// scope and is fine, which is what the frame's loop count decides.
+    fn refuse_leaving_a_defer(&mut self, span: Span, word: &str) {
+        let Some(frame) = self.defers.last().copied() else {
+            return;
+        };
+        if self.loops.len() > frame.loops {
+            return;
+        }
+        self.error(
+            span,
+            format!(
+                "`{word}` cannot leave the scope a `defer` is running in; the scope is \
+                 already ending"
+            ),
+        );
+    }
+
     fn if_expr(
         &mut self,
         expr: &Expr,
@@ -2111,6 +2277,7 @@ impl<'a> Analyzer<'a> {
     /// the context asked the loop for. A bare `break` agrees on `unit`, which
     /// is what every loop was before this, so nothing that compiled changes.
     fn break_expr(&mut self, expr: &Expr, value: Option<&Expr>) -> TExpr {
+        self.refuse_leaving_a_defer(expr.span, "break");
         let Some(frame) = self.loops.last().cloned() else {
             self.error(expr.span, "`break` can only be used inside a loop");
             let value = value.map(|value| Box::new(self.expr(value, None)));
@@ -2370,6 +2537,15 @@ impl<'a> Analyzer<'a> {
     }
 
     fn try_expr(&mut self, expr: &Expr, value: &Expr) -> TExpr {
+        // Always, not only for a loop: a `try` returns from the function, and
+        // there is no scope a deferred expression can be in that a return out
+        // of it would not be leaving twice (`D-133`).
+        if !self.defers.is_empty() {
+            self.error(
+                expr.span,
+                "`try` cannot be written inside a `defer`, because the scope is already ending",
+            );
+        }
         let value = self.expr(value, None);
         let Some(result_name) = self.language_items.result.clone() else {
             self.error_with_code(
@@ -4498,6 +4674,7 @@ impl<'a> Analyzer<'a> {
                     self.materialize_typed_expr(item);
                 }
             }
+            TExprKind::Defer(body) => self.materialize_typed_expr(body),
             TExprKind::If {
                 condition,
                 then_expr,
@@ -5059,6 +5236,10 @@ fn collect_variable_names(expr: &Expr, output: &mut HashSet<String>) {
             output.insert(name.clone());
         }
         ExprKind::Let { value, .. } => collect_variable_names(value, output),
+        // A deferred expression runs at the end of the scope, so every name it
+        // reads is live until then however far above the last other use it was
+        // written (`D-133`).
+        ExprKind::Defer(body) => collect_variable_names(body, output),
         ExprKind::Set { name, value } => {
             output.insert(name.clone());
             collect_variable_names(value, output);
@@ -5579,6 +5760,7 @@ fn specialize_expr(
                 specialize_expr(item, substitutions, queue);
             }
         }
+        TExprKind::Defer(body) => specialize_expr(body, substitutions, queue),
         TExprKind::If {
             condition,
             then_expr,

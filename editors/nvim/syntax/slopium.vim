@@ -2,7 +2,11 @@ if exists("b:current_syntax")
   finish
 endif
 
-syntax match slopiumComment ";.*$" contains=slopiumTodo,@Spell
+" `;;` above a declaration is documentation and is highlighted apart from an
+" ordinary comment, so a file shows at a glance what carries prose (`D-134`).
+" Declared first, because a later `match` does not win against an earlier one.
+syntax match slopiumDoc ";;.*$" contains=slopiumTodo,@Spell
+syntax match slopiumComment ";\%(;\)\@!.*$" contains=slopiumTodo,@Spell
 syntax keyword slopiumTodo TODO FIXME NOTE SAFETY contained
 
 syntax region slopiumString start=+"+ skip=+\\\\\|\\"+ end=+"+ contains=slopiumEscape
@@ -41,7 +45,7 @@ syntax keyword slopiumModifier mut contained nextgroup=slopiumVariableDefinition
 syntax match slopiumVariableDefinition "[a-z_][A-Za-z0-9_-]*" contained
 syntax keyword slopiumAssignmentKeyword set nextgroup=slopiumVariable skipwhite
 syntax match slopiumVariable "[a-z_][A-Za-z0-9_-]*" contained
-syntax keyword slopiumControl do loop while break continue
+syntax keyword slopiumControl do loop while break continue defer
 " `unsafe` is a block like `do`, and a permission rather than a second type
 " system. It gets its own group so that a reader scanning a file can find every
 " place the compiler stopped proving things.
@@ -71,6 +75,7 @@ syntax match slopiumArrow "->"
 syntax match slopiumWildcard "\v<_>"
 
 highlight default link slopiumComment Comment
+highlight default link slopiumDoc SpecialComment
 highlight default link slopiumTodo Todo
 highlight default link slopiumString String
 highlight default link slopiumEscape SpecialChar

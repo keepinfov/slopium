@@ -1,0 +1,18 @@
+; The manifest says what `arch` is for each target, so this line is the same
+; whatever is being built and the file behind it is not (`D-135`). There is no
+; conditional compilation in the language and this needs none: the files that
+; were not selected are not compiled, so the formatter, the language server and
+; every pass only ever see the program that is being built — and the file that
+; *was* selected is an ordinary module, checked like any other.
+
+(take std:io println println-i64 println-bool)
+(take arch name pointer-bits)
+
+(fn main () -> i32
+  (println (& (name)))
+  (println-i64 (pointer-bits))
+  (println-bool (>= (pointer-bits) 32))
+  0)
+
+(test "the selected architecture module answered"
+  (and (> (len (& (name))) 0) (= (pointer-bits) 64)))

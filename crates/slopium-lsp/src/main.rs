@@ -5,7 +5,7 @@ use lsp_types::request::{
     Request as LspRequest, SemanticTokensFullRequest,
 };
 use serde_json::{json, Value};
-use slopic_core::analysis::{analyze_source, Analysis, AnalysisSymbolKind};
+use slopic_core::analysis::{analyze_source, doc_comment, Analysis, AnalysisSymbolKind};
 use slopic_core::ast::{Expr, ExprKind, PatternKind, Program, Type};
 use slopic_core::diagnostic::Span;
 use slopic_core::package::{
@@ -56,6 +56,7 @@ const KEYWORDS: &[&str] = &[
     "match",
     "when",
     "do",
+    "defer",
     "true",
     "false",
     "_",
@@ -113,10 +114,27 @@ struct WorkspaceLocation {
     span: Span,
 }
 
+/// What hover shows: the name, the sentence a person wrote, and the type the
+/// compiler knows, in that order (`D-134`).
+///
+/// The sentence goes above the type deliberately. A reader who wrote the
+/// declaration is looking for the type and finds it either way; a reader who
+/// did not is looking for what it is for, and that is the half a type cannot
+/// carry.
+fn hover_markdown(name: &str, doc: Option<&str>, detail: &str) -> String {
+    match doc {
+        Some(doc) => format!("`{name}`\n\n{doc}\n\n{detail}"),
+        None => format!("`{name}`\n\n{detail}"),
+    }
+}
+
 struct WorkspaceSymbol {
     name: String,
     kind: AnalysisSymbolKind,
     detail: String,
+    /// The `;;` block above the declaration, in the file it was declared in
+    /// (`D-134`).
+    doc: Option<String>,
     definition: WorkspaceLocation,
     occurrences: Vec<WorkspaceLocation>,
 }
@@ -545,7 +563,10 @@ impl Server {
             .and_then(|workspace| workspace.symbol_at(uri, offset))
         {
             let mut hover = json!({
-                "contents": { "kind": "markdown", "value": format!("`{}`\n\n{}", symbol.name, symbol.detail) },
+                "contents": {
+                    "kind": "markdown",
+                    "value": hover_markdown(&symbol.name, symbol.doc.as_deref(), &symbol.detail),
+                },
             });
             if let Some(span) = workspace_span_for_uri(symbol, uri) {
                 hover["range"] = span_range(&document.text, span);
@@ -556,7 +577,10 @@ impl Server {
             return Ok(Value::Null);
         };
         Ok(json!({
-            "contents": { "kind": "markdown", "value": format!("`{}`\n\n{}", symbol.name, symbol.detail) },
+            "contents": {
+                "kind": "markdown",
+                "value": hover_markdown(&symbol.name, symbol.doc.as_deref(), &symbol.detail),
+            },
             "range": span_range(&document.text, symbol.definition)
         }))
     }
@@ -757,6 +781,9 @@ struct ParsedWorkspaceFile {
     uri: String,
     program: Program,
     tokens: Vec<slopic_core::lexer::Token>,
+    /// The same file lexed losslessly, because the semantic lexer throws
+    /// comments away and a `;;` block is what hover reads (`D-134`).
+    trivia: Vec<slopic_core::syntax::SyntaxToken>,
 }
 
 /// Analyze the package an open file belongs to.
@@ -859,6 +886,7 @@ fn build_workspace(
                 uri: path_file_uri(Path::new(&source.path)),
                 program,
                 tokens,
+                trivia: slopic_core::syntax::lex_lossless(&source.source),
             },
         );
     }
@@ -987,6 +1015,7 @@ fn index_workspace_symbols(
                     name: declaration.name.clone(),
                     kind,
                     detail,
+                    doc: doc_comment(&file.trivia, declaration.span),
                     definition: location.clone(),
                     occurrences: vec![location],
                 },
@@ -1014,6 +1043,10 @@ fn index_workspace_symbols(
                         name: variant.name.clone(),
                         kind: AnalysisSymbolKind::Constructor,
                         detail: format!("constructor {}:{}", enumeration.name, variant.name),
+                        // A variant sits inside its enum's list, so a `;;` above
+                        // one is inside a form rather than above a declaration
+                        // and is not read (`D-134`).
+                        doc: None,
                         definition: location.clone(),
                         occurrences: vec![location],
                     },
@@ -1166,6 +1199,9 @@ fn scan_expr_occurrences(
         }
         ExprKind::Set { value, .. } => {
             scan_expr_occurrences(workspace, modules, summary, file, value);
+        }
+        ExprKind::Defer(body) => {
+            scan_expr_occurrences(workspace, modules, summary, file, body);
         }
         ExprKind::Do(items) | ExprKind::Unsafe(items) => {
             for item in items {
@@ -1756,6 +1792,47 @@ mod tests {
     }
 
     #[test]
+    fn hover_shows_the_sentence_written_above_a_declaration() {
+        let uri = "file:///doc.slp";
+        let source = concat!(
+            ";; The answer, and how long it took to find.\n",
+            ";; Deep Thought ran for seven and a half million years.\n",
+            "(fn answer () -> i64 42)\n",
+            "\n",
+            ";; Separated by a blank line, so this belongs to the file.\n",
+            "\n",
+            "(fn unrelated () -> i64 (answer))\n",
+            "(fn main () -> i32 0)\n",
+        );
+        let mut server = Server::default();
+        assert!(server.update(uri.into(), 1, source.into()));
+
+        let position = offset_position(source, source.find("answer () -> i64 42").unwrap());
+        let hover = server
+            .hover(&json!({ "textDocument": { "uri": uri }, "position": position }))
+            .unwrap();
+        let rendered = hover["contents"]["value"].as_str().unwrap();
+        assert!(
+            rendered.contains("Deep Thought ran for seven and a half million years."),
+            "hover did not carry the sentence: {rendered}"
+        );
+        // Both lines of the block, and the type is still there under them.
+        assert!(rendered.contains("The answer, and how long it took to find."));
+        assert!(rendered.contains("i64"));
+
+        // A comment a blank line above a declaration is about the file.
+        let position = offset_position(source, source.find("unrelated").unwrap());
+        let hover = server
+            .hover(&json!({ "textDocument": { "uri": uri }, "position": position }))
+            .unwrap();
+        let rendered = hover["contents"]["value"].as_str().unwrap();
+        assert!(
+            !rendered.contains("belongs to the file"),
+            "a comment across a blank line was taken as documentation: {rendered}"
+        );
+    }
+
+    #[test]
     fn unsaved_document_supports_completion_navigation_and_rename() {
         let uri = "file:///test.slp";
         let source = "(fn main () -> i64 (let n 41) (+ n 1))";
@@ -1973,6 +2050,7 @@ mod tests {
             name: "helper".into(),
             detail: String::new(),
             kind: AnalysisSymbolKind::Function,
+            doc: None,
             definition: WorkspaceLocation {
                 uri: "file:///a.slp".into(),
                 span: Span {

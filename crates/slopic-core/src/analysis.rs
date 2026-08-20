@@ -28,6 +28,12 @@ pub struct AnalysisSymbol {
     pub name: String,
     pub kind: AnalysisSymbolKind,
     pub detail: String,
+    /// The sentence written above the declaration with `;;` (`D-134`).
+    ///
+    /// `detail` is what the compiler knows and this is what a person wrote, so
+    /// they are two fields rather than one: a reader wants the type either way,
+    /// and only some declarations carry prose.
+    pub doc: Option<String>,
     pub definition: Span,
     pub scope: Span,
 }
@@ -283,6 +289,7 @@ impl<'a> SymbolIndexBuilder<'a> {
     ) -> SymbolId {
         let definition = self.atom_span(outer, name).unwrap_or(outer);
         let id = self.define(name, kind, detail, definition, scope);
+        self.attach_doc(id, outer);
         self.top_level.insert(name.to_owned(), id);
         id
     }
@@ -302,6 +309,7 @@ impl<'a> SymbolIndexBuilder<'a> {
             name: name.to_owned(),
             kind,
             detail,
+            doc: None,
             definition,
             scope,
         });
@@ -343,6 +351,7 @@ impl<'a> SymbolIndexBuilder<'a> {
             TExprKind::Var(binding) | TExprKind::Borrow { id: binding, .. } => {
                 self.binding_reference(*binding, expression.span, bindings);
             }
+            TExprKind::Defer(body) => self.expr(body, scope, bindings),
             TExprKind::Let {
                 id, name, value, ..
             } => {
@@ -590,6 +599,18 @@ impl<'a> SymbolIndexBuilder<'a> {
         });
     }
 
+    /// Attaches whatever `;;` block sits above `outer` to a symbol (`D-134`).
+    fn attach_doc(&mut self, id: SymbolId, outer: Span) {
+        let doc = self.doc_above(outer);
+        if let Some(symbol) = self.symbols.get_mut(id as usize) {
+            symbol.doc = doc;
+        }
+    }
+
+    fn doc_above(&self, outer: Span) -> Option<String> {
+        doc_comment(self.syntax, outer)
+    }
+
     fn atom_span(&self, outer: Span, name: &str) -> Option<Span> {
         self.syntax.iter().find_map(|token| {
             (token.kind == SyntaxKind::Atom
@@ -599,6 +620,49 @@ impl<'a> SymbolIndexBuilder<'a> {
                 .then_some(token.span)
         })
     }
+}
+
+/// The `;;` block written directly above `outer`, as one string (`D-134`).
+///
+/// Read out of the lossless tokens rather than out of the AST, which carries no
+/// trivia: the two hold the same information, and taking it from here costs the
+/// lexer nothing and the grammar nothing. Public because the language server
+/// asks the same question of a declaration in another file, where it has the
+/// tokens and no `Analysis`.
+///
+/// The block is the run of `;;` lines immediately above the declaration. A blank
+/// line ends it, because a comment separated by one is about the file rather
+/// than about what follows. So does a comment that is not the first thing on its
+/// line: `(fn a ...) ;; note` belongs to the line it is on and not to whatever
+/// is written next.
+pub fn doc_comment(tokens: &[SyntaxToken], outer: Span) -> Option<String> {
+    let mut index = tokens
+        .iter()
+        .position(|token| token.span.start >= outer.start)?;
+    let mut lines = Vec::new();
+    while index > 0 {
+        index -= 1;
+        let token = &tokens[index];
+        match token.kind {
+            SyntaxKind::Whitespace => {
+                if token.text.bytes().filter(|byte| *byte == b'\n').count() > 1 {
+                    break;
+                }
+            }
+            SyntaxKind::Comment => {
+                let starts_the_line = index == 0
+                    || (tokens[index - 1].kind == SyntaxKind::Whitespace
+                        && tokens[index - 1].text.contains('\n'));
+                let Some(text) = token.text.strip_prefix(";;").filter(|_| starts_the_line) else {
+                    break;
+                };
+                lines.push(text.trim());
+            }
+            _ => break,
+        }
+    }
+    lines.reverse();
+    (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
 pub const BUILTINS: &[(&str, &str)] = &[
@@ -672,6 +736,49 @@ mod tests {
             .find(|symbol| symbol.name == "n")
             .unwrap();
         assert_eq!(analysis.occurrences_of(n.id).count(), 2);
+    }
+
+    #[test]
+    fn a_doc_block_reaches_its_declaration_and_stops_where_it_should() {
+        let source = concat!(
+            "; An ordinary comment says nothing about what follows.\n",
+            ";; The first line.\n",
+            ";; The second.\n",
+            "(struct Point ((x i64)))\n",
+            "\n",
+            ";; A block a blank line above belongs to the file.\n",
+            "\n",
+            "(fn detached () -> i64 42)\n",
+            "(fn attached () -> i64 (detached)) ;; a note about this line\n",
+            "(fn after () -> i64 1)\n",
+            "(fn main () -> i64 (+ (after) (+ (attached) (detached))))\n",
+        );
+        let analysis = analyze_source("test.slp", source, &CompileOptions::default());
+        assert!(analysis.diagnostics.is_empty());
+        let doc = |name: &str| {
+            analysis
+                .symbols
+                .iter()
+                .find(|symbol| symbol.name == name)
+                .unwrap()
+                .doc
+                .clone()
+        };
+
+        // Both `;;` lines, joined, and the single-`;` line above them is not
+        // part of the block.
+        assert_eq!(
+            doc("Point").as_deref(),
+            Some("The first line.\nThe second.")
+        );
+        // A field is not a declaration and carries none of it.
+        assert_eq!(doc("x"), None);
+        // A blank line ends the block, so nothing reaches `detached`.
+        assert_eq!(doc("detached"), None);
+        // A comment sharing a line with code belongs to that line, not to the
+        // declaration written after it.
+        assert_eq!(doc("after"), None);
+        assert_eq!(doc("attached"), None);
     }
 
     #[test]

@@ -1,0 +1,95 @@
+; A `defer` runs when its scope ends, whatever ended it (`D-133`).
+;
+; The handle is an `int64_t` C hands out, so nothing in the language releases
+; it: `D-084` says why there is no destructor and left this open. Each function
+; below leaves its scope a different way and the counters say whether the close
+; ran, exactly once, on each of them.
+
+(take std:io println println-bool println-i64)
+(take std:result Result)
+(take std:string concat)
+
+(extern "handle_open" (handle-open) -> i64)
+(extern "handle_close" (handle-close (handle i64)) -> unit)
+(extern "handle_opened" (handle-opened) -> i64)
+(extern "handle_closed" (handle-closed) -> i64)
+
+; Falling off the end.
+(fn reads-and-returns () -> i64
+  (let handle (handle-open))
+  (defer (handle-close handle))
+  handle)
+
+; Out through a `break`.
+(fn breaks-out () -> unit
+  (loop
+    (let handle (handle-open))
+    (defer (handle-close handle))
+    (break)))
+
+; Out through a `continue`, once per iteration.
+(fn continues ((rounds i64)) -> unit
+  (let mut round 0)
+  (while (< round rounds)
+    (let handle (handle-open))
+    (defer (handle-close handle))
+    (set round (+ round 1))
+    (continue)))
+
+(fn fails () -> (Result i64 i64)
+  (Result:Err 3))
+
+; Out through the error arm of a `try`.
+(fn gives-up () -> (Result i64 i64)
+  (let handle (handle-open))
+  (defer (handle-close handle))
+  (let value (try (fails)))
+  (Result:Ok value))
+
+; Registration order is not running order: the last one registered runs first,
+; and all of them run before the scope drops what it owns, which is why the
+; message a deferred expression borrows is still there to print.
+(fn ordered () -> unit
+  (let message (concat (& "third: ") (& "the owned message is still alive")))
+  (defer (println (& message)))
+  (defer (println (& "second")))
+  (defer (println (& "first"))))
+
+; A scope inside a scope ends first, and so does what it deferred.
+(fn nested ((enter bool)) -> unit
+  (defer (println (& "outer scope ended")))
+  (when enter
+    (defer (println (& "inner scope ended")))
+    (println (& "inside")))
+  (println (& "after")))
+
+(fn main () -> i32
+  (println-i64 (reads-and-returns))
+  (breaks-out)
+  (continues 3)
+  (match (gives-up)
+    ((Result:Ok value) (println-i64 value))
+    ((Result:Err code) (println-i64 code)))
+  (ordered)
+  (nested true)
+  ; Six handles were opened, one on each exit the four functions above take,
+  ; and every one of them was closed.
+  (println-bool (= (handle-opened) 6))
+  (println-bool (= (handle-closed) 6))
+  0)
+
+(test "a deferred close runs once on the exit that falls off the end"
+  (let before-open (handle-opened))
+  (let before-close (handle-closed))
+  (let handle (reads-and-returns))
+  (and (> handle 0)
+    (and (= (handle-opened) (+ before-open 1))
+      (= (handle-closed) (+ before-close 1)))))
+
+(test "a deferred close runs once on each of break, continue and try"
+  (let before-close (handle-closed))
+  (breaks-out)
+  (continues 3)
+  (match (gives-up)
+    ((Result:Ok _) false)
+    ((Result:Err _) (= (handle-closed) (+ before-close 5)))))

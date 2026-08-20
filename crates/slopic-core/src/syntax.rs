@@ -419,6 +419,21 @@ mod tests {
     }
 
     #[test]
+    fn a_doc_block_survives_the_formatter_unchanged() {
+        // `;;` means documentation now (`D-134`), and the formatter has no
+        // opinion about it: what hover reads is the bytes the author wrote, so
+        // a pass that reflowed or re-indented one would change the sentence.
+        let source = concat!(
+            ";; The answer.\n",
+            ";; Two lines of it.\n",
+            "(fn answer () -> i64 42)\n",
+            "(fn main () -> i32 0)\n",
+        );
+        let formatted = format_source("test.slp", source, &FormatOptions::default()).unwrap();
+        assert_eq!(formatted, source);
+    }
+
+    #[test]
     fn formatting_is_idempotent_and_preserves_comments() {
         let source =
             "  (fn   main ()  -> i32 ; trailing\n\n (let message \"hello\")\n; leading\n  0 )";

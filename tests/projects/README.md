@@ -29,6 +29,8 @@ scripts/project-tests.sh
 | `custom-std` | A path package supplying `[language-items]` in place of the bundled `std` |
 | `workspace` | A root package with a library member: inherited version and dependency, one lock, one `target/`, per-package tests |
 | `process-io` | stdin, `read-line`, `read-i64`, `parse-i64`, environment, argv |
+| `defer` | A `defer` on each of the four ways a scope ends, registration order against running order, a nested scope, and a C handle with no destructor |
+| `target-modules` | One module name that is a different file per target across three triples, built and run for both the host and the cross target, with a third file for a target this toolchain cannot build |
 | `target-selection` | A `fn` and a `const` selected by target across three triples, and an unannotated declaration that every target gets; built and run for both the host and the cross target |
 
 `workspaces/virtual-root` is not a passing project, because its root defines no

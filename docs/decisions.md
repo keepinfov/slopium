@@ -144,6 +144,10 @@ of what was believed at the time is the part worth keeping.
 - [D-129 — hexadecimal is two functions and an uppercase table](#d-129--hexadecimal-is-two-functions-and-an-uppercase-table)
 - [D-130 — failing on purpose, and a failing test that says what it compared](#d-130--failing-on-purpose-and-a-failing-test-that-says-what-it-compared)
 - [D-131 — the release page is generated from the titles that were merged](#d-131--the-release-page-is-generated-from-the-titles-that-were-merged)
+- [D-132 — an optimistic analysis that did not settle is an error, not a result](#d-132--an-optimistic-analysis-that-did-not-settle-is-an-error-not-a-result)
+- [D-133 — a deferred expression runs before the scope's drops, and may not move](#d-133--a-deferred-expression-runs-before-the-scopes-drops-and-may-not-move)
+- [D-134 — `;;` above a declaration is documentation, read out of the trivia](#d-134--above-a-declaration-is-documentation-read-out-of-the-trivia)
+- [D-135 — the manifest says what a module is for each target](#d-135--the-manifest-says-what-a-module-is-for-each-target)
 - [D-136 — a declaration says which target it is for, and `cfg` is not built](#d-136--a-declaration-says-which-target-it-is-for-and-cfg-is-not-built)
 
 ## D-001 — a native compiler, without LLVM
@@ -2590,7 +2594,182 @@ than something the tag delivers. And the job that builds the page needs the
 whole history and every tag, where every other job in that workflow is happy
 with a shallow clone: a walk from the previous tag has neither end of it
 otherwise.
-\n
+
+## D-132 — an optimistic analysis that did not settle is an error, not a result
+
+Status: approved · 2026-08-20
+
+The release pipeline carried two iteration bounds written as if they meant the
+same thing, and they do not. The pipeline's bound is over passes each of which
+preserves observable behaviour on its own, so stopping early leaves a correct
+module that was optimized less; it was nonetheless a `debug_assert!`, which
+aborted a debug or continuous-integration build whenever a program was merely
+large enough to still be paying off after eight rounds. Constant propagation's
+bound is over a dataflow whose lattice starts at the top and is lowered as
+predecessors are visited, so an unfinished run leaves states that are too
+optimistic — a local reading `Known` where a predecessor not yet propagated
+would have made it `Varying` — and the rewrite then folded on them and turned a
+`Branch` into a `Goto`. Bailing out of a pessimistic analysis is a missed
+optimization; bailing out of an optimistic one and trusting the result is a
+miscompile, and it was reachable only under `optimize`, which is the profile MIR
+verification is off in.
+
+So the two bounds are spelled differently now. The pipeline's is quiet and
+keeps what the rounds it got achieved. The dataflow's folds nothing at all and
+reports `SL0700` naming the function, because a bound that is actually reached
+means the bound is wrong, and that is a thing to learn from a failing build
+rather than from a program whose output does not match its source.
+
+The same argument decides a third thing. The passes index `function.blocks` by
+a terminator's target and renumber blocks through a table indexed the same way,
+so a target past the end is an out-of-bounds index rather than a bad program —
+a panic, which is the one failure mode `D-031` does not allow the compiler.
+The verifier already refuses it and does not run in a release build, so that
+one check is split out and runs in every profile, while everything else the
+verifier says stays where it was: being wrong about a type produces a bad
+program, which is what the gated pass is for.
+
+## D-133 — a deferred expression runs before the scope's drops, and may not move
+
+Status: approved · 2026-08-20
+
+Memory and aggregates are released deterministically and an external resource is
+not: a file descriptor, a socket, a lock and an `mmap` all live behind an `i64`
+that owns nothing, so nothing runs when one dies. `D-084` decided there is no
+destructor — a struct wrapping an integer owns nothing, so drop glue has nothing
+to generate — and left the resource question open rather than answering it by
+accident. `(defer expr)` answers it without a resource type: the work is named
+where it is decided and it happens on every way out of the scope.
+
+**Deferred expressions run before the scope's own drops**, in the reverse of the
+order they were written. That order is not a preference. A deferred expression
+names bindings of the scope it was written in, and half the point is to log or
+report something on the way out, so running one after the scope had released
+what it holds would be a use-after-free the compiler wrote rather than the
+program. The reverse order is the same argument one step further: a later
+`defer` may depend on what an earlier one set up.
+
+**Nothing is captured and nothing is evaluated at the point it is written.** Go
+evaluates a deferred call's arguments immediately and runs the call later, which
+is two rules where one will do; here the whole body runs at the end, so it reads
+whatever its operands hold then. What it answers is dropped, exactly as a `do`
+drops everything but its last expression, and the body takes as many expressions
+as it needs because every body has since `D-127`.
+
+Nothing in that body may leave the scope it is running out of. A `try` returns
+from the function, and a `break` or a `continue` jumps out of the loop whose exit
+is running the body — each would ask that exit to run the same body again, which
+before it was refused was an infinite recursion in the lowering rather than a
+program that misbehaved. A loop the body opened for itself is a different scope,
+and that is the distinction the refusal draws.
+
+Two rules keep the ordering honest, and both are the same hazard from opposite
+sides: the scope is still going to drop what it owns, after the deferred
+expression has run. A `defer` may not move a name it found already in scope,
+refused where the move is written — the shape a `when` guard already uses, for
+the same reason. And every name it reads that owns something is share-borrowed
+for the rest of the scope, so nothing written below can take the value away
+first. That borrow has no `&` on the page to point at, so the refusal names the
+`defer` instead of reporting a borrow the reader cannot find. What it costs is
+that a deferred expression cannot consume a value; the resources this exists for
+are integers C handed out, which it copies.
+
+The exits are the four a scope has: falling off the end, a `break`, a
+`continue`, and the error arm of a `try`. There is no `return` form, so that is
+all of them. Each one lowers the expression again where it leaves — there are no
+landing pads and no unwinder here, and a few duplicated instructions per exit is
+the price of not having either. What this is not is a destructor: a program that
+ends inside the scope takes none of those exits, and `panic` and `exit` still
+end it where they are.
+
+Writing it found that the compiler had two unwinds. `drop_scope_except` walked a
+scope's bindings in reverse, and the error arm of a `try` walked the live set
+instead and reproduced that order by hand, with a comment saying so. The second
+one had nowhere to put a deferred expression, because it did not know where a
+scope began. Both are `unwind_scopes` now, which ends a range of scopes two
+phases at a time, and the `try` arm reaches it with the same range a `break`
+does.
+
+## D-134 — `;;` above a declaration is documentation, read out of the trivia
+
+Status: approved · 2026-08-20
+
+Hover showed a type and never a sentence, and `;;` meant nothing — a comment
+starting with one more semicolon than it needed. Claiming it now is free,
+because every program that wrote `;;` wrote a comment and still has one;
+claiming it after the freeze would be a compatibility break, since a program may
+have used the spelling for something else. So the syntax is taken now, and what
+it costs is one rule about where a block begins and ends.
+
+The block is the run of `;;` lines immediately above a declaration. A blank line
+ends it, because a comment separated by one is about the file rather than about
+what follows — the header at the top of every module in this repository is
+exactly that. So does a comment sharing its line with code: `(fn a ...) ;; note`
+belongs to the line it is on and not to whatever is declared next, which is a
+mistake worth refusing rather than a case worth supporting.
+
+**It is read out of the lossless tokens rather than out of the syntax tree.**
+The tree carries no trivia, so an AST field would have meant threading a
+`doc` through six declaration structs, the parser, and every pass that rebuilds
+one. The tokens are already in `Analysis`, and `SymbolIndexBuilder` already
+walks them to narrow a declaration's span to its name; the same walk, one step
+backwards, is the whole implementation. The two hold identical information, so
+promoting it to an AST field when a `slopium doc` wants one stays additive.
+
+Two things fall out. The formatter is untouched, which is the point: what hover
+shows is the bytes somebody wrote, and a pass that reflowed or re-indented a
+block would be editing the sentence. And a `;;` inside a form — above a struct
+field or an enum variant — is still an ordinary comment, because the walk
+backwards from a field reaches its parent's open parenthesis rather than a
+comment. Reading those later is additive too, and it wants a rule about what a
+comment inside a form means, which nothing needs yet.
+
+## D-135 — the manifest says what a module is for each target
+
+Status: approved · 2026-08-20
+
+There is no conditional compilation in the language, and the library's answer —
+the `core`/`std` split — works because that split is a *dependency* rather than
+a condition. It does not scale to a hardware abstraction layer with a file per
+chip. The package format freezes with everything else, so the shape had to be
+decided even though the second architecture that needs it is further out.
+
+**The manifest says what a module is, not merely which files to keep.** A
+`[target."<triple>"]` table maps a module name to a file, and the rest of the
+program writes `(take arch ...)` once. Selection alone was tried first and does
+not work: files keep the names their paths give them — `arch:x86-64` and
+`arch:aarch64` — so a program still has to name the one it wants, which is the
+problem this was supposed to remove. Every file any target names is out of the
+build unless the target naming it is the one selected; the file that is selected
+is compiled as an ordinary module, checked and exported like every other, which
+is the property a `(target "...")` annotation on a declaration deliberately does
+not have (`D-136`).
+
+A triple this toolchain cannot build for needs no special case: its file is
+never the selected one. That is what makes the table forward-compatible with no
+version to check, and `D-128` covers the other direction — a toolchain older
+than the key warns `SL1200` and builds for the targets it knows. Each package's
+own table is read rather than the root's alone, unlike `[build] target` and
+`linker-script`, and the difference is the one `D-117` already draws: those
+describe the single image being built, this describes which of a package's own
+files it is made of. A library with a module per chip is the case, and a library
+is never the root.
+
+**The compiler still reads no manifest.** It discovers a package's modules by
+walking a source root it was handed (`D-002`), so the manager, which read the
+manifest, hands the answer over on the command line: `--exclude-module` for what
+this build is not made of, and `--module NAME=PATH` for the file a named module
+is, with `--dependency-exclude` and `--dependency-module` for the same about a
+dependency. The alias is a separate field rather than qualified into one string
+because a module name already holds colons and `a:b:c` would not say which part
+is which. Path derivation still names every file nobody said anything about,
+which is every file in almost every package.
+
+A path naming no file is refused, `SL1102`, whatever target is being built — the
+standard `D-128` set for a key nobody knows, because a selection that quietly
+does nothing is worse than one that is refused. The archive carries every
+target's file: a package is one thing wherever it is built, and what a build
+leaves out is decided when it runs.
 ## D-136 — a declaration says which target it is for, and `cfg` is not built
 
 Status: approved · 2026-08-20 · supersedes the refusal recorded in `D-122`'s

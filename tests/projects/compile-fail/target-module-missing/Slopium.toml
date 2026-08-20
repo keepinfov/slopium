@@ -1,0 +1,14 @@
+[package]
+name = "target-module-missing"
+version = "0.11.0"
+source = "src"
+entry = "src/main.slp"
+
+[dependencies]
+std = { toolchain = true }
+
+# The file is not there. A selection that quietly does nothing is worse than a
+# refusal, which is the standard `D-128` set for a key nobody knows, so this is
+# refused whatever target is being built (`D-135`).
+[target.x86_64-unknown-linux-gnu]
+modules = { arch = "src/arch/nowhere.slp" }

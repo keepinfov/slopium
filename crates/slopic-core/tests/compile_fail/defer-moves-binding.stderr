@@ -1,0 +1,6 @@
+defer-moves-binding.slp:8:19: error[SL0300]: cannot move `message` inside a `defer`
+  |
+ 8 |   (defer (consume message))
+  |                   ^^^^^^^
+  = label 7:3: value was declared here
+  = help: a deferred expression runs before the scope releases what it owns, so the value has to still be there; borrow it or `clone` it

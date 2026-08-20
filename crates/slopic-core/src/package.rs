@@ -755,6 +755,7 @@ impl Resolver<'_> {
                 self.rewrite_expr(value, diagnostics);
             }
             ExprKind::Set { value, .. } => self.rewrite_expr(value, diagnostics),
+            ExprKind::Defer(body) => self.rewrite_expr(body, diagnostics),
             ExprKind::Do(items) | ExprKind::Unsafe(items) => {
                 for item in items {
                     self.rewrite_expr(item, diagnostics);

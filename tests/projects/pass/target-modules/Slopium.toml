@@ -1,0 +1,32 @@
+[package]
+name = "target-modules"
+version = "0.11.0"
+source = "src"
+entry = "src/main.slp"
+
+[dependencies]
+std = { toolchain = true }
+
+[build]
+target = "x86_64-unknown-linux-gnu"
+
+# What the module `arch` *is*, per target (`D-135`). The program says
+# `(take arch ...)` once and never learns which file answered. The third names a
+# target this toolchain cannot build for, which needs no special case: its file
+# is simply never the selected one, and it is never compiled.
+[target.x86_64-unknown-linux-gnu]
+modules = { arch = "src/arch/x86-64.slp" }
+
+[target.aarch64-unknown-linux-gnu]
+modules = { arch = "src/arch/aarch64.slp" }
+
+[target.riscv32-unknown-none]
+modules = { arch = "src/arch/riscv32.slp" }
+
+[profile.dev]
+opt-level = 0
+debug = true
+
+[profile.release]
+opt-level = 1
+debug = false

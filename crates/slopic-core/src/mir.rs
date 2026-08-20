@@ -523,13 +523,13 @@ fn lower_function(function: &TypedFunction) -> Lowered {
         function.return_type.clone(),
         function.span,
     );
-    builder.scopes.push(Vec::new());
+    builder.scopes.push(BuilderScope::default());
     for param in &function.params {
         let local = builder.local(param.ty.clone(), Some(param.name.clone()), true);
         builder.params.push(local);
         builder.bindings.insert(param.id, local);
         builder.live.insert(param.id, true);
-        builder.scopes[0].push(param.id);
+        builder.scopes[0].bindings.push(param.id);
     }
     lower_body(builder, &function.body)
 }
@@ -548,13 +548,13 @@ fn lower_lambda(
     span: Span,
 ) -> Lowered {
     let mut builder = Builder::new(name, result.clone(), span);
-    builder.scopes.push(Vec::new());
+    builder.scopes.push(BuilderScope::default());
     for param in params {
         let local = builder.local(param.ty.clone(), Some(param.name.clone()), true);
         builder.params.push(local);
         builder.bindings.insert(param.id, local);
         builder.live.insert(param.id, true);
-        builder.scopes[0].push(param.id);
+        builder.scopes[0].bindings.push(param.id);
     }
     // The block is typed `i64` rather than as the function it is: a parameter
     // of an owning type would be dropped when this body returns, and the block
@@ -655,7 +655,7 @@ struct Builder {
     /// and make builds irreproducible. `bindings` stays a `HashMap` because it
     /// is only ever point-queried.
     live: BTreeMap<BindingId, bool>,
-    scopes: Vec<Vec<BindingId>>,
+    scopes: Vec<BuilderScope>,
     loop_targets: Vec<LoopTarget>,
     /// Source location of the expression currently being lowered.
     ///
@@ -677,6 +677,23 @@ struct Builder {
     /// ordinary — `(println (& (concat (& a) (& b))))` opens three — and each
     /// one releases exactly what was borrowed inside it.
     temporaries: Vec<Value>,
+}
+
+/// One open scope: what it owns, and what it deferred (`D-133`).
+#[derive(Default)]
+struct BuilderScope {
+    /// The bindings declared in this scope, in the order they were written;
+    /// they are dropped in reverse.
+    bindings: Vec<BindingId>,
+    /// The expressions a `defer` in this scope registered, in the order they
+    /// were written. They run in reverse, and before this scope's drops, so
+    /// that a deferred expression still finds what the scope owns.
+    ///
+    /// The expression is kept rather than a block, because a scope has several
+    /// exits and each one lowers it again where it leaves. There are no landing
+    /// pads and no unwinder here: the duplication is the price of that, and it
+    /// is a few instructions per exit.
+    defers: Vec<TExpr>,
 }
 
 /// The field a name bound through an exclusive borrow stands for (`D-120`).
@@ -1040,7 +1057,7 @@ impl Builder {
                 self.bindings.insert(*id, dst);
                 self.live.insert(*id, true);
                 if let Some(scope) = self.scopes.last_mut() {
-                    scope.push(*id);
+                    scope.bindings.push(*id);
                 }
                 None
             }
@@ -1105,8 +1122,16 @@ impl Builder {
                 self.live.insert(*id, true);
                 None
             }
+            // Registration is the whole of it here: the expression is kept
+            // on the scope and lowered again at each of its exits (`D-133`).
+            TExprKind::Defer(body) => {
+                if let Some(scope) = self.scopes.last_mut() {
+                    scope.defers.push((**body).clone());
+                }
+                None
+            }
             TExprKind::Do(expressions) => {
-                self.scopes.push(Vec::new());
+                self.scopes.push(BuilderScope::default());
                 let scope_index = self.scopes.len() - 1;
                 let mut result = None;
                 for (index, item) in expressions.iter().enumerate() {
@@ -1631,27 +1656,7 @@ impl Builder {
                 None
             }
         };
-        // Collect before emitting: `emit` needs `&mut self`, and the scope walk
-        // holds an immutable borrow. Order is unchanged.
-        let mut pending = Vec::new();
-        for scope in self.scopes.iter().skip(target.scope_depth).rev() {
-            for id in scope.iter().rev() {
-                if !self.live.get(id).copied().unwrap_or(false) {
-                    continue;
-                }
-                let local = self.bindings[id];
-                if Some(local) == escaping {
-                    continue;
-                }
-                let ty = self.locals[local].ty.clone();
-                if !ty.is_copy() {
-                    pending.push(Instruction::Drop { local, ty });
-                }
-            }
-        }
-        for instruction in pending {
-            self.emit(instruction);
-        }
+        self.unwind_scopes(target.scope_depth, escaping);
         self.blocks[self.current].terminator = Some(Terminator::Goto(if continuing {
             target.continue_block
         } else {
@@ -1689,20 +1694,11 @@ impl Builder {
         });
 
         self.current = error_block;
-        // Reverse binding order, matching `drop_scope_except`: bindings
-        // declared later are dropped first.
-        for (id, is_live) in self.live.clone().into_iter().rev() {
-            if !is_live {
-                continue;
-            }
-            let Some(local) = self.bindings.get(&id).copied() else {
-                continue;
-            };
-            let ty = self.locals[local].ty.clone();
-            if !ty.is_copy() && local != value.local {
-                self.emit(Instruction::Drop { local, ty });
-            }
-        }
+        // An error leaves the function, so every scope it stands in ends here.
+        // This used to walk `self.live` and reproduce `drop_scope_except`'s
+        // reverse order by hand: the same answer for drops, and nowhere to put
+        // what a scope deferred (`D-133`).
+        self.unwind_scopes(0, Some(value.local));
         self.blocks[self.current].terminator = Some(Terminator::Return(Some(value.local)));
 
         self.current = ok_block;
@@ -1746,7 +1742,7 @@ impl Builder {
 
         self.current = then_block;
         self.live = base_live.clone();
-        self.scopes.push(Vec::new());
+        self.scopes.push(BuilderScope::default());
         let then_scope = self.scopes.len() - 1;
         let then_value = self.expr(then_expr);
         if let (Some(result), Some(value)) = (result, then_value.as_ref()) {
@@ -1763,7 +1759,7 @@ impl Builder {
 
         self.current = else_block;
         self.live = base_live.clone();
-        self.scopes.push(Vec::new());
+        self.scopes.push(BuilderScope::default());
         let else_scope = self.scopes.len() - 1;
         let else_value = self.expr(else_expr);
         if let (Some(result), Some(value)) = (result, else_value.as_ref()) {
@@ -1958,7 +1954,7 @@ impl Builder {
                 });
                 self.bindings.insert(binding.id, local);
                 self.live.insert(binding.id, true);
-                self.scopes[scope].push(binding.id);
+                self.scopes[scope].bindings.push(binding.id);
             }
             TPattern::Bool(_) | TPattern::Int(_) => {}
             TPattern::Enum { fields, .. } => {
@@ -2134,7 +2130,7 @@ impl Builder {
             );
             self.current = arm_block;
             self.live = base_live.clone();
-            self.scopes.push(Vec::new());
+            self.scopes.push(BuilderScope::default());
             let scope = self.scopes.len() - 1;
             self.consume_pattern(
                 &arm.pattern,
@@ -2201,8 +2197,73 @@ impl Builder {
         }
     }
 
+    /// Runs what a scope deferred, last registered first (`D-133`).
+    ///
+    /// Before the scope's drops, never after: a deferred expression names
+    /// bindings of the scope it was written in, so running it over their
+    /// corpses would be a use-after-free the compiler wrote rather than the
+    /// program. `sema` holds up the other end, refusing a move that would take
+    /// one of those values away before this runs.
+    fn run_defers(&mut self, scope_index: usize) {
+        let deferred = self
+            .scopes
+            .get(scope_index)
+            .map(|scope| scope.defers.clone())
+            .unwrap_or_default();
+        for body in deferred.into_iter().rev() {
+            let value = self.expr(&body);
+            // Whatever it answered is nobody's, exactly as a `do`'s
+            // non-final expression is.
+            self.drop_temporary(value);
+        }
+    }
+
+    /// Ends every scope from `from` outwards, on a path that leaves them all.
+    ///
+    /// This is `drop_scope_except` for the exits that are not falling off the
+    /// end — a `break`, a `continue`, and the error arm of a `try` — and it
+    /// keeps the same two-phase order in each scope: what the scope deferred
+    /// runs, then what it owns is dropped (`D-133`). `escaping` is the local
+    /// the value being handed out lives in, which is nobody's to release here.
+    ///
+    /// Nothing is marked dead, deliberately: control leaves, and what follows
+    /// in this block is unreachable.
+    fn unwind_scopes(&mut self, from: usize, escaping: Option<LocalId>) {
+        // By index rather than by iterator, because running a defer emits
+        // instructions and a walk over `self.scopes` would be holding `self`
+        // borrowed while it did.
+        for index in (from..self.scopes.len()).rev() {
+            self.run_defers(index);
+            // Collect before emitting, for the same reason. Order is unchanged.
+            let mut pending = Vec::new();
+            for id in self.scopes[index].bindings.iter().rev() {
+                if !self.live.get(id).copied().unwrap_or(false) {
+                    continue;
+                }
+                let Some(local) = self.bindings.get(id).copied() else {
+                    continue;
+                };
+                if Some(local) == escaping {
+                    continue;
+                }
+                let ty = self.locals[local].ty.clone();
+                if !ty.is_copy() {
+                    pending.push(Instruction::Drop { local, ty });
+                }
+            }
+            for instruction in pending {
+                self.emit(instruction);
+            }
+        }
+    }
+
     fn drop_scope_except(&mut self, scope_index: usize, except: Option<LocalId>) {
-        let ids = self.scopes.get(scope_index).cloned().unwrap_or_default();
+        self.run_defers(scope_index);
+        let ids = self
+            .scopes
+            .get(scope_index)
+            .map(|scope| scope.bindings.clone())
+            .unwrap_or_default();
         for id in ids.into_iter().rev() {
             let Some(local) = self.bindings.get(&id).copied() else {
                 continue;
