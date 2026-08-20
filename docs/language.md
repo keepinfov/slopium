@@ -191,13 +191,15 @@ while decimal `-1` is an `i8` and not a `u8` at all.
 type. `%` is the remainder and takes two integers; it truncates so that
 `(= a (+ (* (/ a b) b) (% a b)))` holds for every pair, matching `/`, and it
 traps on a zero divisor exactly as `/` does. `=` and `!=` take two `bool`,
-integer, or `f64` operands and nothing else (`D-089`): comparing two
-`String`s, two structs, two enums, two borrows, or two values of an
-unconstrained type parameter is an error. Text is compared with
-`core:string:equals`, which `std:string` re-exports. Without traits there is no
-way to give `=` a meaning for a type the compiler did not define, and comparing
-such values by the machine word that holds them would answer about identity
-while looking like it answered about contents.
+integer, or `f64` operands, **or two values of an enum no variant of which
+carries anything** (`D-089`, `D-140`): comparing two `String`s, two structs, two
+enums that carry something, two borrows, or two values of an unconstrained type
+parameter is an error. Text is compared with `core:string:equals`, which
+`std:string` re-exports. Without traits there is no way to give `=` a meaning
+for a type the compiler did not define, and comparing such values by the machine
+word that holds them would answer about identity while looking like it answered
+about contents — which is exactly why a fieldless enum is the exception, since
+its machine word holds the value itself rather than a handle to it.
 
 `(- x)` with one operand is negation, and it traps on the smallest integer for
 the reason `(- 0 x)` does. It is refused outright on an unsigned type, where
@@ -643,6 +645,24 @@ value this function never took apart. Match the aggregate, and assign one of the
 fields it gives you. A field a pattern binds through a `&mut` is still a borrow
 and not an owner, so it cannot be moved out either — `clone` reads it, `set`
 replaces it.
+
+An enum **no variant of which carries anything** is represented as its tag: one
+machine word, copied rather than owned, with nothing allocated, freed or cloned
+(`D-140`). That is what lets `=` compare two of them, and it means comparing one
+does not consume it:
+
+```lisp
+(enum Status Pending Done Failed)
+
+(let status (Status:Done))
+(if (= status (Status:Done)) (report status) (retry status))
+```
+
+It is per enum and never per variant. `Option`'s `None` carries nothing and its
+`Some` carries a value, so `Option` keeps the representation every enum used to
+have — which variant a value holds is the run-time question `match` exists to
+answer, and a representation that changed between them would need an answer
+before that question is asked.
 
 ## Collections
 

@@ -232,6 +232,11 @@ impl Type {
         matches!(self, Type::Bool | Type::F64) || self.is_integer()
     }
 
+    /// Whether this type is a declared struct or enum, by name.
+    pub fn is_named(&self) -> bool {
+        matches!(self, Type::Named(_))
+    }
+
     pub fn is_integer(&self) -> bool {
         self.int_kind().is_some()
     }

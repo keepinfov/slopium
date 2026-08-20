@@ -1,0 +1,53 @@
+; An enum no variant of which carries anything is its tag: one machine word,
+; copied rather than owned, with nothing allocated, freed or cloned (`D-140`).
+; That is what lets `=` reach one, and what stops a comparison from consuming
+; what it compared.
+;
+; Per enum and never per variant, so `Option` — whose `None` carries nothing and
+; whose `Some` does — is untouched and still a block.
+
+(take std:io println-i64 println-bool)
+(take std:option Option)
+
+(enum Status Pending Done Failed)
+
+(enum Direction North South East West)
+
+(fn rank ((status Status)) -> i64
+  (match status
+    ((Status:Pending) 0)
+    ((Status:Done) 1)
+    ((Status:Failed) 2)))
+
+(fn opposite ((d Direction)) -> Direction
+  (match d
+    ((Direction:North) (Direction:South))
+    ((Direction:South) (Direction:North))
+    ((Direction:East) (Direction:West))
+    ((Direction:West) (Direction:East))))
+
+; A mixed enum keeps the representation it always had.
+(fn unwrap-or ((value (Option i64)) (fallback i64)) -> i64
+  (match value
+    ((Option:Some inner) inner)
+    ((Option:None) fallback)))
+
+(fn main () -> i32
+  (let status (Status:Done))
+  ; compared, and still there afterwards — it was copied, not moved
+  (println-bool (= status (Status:Done)))
+  (println-bool (!= status (Status:Pending)))
+  (println-i64 (rank status))
+  (println-i64 (rank status))
+  ; and again through a second binding, which is a copy of the first
+  (let same status)
+  (println-bool (= same status))
+  (println-bool (= (opposite (Direction:North)) (Direction:South)))
+  (println-i64 (unwrap-or (Option:Some 7) 0))
+  (println-i64 (unwrap-or (Option:None) 9))
+  0)
+
+(test "a fieldless enum compares and survives the comparison"
+  (let status (Status:Failed))
+  (and (= status (Status:Failed))
+    (and (!= status (Status:Done)) (= (rank status) 2))))

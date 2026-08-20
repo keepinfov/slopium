@@ -1,0 +1,5 @@
+equal-enum-with-a-payload.slp:10:7: error[SL0200]: operator `=` does not support `Reading`
+  |
+10 |   (if (= a b) 0 1))
+  |       ^^^^^^^
+  = help: `=` reaches an enum whose variants all carry nothing; match on this one, which is what asks about the payload as well as the variant
