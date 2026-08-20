@@ -13,6 +13,8 @@ rather than everything it touched.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-08-20
+
 ### Added
 - `core:string` writes hexadecimal, re-exported by `std:string`:
   `hex-from-u64` for the digits and `hex-prefixed-from-u64` for the same under
@@ -332,7 +334,8 @@ The baseline this changelog was reconstructed from: the language core, the
 package manager, the language server and the Neovim plugin as they stood when
 tagging began.
 
-[Unreleased]: https://github.com/keepinfov/slopium/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/keepinfov/slopium/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/keepinfov/slopium/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/keepinfov/slopium/compare/v0.9.2...v0.10.0
 [0.9.2]: https://github.com/keepinfov/slopium/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/keepinfov/slopium/compare/v0.9.0...v0.9.1
