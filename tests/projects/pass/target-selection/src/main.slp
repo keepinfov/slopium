@@ -1,0 +1,36 @@
+; A declaration says which target it is for, and the ones for another target
+; are not part of the program (`D-136`). It is the annotation slot `D-122`
+; built, so it costs no grammar; it is spelled `target` rather than `cfg`
+; because it tests one thing and promises nothing else.
+;
+; Every declaration form carries the slot, which is why this fixture uses more
+; than a `fn`: a `const` that differs by target is the case a register address
+; is, and a `struct` is the case a chip's layout is.
+
+(take std:io println println-i64 println-bool)
+
+(fn (target "x86_64-unknown-linux-gnu") architecture () -> String "x86-64")
+
+(fn (target "aarch64-unknown-linux-gnu") architecture () -> String "aarch64")
+
+(fn (target "riscv32-unknown-none") architecture () -> String "riscv32")
+
+(const (target "x86_64-unknown-linux-gnu") pointer-bits 64 : i64)
+
+(const (target "aarch64-unknown-linux-gnu") pointer-bits 64 : i64)
+
+(const (target "riscv32-unknown-none") pointer-bits 32 : i64)
+
+; A declaration with no annotation is for every target, which is what the
+; overwhelming majority of a program is.
+(fn wide-enough ((bits i64)) -> bool
+  (>= bits 32))
+
+(fn main () -> i32
+  (println (& (architecture)))
+  (println-i64 pointer-bits)
+  (println-bool (wide-enough pointer-bits))
+  0)
+
+(test "the selected architecture is the one this was built for"
+  (and (> (len (& (architecture))) 0) (= pointer-bits 64)))

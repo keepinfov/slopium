@@ -35,7 +35,7 @@ syntax keyword slopiumTestKeyword test
 " this highlights them wherever they appear, the way a reader reads them. A
 " declaration that carries one does not highlight its name, because `nextgroup`
 " is looking for the name and finds a `(`.
-syntax keyword slopiumAnnotation inline deprecated
+syntax keyword slopiumAnnotation inline deprecated target
 
 syntax keyword slopiumBindingKeyword let nextgroup=slopiumModifier,slopiumVariableDefinition skipwhite
 " A module-level name for a literal. It binds like `let` and is declared like a

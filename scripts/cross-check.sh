@@ -127,7 +127,8 @@ for profile in dev release; do
     grep -q '^c-sources' "$project/Slopium.toml" && continue
     # A fixture that answers differently per target is not two backends
     # disagreeing — it is two different programs, which is what a module named
-    # per target is for (`D-135`). What it claims is asserted by
+    # per target (`D-135`) and a declaration annotated `(target "...")`
+    # (`D-136`) both produce. What such a fixture claims is asserted by
     # `project-tests.sh`, which builds it for each target and checks it answered
     # that target's way. It is also built here through `slopic` directly, which
     # is handed no manifest and so would compile every candidate file at once.

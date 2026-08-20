@@ -1,0 +1,4 @@
+target-without-a-triple.slp:2:5: error[SL0100]: `target` takes exactly one string literal
+  |
+ 2 | (fn (target) word-size () -> i64 64)
+  |     ^^^^^^^^

@@ -1,0 +1,5 @@
+; A `target` with nothing after it names no target (`D-136`).
+(fn (target) word-size () -> i64 64)
+
+(fn main () -> i32
+  (as i32 (word-size)))

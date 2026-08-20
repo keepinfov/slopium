@@ -349,6 +349,23 @@ pub struct Program {
     pub structs: Vec<StructDecl>,
     pub enums: Vec<EnumDecl>,
     pub consts: Vec<ConstDecl>,
+    /// What `(target "...")` left out of this build (`D-136`).
+    ///
+    /// The program keeps a record of what it is missing and why, so that a name
+    /// nobody can resolve can be told apart from a name that exists for another
+    /// target — which is the difference between an error a reader can act on
+    /// and one they have to go looking for.
+    pub omitted: Vec<TargetOmission>,
+}
+
+/// A declaration left out because it names a target this build is not for
+/// (`D-136`).
+#[derive(Clone, Debug, Serialize)]
+pub struct TargetOmission {
+    pub name: String,
+    /// The triple the declaration asked for.
+    pub target: String,
+    pub span: Span,
 }
 
 /// One annotation written on a declaration (`D-122`).
@@ -420,6 +437,9 @@ enum AnnotationArgs {
     Nothing,
     /// Zero or one string literal.
     OptionalText,
+    /// Exactly one string literal. A `target` with nothing after it names no
+    /// target, which is a declaration nobody meant to write.
+    Text,
 }
 
 struct AnnotationSpec {
@@ -459,7 +479,88 @@ const ANNOTATIONS: &[AnnotationSpec] = &[
         // warning nobody ever sees.
         interface: true,
     },
+    AnnotationSpec {
+        name: "target",
+        args: AnnotationArgs::Text,
+        // Every form, because every form can differ by target: a `const` that
+        // is a register address, a `struct` that mirrors a chip's layout, an
+        // `extern` that only one platform provides, a `test` that only one
+        // can run.
+        targets: &[
+            AnnotationTarget::Function,
+            AnnotationTarget::Extern,
+            AnnotationTarget::Struct,
+            AnnotationTarget::Enum,
+            AnnotationTarget::Const,
+            AnnotationTarget::Test,
+        ],
+        // A declaration appearing or disappearing is the interface changing by
+        // any definition of the word.
+        interface: true,
+    },
 ];
+
+/// Removes the declarations that name a target this build is not for
+/// (`D-136`).
+///
+/// Between `build_program` and `sema`, so that nothing downstream carries a
+/// declaration nobody compiles — no typing, no monomorphization, no MIR, no
+/// backend, and no diagnostic about a body that was never part of this program.
+/// What is removed is recorded on the `Program` rather than dropped on the
+/// floor, because the name it took with it is about to be unresolvable and the
+/// reader deserves to be told why.
+///
+/// It is spelled `target` rather than `cfg` deliberately: `cfg` promises a
+/// predicate language, and this tests one thing.
+pub fn select_for_target(program: &mut Program, target: &str) {
+    fn keep<T>(
+        items: &mut Vec<T>,
+        omitted: &mut Vec<TargetOmission>,
+        target: &str,
+        describe: impl Fn(&T) -> (&[Annotation], String, Span),
+    ) {
+        items.retain(|item| {
+            let (annotations, name, span) = describe(item);
+            let Some(wanted) = annotations
+                .iter()
+                .find(|annotation| annotation.name == "target")
+                .and_then(Annotation::text)
+            else {
+                return true;
+            };
+            if wanted == target {
+                return true;
+            }
+            omitted.push(TargetOmission {
+                name,
+                target: wanted.to_owned(),
+                span,
+            });
+            false
+        });
+    }
+
+    let mut omitted = Vec::new();
+    keep(&mut program.functions, &mut omitted, target, |item| {
+        (&item.annotations, item.name.clone(), item.span)
+    });
+    keep(&mut program.externs, &mut omitted, target, |item| {
+        (&item.annotations, item.name.clone(), item.span)
+    });
+    keep(&mut program.tests, &mut omitted, target, |item| {
+        (&item.annotations, item.name.clone(), item.span)
+    });
+    keep(&mut program.structs, &mut omitted, target, |item| {
+        (&item.annotations, item.name.clone(), item.span)
+    });
+    keep(&mut program.enums, &mut omitted, target, |item| {
+        (&item.annotations, item.name.clone(), item.span)
+    });
+    keep(&mut program.consts, &mut omitted, target, |item| {
+        (&item.annotations, item.name.clone(), item.span)
+    });
+    program.omitted.extend(omitted);
+}
 
 fn annotation_spec(name: &str) -> Option<&'static AnnotationSpec> {
     ANNOTATIONS.iter().find(|spec| spec.name == name)
@@ -806,6 +907,7 @@ pub fn build_program(file: &str, forms: &[SExpr]) -> CompileResult<Program> {
         structs: Vec::new(),
         enums: Vec::new(),
         consts: Vec::new(),
+        omitted: Vec::new(),
     };
 
     for form in forms {
@@ -1044,6 +1146,27 @@ impl AstBuilder<'_> {
             },
             (AnnotationArgs::OptionalText, _) => {
                 self.error(span, format!("`{}` takes at most one message", spec.name));
+                None
+            }
+            (AnnotationArgs::Text, [only]) => match &only.kind {
+                SExprKind::String(text) => Some(vec![AnnotationArg::Text(self.text_literal(
+                    text,
+                    only.span,
+                    "an annotation argument",
+                )?)]),
+                _ => {
+                    self.error(
+                        only.span,
+                        format!("`{}` takes one string literal", spec.name),
+                    );
+                    None
+                }
+            },
+            (AnnotationArgs::Text, _) => {
+                self.error(
+                    span,
+                    format!("`{}` takes exactly one string literal", spec.name),
+                );
                 None
             }
         }

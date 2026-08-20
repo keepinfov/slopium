@@ -1,0 +1,7 @@
+; The declaration is right there in the file and is not part of this program,
+; which is the failure `(target "...")` has to explain rather than leave a
+; reader to work out (`D-136`).
+(fn (target "aarch64-unknown-linux-gnu") word-size () -> i64 64)
+
+(fn main () -> i32
+  (as i32 (word-size)))

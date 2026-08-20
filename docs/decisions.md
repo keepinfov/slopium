@@ -148,6 +148,7 @@ of what was believed at the time is the part worth keeping.
 - [D-133 — a deferred expression runs before the scope's drops, and may not move](#d-133--a-deferred-expression-runs-before-the-scopes-drops-and-may-not-move)
 - [D-134 — `;;` above a declaration is documentation, read out of the trivia](#d-134--above-a-declaration-is-documentation-read-out-of-the-trivia)
 - [D-135 — the manifest says what a module is for each target](#d-135--the-manifest-says-what-a-module-is-for-each-target)
+- [D-136 — a declaration says which target it is for, and `cfg` is not built](#d-136--a-declaration-says-which-target-it-is-for-and-cfg-is-not-built)
 
 ## D-001 — a native compiler, without LLVM
 
@@ -2769,3 +2770,50 @@ standard `D-128` set for a key nobody knows, because a selection that quietly
 does nothing is worse than one that is refused. The archive carries every
 target's file: a package is one thing wherever it is built, and what a build
 leaves out is decided when it runs.
+## D-136 — a declaration says which target it is for, and `cfg` is not built
+
+Status: approved · 2026-08-20 · supersedes the refusal recorded in `D-122`'s
+neighbourhood and in the tracker
+
+There was no conditional compilation anywhere. The library's answer is the
+`core`/`std` split, which works because that split is a *dependency* rather than
+a condition, and it does not scale to two definitions of one function that
+differ by a word. The planning notes and the tracker both refused a `(cfg ...)`
+**form** for three reasons: it is grammar, it makes every pass carry code nobody
+compiles, and it makes the formatter and the language server work on text that
+is not part of the program. Two of those do not survive contact with the
+annotation slot.
+
+`D-122` built that slot — a list between a declaration's keyword and its name —
+and gave it to all six declaration forms, including the four where nothing
+applied yet, precisely so that a new annotation stays additive after the freeze
+and a new form does not. So `(target "<triple>")` costs **no grammar**, which
+answers the first reason. And the declarations it does not select are removed
+between `build_program` and `sema`, so nothing types them, nothing monomorphizes
+them, no MIR carries them and neither backend learns the word — which answers
+the second.
+
+The third reason survives and is written down rather than argued away: a
+declaration that is not selected is never checked, so it can rot silently. That
+is the standard complaint about conditional compilation in every language that
+has one, and it is why whole-file selection stays a separate mechanism rather
+than being replaced by this one: a file selected by a manifest is compiled as an
+ordinary module for the target it belongs to, checked like every other.
+
+**It is spelled `target` and not `cfg`, and that is the decision inside the
+decision.** `cfg` is a promise of a predicate language — `any`, `all`, `not`, a
+feature namespace, an architecture separate from an operating system — and none
+of that is being built. A word that promises what it delivers is worth more than
+one borrowed from a language whose version of it is ten times larger. What it
+tests is a target triple, spelled exactly as `slopium targets` prints it, as
+`[build] target` takes it and as `--target` takes it, so one vocabulary covers
+the manifest, the command line and the annotation. Widening the argument later
+to name an architecture or an environment rather than a whole triple stays
+compatible, because an annotation's arguments are ours.
+
+The one thing this does better than the languages it is borrowed from is the
+failure. A name whose only declaration was for another target is an unknown
+name, and everywhere else that is where the story ends — the reader is left to
+work out that the definition is in the file in front of them and simply not
+theirs. The `Program` keeps a record of what was removed and which target asked
+for it, so the refusal says so.

@@ -125,6 +125,12 @@ command-line protocol is internal and versioned.
     `.loc` directives from the span each statement carries, which the assembler
     turns into a DWARF line table.
 
+Between the syntax tree and typing there is one filter: a declaration annotated
+`(target "...")` for a triple other than the one being built is removed, and
+what was removed is recorded on the `Program` so an unresolvable name can say
+why (`D-136`). Nothing downstream of that point carries a declaration nobody
+compiles.
+
 MIR keeps numbered locals rather than SSA form. The `cfg` module derives what
 SSA would have carried implicitly — successors, predecessors, reverse
 postorder, reachability, def/use, liveness, and live intervals. Drop
