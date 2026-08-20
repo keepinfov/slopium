@@ -815,6 +815,13 @@ impl Resolver<'_> {
                     self.rewrite_expr(operand, diagnostics);
                 }
             }
+            // Each operand is a `Var`, so the arm that resolves one resolves a
+            // module-qualified composition operand too (`D-139`).
+            ExprKind::Compose { operands, .. } => {
+                for operand in operands {
+                    self.rewrite_expr(operand, diagnostics);
+                }
+            }
             // A capture is a local by construction, so there is nothing to
             // resolve about the names; the types are another matter, since a
             // parameter or a result may name something from another module.
@@ -1086,6 +1093,9 @@ fn collect_qualified_names<'a>(program: &'a Program, output: &mut Vec<&'a str>) 
                 args.iter().for_each(|argument| expr(argument, output));
             }
             ExprKind::Logical { operands, .. } => {
+                operands.iter().for_each(|operand| expr(operand, output));
+            }
+            ExprKind::Compose { operands, .. } => {
                 operands.iter().for_each(|operand| expr(operand, output));
             }
             ExprKind::Lambda {

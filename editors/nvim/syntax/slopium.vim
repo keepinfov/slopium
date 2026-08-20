@@ -64,7 +64,9 @@ syntax match slopiumParameter "\v<[a-z_][A-Za-z0-9_-]*>\ze\s+(&mut|&)?(unit|bool
 
 syntax match slopiumOwnership "&mut\|&"
 syntax keyword slopiumBuiltin clone list array slice len push get get-ref pop remove replace not bit-and bit-or bit-xor bit-not shl shr volatile-read volatile-write ptr-offset
-syntax match slopiumOperator "\%((\s*\)\@<=\%([<>!]\=[=]\|[-+*/<>%]\)"
+" `<<` and `>>` compose functions (`D-139`) and come first, so that a
+" composition is not highlighted as the comparison its first character is.
+syntax match slopiumOperator "\%((\s*\)\@<=\%(<<\|>>\|[<>!]\=[=]\|[-+*/<>%]\)"
 syntax keyword slopiumType unit bool i8 i16 i32 i64 u8 u16 u32 u64 f64 String List Array Slice Fn Ptr
 syntax match slopiumEnumPath "\v<[A-Za-z_][A-Za-z0-9_-]*(:[A-Za-z_][A-Za-z0-9_-]*)+>"
 syntax match slopiumField "\v:[A-Za-z_][A-Za-z0-9_-]*"

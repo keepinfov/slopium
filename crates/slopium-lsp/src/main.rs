@@ -1203,6 +1203,11 @@ fn scan_expr_occurrences(
         ExprKind::Defer(body) => {
             scan_expr_occurrences(workspace, modules, summary, file, body);
         }
+        ExprKind::Compose { operands, .. } => {
+            for operand in operands {
+                scan_expr_occurrences(workspace, modules, summary, file, operand);
+            }
+        }
         ExprKind::Do(items) | ExprKind::Unsafe(items) => {
             for item in items {
                 scan_expr_occurrences(workspace, modules, summary, file, item);
@@ -1712,6 +1717,32 @@ mod tests {
     /// while `KEYWORDS` did not. A form added to none of the five lists is
     /// still invisible — the compiler keeps no single table of its own forms,
     /// and inventing one here would be the sixth copy of the thing that drifts.
+    /// The operators the general check above cannot see (`D-139`).
+    ///
+    /// It skips every name that does not begin with a letter, because an
+    /// operator is a regexp in the syntax file rather than a `syntax keyword`,
+    /// and a test cannot ask a vim regexp what it matches. So the operators
+    /// that are not word-shaped are named here instead. It is a weaker check
+    /// than the one above — it asks whether the file mentions them, not whether
+    /// it highlights them — and it is the difference between a drift that is
+    /// caught and one that is not.
+    #[test]
+    fn the_syntax_file_mentions_the_operators_that_are_not_words() {
+        let syntax = editor_file("syntax/slopium.vim");
+        let operators = without_comments(&syntax)
+            .lines()
+            .find(|line| line.contains("slopiumOperator"))
+            .expect("the syntax file matches operators")
+            .to_owned();
+        for operator in ["<<", ">>"] {
+            assert!(
+                operators.contains(operator),
+                "`{operator}` is an operator of the language and the `slopiumOperator` match \
+                 in `editors/nvim/syntax/slopium.vim` does not mention it"
+            );
+        }
+    }
+
     #[test]
     fn the_editor_lists_know_every_word_the_language_has() {
         let syntax = editor_file("syntax/slopium.vim");
@@ -1725,7 +1756,10 @@ mod tests {
         for word in &known {
             // An operator is a regexp in the syntax file and a label in the
             // completion table, so only the word-shaped names are looked for
-            // here. `_` is a wildcard match rather than a keyword.
+            // here. `_` is a wildcard match rather than a keyword. What this
+            // skip costs is covered by the test below, which is why `shl` and
+            // `shr` could drift into being spelled as words without anything
+            // noticing.
             if !word.starts_with(|character: char| character.is_alphabetic()) {
                 continue;
             }

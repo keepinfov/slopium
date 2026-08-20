@@ -1,0 +1,4 @@
+compose-applied-to-two.slp:6:11: error[SL0100]: `<<` composes functions of one argument, so applying it takes one argument and 2 were given
+  |
+ 6 |   (as i32 ((<< double) 1 2)))
+  |           ^^^^^^^^^^^^^^^^^

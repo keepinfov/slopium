@@ -1,0 +1,9 @@
+; Composition passes one value along the chain, so a function that wants two has
+; nowhere to take the second from (`D-139`).
+(fn add ((a i64) (b i64)) -> i64 (+ a b))
+
+(fn double ((n i64)) -> i64 (* n 2))
+
+(fn main () -> i32
+  (let f (<< double add))
+  0)

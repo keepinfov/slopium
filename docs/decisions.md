@@ -151,6 +151,7 @@ of what was believed at the time is the part worth keeping.
 - [D-136 — a declaration says which target it is for, and `cfg` is not built](#d-136--a-declaration-says-which-target-it-is-for-and-cfg-is-not-built)
 - [D-137 — a changelog entry is a file, because two of them are not a conflict](#d-137--a-changelog-entry-is-a-file-because-two-of-them-are-not-a-conflict)
 - [D-138 — the verifier bounds every index it can, and says which it cannot](#d-138--the-verifier-bounds-every-index-it-can-and-says-which-it-cannot)
+- [D-139 — composition is a form, and applied it is the nesting](#d-139--composition-is-a-form-and-applied-it-is-the-nesting)
 - [D-140 — a fieldless enum is its tag, and `=` reaches one](#d-140--a-fieldless-enum-is-its-tag-and--reaches-one)
 
 ## D-001 — a native compiler, without LLVM
@@ -2904,6 +2905,56 @@ not drop what it was handed (`D-101`), so a `FieldLoad` base does not always
 name a layout; where the type does not say which aggregate it is, nothing is
 claimed about it.
 
+## D-139 — composition is a form, and applied it is the nesting
+
+Status: approved · 2026-08-20
+
+Functions have been values since `D-092` and a `lambda` captures them by move
+(`D-102`), so composition already worked as a library function — and two things
+made that insufficient, both of which point at a form. It cannot be variadic:
+there are no variadic functions and, without traits, no way to write one, so a
+library `compose` is fixed at two arguments and three functions means
+`(compose f (compose g h))`, which is the nesting this exists to remove. And it
+cannot be free: measured on the optimized MIR, it cost three allocations and
+three indirect calls where `(f (g x))` is two direct calls and nothing else.
+
+`<<` and `>>` are both n-ary, and each is the other reversed. `<<` keeps the
+order of names a nested call has and `>>` reads in the order things happen. The
+spellings are free precisely because `D-106` wrote the shifts as `shl` and
+`shr`; `.` was refused, because it is field access and
+`tests/projects/pass/function-values` already has a struct whose field holds a
+function, where a second meaning for the dot typechecks two ways and only the
+names decide which.
+
+**Applied where it is written, it expands in the parser.** The issue proposed
+expanding in `sema`; the parser is earlier and enough, because the expansion is
+`(f (g (h x)))` and needs no types. So nothing downstream — not `sema`, not
+MIR, not either backend — ever learns that a composition was written, and the
+MIR of `((<< double increment) n)` is byte-for-byte the MIR of
+`(double (increment n))`. That is the whole of the cost argument above,
+answered.
+
+**Unapplied it becomes a `lambda`, by being written as one.** `sema` synthesizes
+the AST for `(lambda (captures) ((x A)) -> C (f (g (h x))))` and types it
+through the ordinary path rather than assembling a `TExprKind::Lambda` by hand,
+so the capture moves, the environment swap, the borrow refusals and the lifting
+all behave as they do everywhere else without being reimplemented. Only the
+operands that are *local bindings* are captured: a top-level `fn` is callable
+from inside a lambda without being closed over, so composing two of them — which
+is nearly every composition — closes over nothing.
+
+**The operands are names.** What an unapplied composition becomes closes over
+them, and a `lambda` captures names, so an expression could not be an operand
+however the form were written; a composition of something without a name is a
+`let` away from being one. Each is held as the `Var` it is, so that a
+module-qualified operand is resolved by the pass that resolves every other name
+rather than by a second rule. Composing one function is that function — refusing
+it would be a rule about arity where there is no question of meaning — and every
+operand takes exactly one argument, because a composition passes one value along
+the chain.
+
+What this does not do is make the unapplied form free; that is still a lifted
+lambda, and removing it is the devirtualization issue's business, not this one's.
 ## D-140 — a fieldless enum is its tag, and `=` reaches one
 
 Status: approved · 2026-08-20

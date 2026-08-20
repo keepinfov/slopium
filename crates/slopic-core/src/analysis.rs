@@ -702,6 +702,14 @@ pub const BUILTINS: &[(&str, &str)] = &[
     ),
     ("shr", "right shift, arithmetic on a signed type"),
     (
+        "<<",
+        "compose functions, right to left: ((<< f g) x) is (f (g x))",
+    ),
+    (
+        ">>",
+        "compose functions, left to right: ((>> f g) x) is (g (f x))",
+    ),
+    (
         "volatile-read",
         "volatile-read((Ptr T)) -> T; inside `unsafe`",
     ),
