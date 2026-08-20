@@ -29,8 +29,8 @@
 
 (fn report ((label (& String)) (outcome (Result i64 Error))) -> unit
   (match outcome
-    ((Result:Ok count) (do (print-label label) (println-i64 count)))
-    ((Result:Err (Error :code code)) (do (print-label label) (println-i64 code)))))
+    ((Result:Ok count) (print-label label) (println-i64 count))
+    ((Result:Err (Error :code code)) (print-label label) (println-i64 code))))
 
 (fn print-label ((label (& String))) -> unit
   (println label))

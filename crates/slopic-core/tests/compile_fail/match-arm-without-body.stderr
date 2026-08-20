@@ -1,0 +1,4 @@
+match-arm-without-body.slp:3:5: error[SL0100]: match arm syntax is `(pattern expression ...)` or `(pattern when condition expression ...)`
+  |
+ 3 |     (true)
+  |     ^^^^^^

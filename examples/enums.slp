@@ -10,9 +10,8 @@
     ((Choice::None) 0)
     ((Choice::Some value) value)
     ((Choice::Message text)
-      (do
-        (println (& text))
-        1))))
+      (println (& text))
+      1)))
 
 (fn main () -> i32
   (println (score (Choice::Some 42)))

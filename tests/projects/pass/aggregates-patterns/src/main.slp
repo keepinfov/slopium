@@ -16,9 +16,8 @@
     ((Outer:Wrap (Inner:Value number)) number)
     ((Outer:Wrap (Inner:None)) 0)
     ((Outer:Pointed (Point :x x :label label))
-      (do
-        (println (& label))
-        x))
+      (println (& label))
+      x)
     ((Outer:Empty) -1)
     (_ -2)))
 

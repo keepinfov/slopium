@@ -24,9 +24,8 @@
   (match (pop (&mut words))
     ((Option:Some value) (println (& value)))
     ((Option:None)
-      (do
-        (let empty "empty")
-        (println (& empty)))))
+      (let empty "empty")
+      (println (& empty))))
 
   (let fixed (array "a" "b" "c"))
   (let view (slice (& fixed) 1 3))

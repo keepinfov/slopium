@@ -361,17 +361,35 @@ so giving the permission up costs nothing and taking it is not offered.
 (let mut counter 0)
 (while (< counter 10)
   (set counter (+ counter 1))
-  (if (= counter 5) (continue) ())
-  (if (= counter 8) (break) ()))
+  (when (= counter 5) (continue))
+  (when (= counter 8) (break)))
 
 (loop
   (set counter (+ counter 1))
-  (if (= counter 10) (break) ()))
+  (when (= counter 10) (break)))
 ```
 
 `if` has a value and both branches must have the same type. `do` evaluates a
 sequence and returns its final expression. `while` returns `unit`, and
 `continue` never takes a value.
+
+`when` is the one-sided conditional: it runs its body when the condition holds
+and answers `unit` either way (`D-127`). A body that ends in a value drops it,
+exactly as a `do` drops everything but its last expression.
+
+The `else` branch of an `if` takes as many expressions as it needs, the last
+being its value, while `then` stays a single expression. That is the shape a
+function answering early is written in — the short answer above, the work
+below — and it is why there is no second boundary to look for:
+
+```lisp
+(fn remaining ((count i64)) -> String
+  (if (= count 0)
+    "none"
+    (let digits (from-i64 count))
+    (let suffix " left")
+    (concat (& digits) (& suffix))))
+```
 
 A `loop` is an expression: `(break value)` is what it produces (`D-121`). Every
 `break` in one loop agrees on the type, a bare `break` produces `unit` — which
@@ -383,7 +401,7 @@ hand back.
 (let doubled
   (loop
     (set counter (+ counter 1))
-    (if (= counter 8) (break (* counter 2)) ())))
+    (when (= counter 8) (break (* counter 2)))))
 ```
 
 `set` assigns to a `(let mut ...)` binding, and to a field bound by a `(&mut
@@ -400,9 +418,14 @@ dropped.
 
 (match (Message:Pointed (Point :x 42 :label "answer"))
   ((Message:Pointed (Point :x x :label label))
-    (do (println (& label)) x))
+    (println (& label))
+    x)
   ((Message:Empty) 0))
 ```
+
+An arm takes as many expressions as it needs and answers the last (`D-127`),
+which is why a guard is found by the word `when` after the pattern rather than
+by counting the elements of the arm.
 
 Patterns can nest enum and named struct patterns. A bare name binds and moves
 the matched value; `_` discards it. Boolean and enum matches must be

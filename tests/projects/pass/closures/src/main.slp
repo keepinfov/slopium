@@ -43,11 +43,9 @@
   (let mut index 0)
   (let mut found 0)
   (while (< index size)
-    (if (equals (get-ref names index) name)
-      (do
-        (set found (get ranks index))
-        (break))
-      ())
+    (when (equals (get-ref names index) name)
+      (set found (get ranks index))
+      (break))
     (set index (+ index 1)))
   found)
 
