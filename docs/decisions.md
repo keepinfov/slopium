@@ -154,6 +154,7 @@ of what was believed at the time is the part worth keeping.
 - [D-139 — composition is a form, and applied it is the nesting](#d-139--composition-is-a-form-and-applied-it-is-the-nesting)
 - [D-140 — a fieldless enum is its tag, and `=` reaches one](#d-140--a-fieldless-enum-is-its-tag-and--reaches-one)
 - [D-141 — a call through a block built in the same breath names its symbol](#d-141--a-call-through-a-block-built-in-the-same-breath-names-its-symbol)
+- [D-142 — an object with no debug information is refused, not handed back](#d-142--an-object-with-no-debug-information-is-refused-not-handed-back)
 
 ## D-001 — a native compiler, without LLVM
 
@@ -3036,3 +3037,28 @@ still dropped, because a `Drop` is observable and `opt.rs` has never removed one
 the allocation as well means proving the block's captures own nothing and that
 its only remaining use is that drop, which is dead-allocation elimination rather
 than devirtualization, and is worth doing on its own terms.
+## D-142 — an object with no debug information is refused, not handed back
+
+Status: approved · 2026-08-20
+
+`compile_to_object` and `compile_package_to_object` hardcoded the absence of
+debug information: a caller who set `options.debug` received a stripped object,
+with no error and no warning. The library had three answers available — emit
+DWARF, refuse, or say nothing — and it was giving the third, which is the only
+one that cannot be right.
+
+It refuses. Emitting DWARF from the internal object writer is a piece of work
+rather than a fix, and it is not what this decision is about; `D-028` already
+says the writer emits no `.debug_*` section, and the refusal points at the path
+that does carry line tables — emit assembly and assemble it, which is exactly
+what `slopic` itself does. That is why the gap was invisible: the command-line
+compiler routes a debug build through `as` and never reaches these entry points,
+so only a caller of the library could meet it.
+
+The same paragraph in `docs/architecture.md` now says the other two things
+`--debug` costs, both of which were true and unwritten. It reacquires the
+external toolchain dependency `D-028` removes, so a debug build can fail where
+the same build without it succeeds. And with `--target` it hands foreign
+assembly to whatever `cc` resolved to, because `slopic`'s `--cc` defaults to
+`"cc"` whatever the target is. Neither is a bug to fix here; both are behaviour
+somebody should be able to read about before it surprises them.

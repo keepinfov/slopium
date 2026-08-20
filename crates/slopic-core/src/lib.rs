@@ -370,11 +370,41 @@ pub fn compile_to_assembly(
     codegen::emit_assembly(file, &mir, &codegen_options(file, options, None, true))
 }
 
+/// Refuses an object asked for with debug information (`D-142`).
+///
+/// The internal object writer emits no `.debug_*` section at all: line tables
+/// are built from the `.file` and `.loc` directives the assembly path renders,
+/// and the object layout discards them (`D-028`). So an object written here can
+/// carry no debug information, and the honest answers are to refuse or to emit
+/// DWARF. This refuses, because emitting DWARF from the object writer is a
+/// piece of work and silently handing back a stripped object is not an answer
+/// at all — which is what this used to do.
+///
+/// `slopic` itself never reaches this: `writes_its_own_object` routes a debug
+/// build through `as`, which is why the gap was only ever visible to a caller
+/// of the library.
+fn refuse_debug_object(file: &str, options: &CompileOptions) -> CompileResult<()> {
+    if !options.debug {
+        return Ok(());
+    }
+    Err(vec![Diagnostic::error(
+        codes::TOOLCHAIN,
+        file,
+        Default::default(),
+        "an object written by the compiler carries no debug information",
+    )
+    .with_help(
+        "emit assembly with `compile_to_assembly` and assemble it, which is what a debug \
+         build does",
+    )])
+}
+
 pub fn compile_to_object(
     file: &str,
     source: &str,
     options: &CompileOptions,
 ) -> CompileResult<Vec<u8>> {
+    refuse_debug_object(file, options)?;
     let mir = compile_to_mir(file, source, options)?;
     codegen::emit_object(file, &mir, &codegen_options(file, options, None, false))
 }
@@ -395,6 +425,7 @@ pub fn compile_package_to_object(
     input: &package::PackageInput,
     options: &CompileOptions,
 ) -> CompileResult<Vec<u8>> {
+    refuse_debug_object(&input.name, options)?;
     let mir = compile_package_to_mir(input, options)?;
     codegen::emit_object(
         &input.name,

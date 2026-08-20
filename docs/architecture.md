@@ -146,6 +146,17 @@ maps and inserts drops at merges, so ownership correctness lives in the
 lowering code rather than in a later pass. `--emit mir-text` renders the whole
 module for reading.
 
+`--debug` costs more than the line tables it buys, and the cost is worth
+knowing (`D-142`). `Item::File` and `Item::Loc` are rendered into assembly text
+and discarded by the object layout, and the internal ELF writer emits no
+`.debug_*` section, so a debug build is routed through the external `as` and
+`cc` — the toolchain dependency `D-028` otherwise removes. Two consequences
+follow: `--debug` can fail on a machine where the same build without it
+succeeds, and `--debug` with `--target` hands foreign assembly to whatever `cc`
+resolved to, since `slopic`'s `--cc` defaults to `"cc"` whatever the target is.
+The library's `compile_to_object` and `compile_package_to_object` refuse a
+request carrying `debug` rather than answering with a stripped object.
+
 Ending a scope is two phases, in this order: what the scope deferred runs, then
 what it owns is dropped (`D-133`). `drop_scope_except` is the exit that falls
 off the end of a scope, and `unwind_scopes` is the one that leaves a range of
