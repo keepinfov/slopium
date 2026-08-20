@@ -19,4 +19,6 @@
   (core:string:to-i64 :as to-i64)
   (core:string:from-u64 :as from-u64)
   (core:string:to-u64 :as to-u64)
+  (core:string:hex-from-u64 :as hex-from-u64)
+  (core:string:hex-prefixed-from-u64 :as hex-prefixed-from-u64)
   (core:string:hash :as hash))

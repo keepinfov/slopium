@@ -56,10 +56,11 @@ EOF
 # Writes the archive and appends the line, which is all putting a package into a
 # static index takes — and is what `slopium publish` will do in v0.4.5.
 publish() {
-  local name="$1" version="$2" dependencies="$3" body="$4"
+  local name="$1" version="$2" dependencies="$3" body="$4" preamble="${5:-}"
   local root="$scratch/published/$name-$version"
   mkdir -p "$root/src"
   cat >"$root/Slopium.toml" <<EOF
+$preamble
 [package]
 name = "$name"
 version = "$version"
@@ -73,7 +74,7 @@ EOF
   configure "$root"
 
   local entry
-  entry="$(cd "$root" && slopium package --index-entry)" ||
+  entry="$(cd "$root" && slopium package --index-entry 2>"$scratch/publish.err")" ||
     fail "cannot package $name v$version"
 
   local index
@@ -204,6 +205,39 @@ slopium update -p nonexistent >"$scratch/update.out" 2>&1 &&
   fail "update -p accepted a package the lock does not pin"
 grep --quiet "nothing to update" "$scratch/update.out" ||
   fail "update -p on an unknown package said the wrong thing"
+
+# --- a package published by a later toolchain still resolves ------------------
+#
+# The whole point of `D-128`: a manifest carries keys the toolchain reading it
+# does not know, and reading it is what has to keep working. The warning is for
+# the manifest's author, so it is raised where the package is packaged and
+# nowhere else — a dependency's manifest is the dependency's business.
+
+publish future 1.0.0 '
+[profile.dev]
+lto = "thin"' '(export twice)
+
+(fn twice ((n i64)) -> i64 (* n 2))' 'edition = "2031"'
+
+grep --quiet 'SL1200' "$scratch/publish.err" ||
+  fail "packaging a manifest with an unknown key said nothing about it"
+
+consumer ahead 'future = "^1"'
+cat >"$scratch/ahead/src/main.slp" <<'EOF'
+(take std:io println-i64)
+(take future:lib twice)
+
+(fn main () -> i32
+  (println-i64 (twice 21))
+  0)
+EOF
+(cd "$scratch/ahead" && slopium build) >"$scratch/ahead.out" 2>&1 ||
+  fail "a package from a later toolchain did not build: $(cat "$scratch/ahead.out")"
+[[ "$("$scratch/ahead/target/x86_64-unknown-linux-gnu/dev/ahead")" == "42" ]] ||
+  fail "the package from a later toolchain ran the wrong code"
+if grep --quiet 'SL1200' "$scratch/ahead.out"; then
+  fail "a dependency's unknown key was reported to its consumer: $(cat "$scratch/ahead.out")"
+fi
 
 # --- offline resolution against a registry that is a directory ----------------
 

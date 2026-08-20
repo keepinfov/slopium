@@ -14,6 +14,10 @@ rather than everything it touched.
 ## [Unreleased]
 
 ### Added
+- `core:string` writes hexadecimal, re-exported by `std:string`:
+  `hex-from-u64` for the digits and `hex-prefixed-from-u64` for the same under
+  `0x`. The width pads and never truncates, and the glyphs are uppercase, so
+  what is printed can be pasted back into a program as a literal.
 - A program can fail on purpose: `core:panic` — `std:panic` for a hosted
   package — has `panic`, `assert` and `unreachable`, each ending the program
   with status 101 and a message on standard error.
@@ -32,6 +36,10 @@ rather than everything it touched.
   message that says to name the value instead.
 
 ### Changed
+- A manifest key this toolchain does not know is reported as
+  `warning[SL1200]` and ignored, instead of refusing the manifest, so a package
+  written for a later toolchain still resolves and builds. The archive carries
+  the key unchanged. `.slopium/config.toml` still refuses one.
 - The library's six integer and float printers, and the float formatter, lost
   the bindings that existed only to give a value a name.
 - The standard library, the fixtures and the examples are written in the new

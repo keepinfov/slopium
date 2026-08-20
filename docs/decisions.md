@@ -140,6 +140,8 @@ of what was believed at the time is the part worth keeping.
 - [D-125 — `format` is reserved at the freeze, and nothing is built](#d-125--format-is-reserved-at-the-freeze-and-nothing-is-built)
 - [D-126 — a temporary is borrowed where a call takes it, and dies there](#d-126--a-temporary-is-borrowed-where-a-call-takes-it-and-dies-there)
 - [D-127 — a body is as many expressions as it needs, and a one-sided condition is `when`](#d-127--a-body-is-as-many-expressions-as-it-needs-and-a-one-sided-condition-is-when)
+- [D-128 — a manifest survives a key it does not know, and a config does not](#d-128--a-manifest-survives-a-key-it-does-not-know-and-a-config-does-not)
+- [D-129 — hexadecimal is two functions and an uppercase table](#d-129--hexadecimal-is-two-functions-and-an-uppercase-table)
 - [D-130 — failing on purpose, and a failing test that says what it compared](#d-130--failing-on-purpose-and-a-failing-test-that-says-what-it-compared)
 
 ## D-001 — a native compiler, without LLVM
@@ -2430,6 +2432,84 @@ those branches were the *first* one — `(if condition () work)` — which is no
 change and agreed with the mechanical result line for line, which is the
 strongest evidence available that the new shapes are the ones the layout rules
 were already describing.
+
+## D-128 — a manifest survives a key it does not know, and a config does not
+
+Status: approved · 2026-08-20
+
+`deny_unknown_fields` on every manifest struct made a key this toolchain does
+not know an error, which is the wrong default for the one file in this project
+that more than one version of it reads. A manifest travels with the package: a
+manifest written for a later toolchain is read by every earlier one that
+resolves it, so refusing an unknown key makes every field added after 1.0 a
+breaking change to the format, and features, dev-dependencies and
+target-specific dependencies impossible to add at all.
+
+So an unknown key in a manifest is reported and ignored. Reported, because the
+other thing an unknown key can be is a typo, and `deny_unknown_fields` was
+catching those for free; a key dropped in silence is a setting that quietly
+does nothing, which is worse than either. The warning is `SL1200`, the
+manager's first, and it names the dotted path — `profile.dev.lto` rather than
+"an unknown key somewhere". The archive carries the key verbatim, because what
+is packaged here is what a later toolchain reads and rewriting it on the way
+through would defeat the point.
+
+Which manifests report is the rule `SL08xx` already follows about a
+dependency's source: the workspace being acted on, and nothing below it. A
+consumer cannot edit a dependency's manifest, so the warning there would be
+addressed to somebody who is not reading it.
+
+`.slopium/config.toml` keeps refusing, and the difference is what the file is.
+It belongs to the checkout rather than to the package, it is shipped nowhere,
+and nothing older than the toolchain running now will ever read it — so a key
+nobody knows there is a mistake, and refusing it is help rather than
+obstruction.
+
+The mechanism is `#[serde(flatten)]` capturing whatever a table did not
+recognise, so what counts as known stays the struct definition rather than a
+second list beside it that could disagree with it. The one thing the change
+cost was message quality in a single place, and it was bought back: a
+dependency entry that names no source now says so *and* names the keys nobody
+knew, because `geometry = { pth = "../geometry" }` is a typo rather than a
+message from the future, and the refusal that used to name `pth` is the one
+worth keeping.
+
+## D-129 — hexadecimal is two functions and an uppercase table
+
+Status: approved · 2026-08-20
+
+`core:string` wrote decimal and nothing else, so a program printing a mask, an
+address or a device register — which is most of what a freestanding program
+prints — had to build the digits itself. It writes base sixteen now, in `core`
+rather than `std` for the same reason the rest of the module is there: the
+caller who wants it most has no C library under it.
+
+Three things were decided while writing it, and none is deep enough to be
+anywhere but here. **The `0x` is a second function rather than a `bool`.** The
+shape the issue described was one function taking a value, a width and whether
+to include the prefix, and in a language with no named arguments that reads
+`(hex-from-u64 mask 8 true)` at the call site, where `true` says nothing.
+`hex-from-u64` and `hex-prefixed-from-u64` cost one name and say which is
+wanted by which is called.
+
+**The width is a floor.** Fewer digits than it are padded with zeros; a value
+needing more keeps all of them. A width that truncated would turn a number
+into a different number that still looks like a number, which is the one thing
+a formatter must never do, and zero means the natural width so that the common
+case needs no thought.
+
+**The glyphs are uppercase**, because that is how this language writes a
+hexadecimal literal and how the compiler reads one back, so a value printed
+here can be pasted into a program and mean what it printed. For the same
+reason there is no signed variant: a hexadecimal literal is a bit pattern
+rather than a number (`D-112`), so a signed value is rendered as
+`(hex-from-u64 (as u64 value) 16)`, and a conversion between the two widths is
+exact.
+
+The loop divides by sixteen rather than shifting by four, which is slower and
+is the point: it is `digits-of` over a different base, and a shift would be the
+only place in the module where an unsigned value is taken apart a second way.
+Nothing here is on a path where the difference is measurable.
 
 ## D-130 — failing on purpose, and a failing test that says what it compared
 

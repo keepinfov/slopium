@@ -84,6 +84,41 @@ cmp "$scratch/first.tar" \
   "$scratch/checkout-two/generics-std/target/package/generics-std-0.2.4.sl.tar" ||
   fail "two checkouts produced different bytes"
 
+# --- a manifest survives a key this toolchain does not know -------------------
+#
+# A manifest is read by every toolchain that ever sees the package, so a key it
+# does not know is reported and ignored rather than refused (`D-128`). The
+# archive carries the key verbatim: what is packaged here is what a later
+# toolchain reads, and rewriting it on the way through would defeat the point.
+
+cp "$project/Slopium.toml" "$scratch/manifest.known"
+{
+  printf 'edition = "2031"\n\n'
+  sed 's/std = { toolchain = true }/std = { toolchain = true, features = ["io"] }/' \
+    "$scratch/manifest.known"
+  printf '\n[profile.dev]\nlto = "thin"\n'
+} >"$project/Slopium.toml"
+
+slopium check >"$scratch/unknown.out" 2>&1 ||
+  fail "a manifest with an unknown key did not build: $(cat "$scratch/unknown.out")"
+if [[ "$(grep --count 'SL1200' "$scratch/unknown.out")" != 3 ]]; then
+  fail "the three unknown keys were not each reported once: $(cat "$scratch/unknown.out")"
+fi
+for key in 'edition' 'dependencies.std.features' 'profile.dev.lto'; do
+  grep --quiet "sets .$key." "$scratch/unknown.out" ||
+    fail "$key was not named: $(cat "$scratch/unknown.out")"
+done
+
+slopium package >/dev/null 2>&1
+tar -xOf "$archive" generics-std-0.2.4/Slopium.toml >"$scratch/archived.toml"
+grep --quiet 'edition = "2031"' "$scratch/archived.toml" ||
+  fail "the archive dropped a key the toolchain does not know"
+
+cp "$scratch/manifest.known" "$project/Slopium.toml"
+slopium package >/dev/null
+cmp "$scratch/first.tar" "$archive" ||
+  fail "restoring the manifest did not restore the package"
+
 # --- a package holds files and directories, and nothing else ------------------
 #
 # The reader refuses a `../` entry and a link entry alike, which the archive

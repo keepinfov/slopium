@@ -654,7 +654,25 @@ not an interface promise.
 `equals`, `starts-with`, `find`, `contains`, `trim`, `split` on a separator
 byte, `hash`, and `from-i64` and `to-i64` between a number and its text.
 `to-i64` returns `(Option i64)` and refuses anything that is not an optional
-`-` followed by digits, including a number too large to hold. `hash` is
+`-` followed by digits, including a number too large to hold. `from-u64` and
+`to-u64` are the unsigned pair, and `hex-from-u64` and `hex-prefixed-from-u64`
+write the same value in base sixteen — the second under `0x`, which is a
+separate name rather than a `bool` at the call site (`D-129`):
+
+```lisp
+(hex-from-u64 0x2A 0)            ; "2A"
+(hex-from-u64 0x2A 6)            ; "00002A"
+(hex-prefixed-from-u64 0x2A 4)   ; "0x002A"
+```
+
+The width is a floor: fewer digits are padded with zeros and a value that needs
+more keeps all of them, so nothing is ever truncated into a lie. Zero is the
+natural width. The glyphs are uppercase, which is how this language writes a
+hexadecimal literal, so what is printed can be pasted back into a program. A
+signed value is rendered by its bit pattern — `(hex-from-u64 (as u64 value) 16)`
+— because that is what a hexadecimal literal means here (`D-112`).
+
+`hash` is
 `(h * 31 + byte)` kept under 2^31 - 1, which is a prime rather than a power of
 two because arithmetic traps here: the usual mixing constants are written for a
 language where overflow wraps.

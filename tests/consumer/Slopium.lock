@@ -14,7 +14,7 @@ dependencies = [
 name = "core"
 version = "0.10.0"
 source = "toolchain"
-checksum = "bd594d49fa2bc95ae6e0d6bac3084fd350d238dc944f55eb430b798e8c5b0255"
+checksum = "91222a89c9bc1e62eaada1174c8e972787ec1d85fb1dff1b02cab144d6025ee4"
 dependencies = []
 
 [[package]]
@@ -28,7 +28,7 @@ dependencies = []
 name = "std"
 version = "0.10.0"
 source = "toolchain"
-checksum = "3fce35326a61cec3a884b5091a1f59ad2117b5d1d07782b28883abb3f428c371"
+checksum = "93c81f38e696f277a8be82e714b5e23f91aa83d4a054f0606d648f1145d2c81f"
 dependencies = [
     "core",
 ]
