@@ -24,8 +24,9 @@ pub const MANIFEST_FILE: &str = "Slopium.toml";
 pub const LIBRARY_ENTRY: &str = "lib.slp";
 
 #[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Manifest {
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, toml::Value>,
     /// Absent in a virtual manifest — one that defines a workspace and no
     /// package of its own.
     pub package: Option<Package>,
@@ -42,9 +43,58 @@ pub struct Manifest {
     pub profile: BTreeMap<String, Profile>,
 }
 
+impl Manifest {
+    /// Every key this toolchain does not know, as a dotted path (`D-128`).
+    ///
+    /// A manifest is read by every toolchain that ever sees the package, so an
+    /// unknown key is a message from a later version rather than a mistake to
+    /// refuse. It is still named, because the other thing it can be is a typo,
+    /// and a key that is quietly dropped is a setting that silently does
+    /// nothing.
+    pub fn unknown_keys(&self) -> Vec<String> {
+        let mut keys = Vec::new();
+        collect(&mut keys, "", &self.unknown);
+        if let Some(package) = &self.package {
+            collect(&mut keys, "package", &package.unknown);
+        }
+        collect(&mut keys, "language-items", &self.language_items.unknown);
+        collect(&mut keys, "build", &self.build.unknown);
+        for (name, spec) in &self.dependencies {
+            collect(&mut keys, &format!("dependencies.{name}"), &spec.unknown);
+        }
+        for (name, profile) in &self.profile {
+            collect(&mut keys, &format!("profile.{name}"), &profile.unknown);
+        }
+        if let Some(workspace) = &self.workspace {
+            collect(&mut keys, "workspace", &workspace.unknown);
+            collect(&mut keys, "workspace.package", &workspace.package.unknown);
+            for (name, spec) in &workspace.dependencies {
+                collect(
+                    &mut keys,
+                    &format!("workspace.dependencies.{name}"),
+                    &spec.unknown,
+                );
+            }
+        }
+        keys
+    }
+}
+
+/// One table's unknown keys, prefixed by where the table is.
+fn collect(keys: &mut Vec<String>, table: &str, unknown: &BTreeMap<String, toml::Value>) {
+    for key in unknown.keys() {
+        if table.is_empty() {
+            keys.push(key.clone());
+        } else {
+            keys.push(format!("{table}.{key}"));
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Package {
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, toml::Value>,
     pub name: String,
     pub version: Inheritable<Version>,
     /// The module a build starts from. A library has no such module — it is
@@ -71,8 +121,9 @@ pub struct Package {
 /// `[workspace]`: the packages that share one lock, one `target/`, and one
 /// resolution.
 #[derive(Clone, Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct WorkspaceSection {
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, toml::Value>,
     /// Member directories relative to the workspace root. A final `*`
     /// component stands for every subdirectory holding a manifest.
     #[serde(default)]
@@ -89,8 +140,9 @@ pub struct WorkspaceSection {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct WorkspacePackageSection {
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, toml::Value>,
     pub version: Option<Version>,
 }
 
@@ -163,8 +215,9 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for Inheritable<T> {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct LanguageItemSection {
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, toml::Value>,
     pub option: Option<String>,
     pub result: Option<String>,
     #[serde(rename = "result-ok")]
@@ -215,14 +268,17 @@ pub struct DependencySpec {
     pub version: Option<VersionReq>,
     /// `workspace = true`: take this entry from `[workspace.dependencies]`.
     pub workspace: Option<bool>,
+    /// What this entry held that the toolchain does not know (`D-128`).
+    pub unknown: BTreeMap<String, toml::Value>,
 }
 
 /// The table form, kept separate only so the derived reader stays available:
 /// the visitor below needs it for `visit_map` while `DependencySpec` itself
 /// answers to a string as well.
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct DependencyTable {
+    #[serde(flatten)]
+    unknown: BTreeMap<String, toml::Value>,
     path: Option<PathBuf>,
     toolchain: Option<bool>,
     git: Option<String>,
@@ -265,6 +321,7 @@ impl<'de> Deserialize<'de> for DependencySpec {
                     registry: table.registry,
                     version: table.version,
                     workspace: table.workspace,
+                    unknown: table.unknown,
                 })
             }
         }
@@ -274,6 +331,25 @@ impl<'de> Deserialize<'de> for DependencySpec {
 }
 
 impl DependencySpec {
+    /// What a refusal adds when the entry also carried keys nobody knows.
+    ///
+    /// An entry that names no source and sets `pth` is a typo rather than a
+    /// manifest from the future, and saying both at once is how the message
+    /// stays as useful as the refusal it replaced (`D-128`).
+    fn unknown_note(&self) -> String {
+        if self.unknown.is_empty() {
+            return String::new();
+        }
+        format!(
+            "; it sets {}, which this toolchain does not know",
+            self.unknown
+                .keys()
+                .map(|key| format!("`{key}`"))
+                .collect::<Vec<_>>()
+                .join(" and ")
+        )
+    }
+
     /// Every key that names where a dependency comes from, for the checks that
     /// have to talk about "a source" without caring which one.
     fn named_sources(&self) -> Vec<&'static str> {
@@ -386,7 +462,8 @@ impl DependencySpec {
                     registry: DEFAULT_REGISTRY.to_owned(),
                 }),
                 None => Err(format!(
-                    "SL1050: dependency `{name}` names no source; give a version requirement, `path`, `git`, or `toolchain = true`"
+                    "SL1050: dependency `{name}` names no source; give a version requirement, `path`, `git`, or `toolchain = true`{}",
+                    self.unknown_note()
                 )),
             },
             (None, Some(false), None, None) => Err(format!(
@@ -419,8 +496,9 @@ impl DependencySpec {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct BuildSection {
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, toml::Value>,
     pub target: Option<String>,
     /// The linker script the final image is laid out by, relative to the
     /// package root and unable to leave it (`SL1101`).
@@ -437,8 +515,9 @@ pub struct BuildSection {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Profile {
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, toml::Value>,
     #[serde(rename = "opt-level")]
     pub opt_level: Option<u8>,
     pub debug: Option<bool>,
@@ -971,7 +1050,10 @@ mod tests {
     /// should name itself.
     #[test]
     fn a_misspelled_dependency_key_names_itself() {
-        let error = manifest(
+        // The manifest parses, because a key nobody knows may be a message
+        // from a later toolchain (`D-128`). What makes this one a typo is that
+        // the entry then names no source, and the refusal says both.
+        let parsed = manifest(
             r#"
                 [package]
                 name = "hello"
@@ -982,7 +1064,15 @@ mod tests {
                 geometry = { pth = "../geometry" }
             "#,
         )
-        .unwrap_err();
+        .unwrap();
+        assert_eq!(
+            parsed.unknown_keys(),
+            vec!["dependencies.geometry.pth".to_owned()]
+        );
+        let error = parsed.dependencies["geometry"]
+            .source("geometry")
+            .unwrap_err();
+        assert!(error.contains("names no source"), "{error}");
         assert!(error.contains("pth"), "{error}");
     }
 
@@ -1114,20 +1204,91 @@ mod tests {
     /// The string form is read by a visitor rather than an untagged enum, so a
     /// mistyped key in the table form still names itself.
     #[test]
-    fn a_mistyped_dependency_key_is_named() {
-        let error = toml::from_str::<Manifest>(
+    fn a_manifest_survives_a_key_it_does_not_know() {
+        // One unknown key in every table a package can write, so that the walk
+        // is held against the structs rather than against one example.
+        let parsed = toml::from_str::<Manifest>(
             r#"
+            edition = "2030"
+
             [package]
             name = "demo"
             version = "0.1.0"
+            licence = "MIT"
 
             [dependencies]
-            geometry = { pth = "../geometry" }
+            geometry = { path = "../geometry", features = ["fast"] }
+
+            [language-items]
+            future = "core:future:Future"
+
+            [build]
+            emit = "wasm"
+
+            [profile.dev]
+            lto = "thin"
             "#,
+        )
+        .unwrap();
+        assert_eq!(
+            parsed.unknown_keys(),
+            vec![
+                "edition".to_owned(),
+                "package.licence".to_owned(),
+                "language-items.future".to_owned(),
+                "build.emit".to_owned(),
+                "dependencies.geometry.features".to_owned(),
+                "profile.dev.lto".to_owned(),
+            ]
+        );
+        // Everything the toolchain does know is still read.
+        assert_eq!(parsed.package.as_ref().unwrap().name, "demo");
+        assert_eq!(
+            parsed.dependencies["geometry"].path.as_deref(),
+            Some(Path::new("../geometry"))
+        );
+    }
+
+    #[test]
+    fn a_workspace_manifest_survives_one_too() {
+        let parsed = toml::from_str::<Manifest>(
+            r#"
+            [workspace]
+            members = ["a"]
+            resolver = "3"
+
+            [workspace.package]
+            version = "0.1.0"
+            licence = "MIT"
+
+            [workspace.dependencies]
+            geometry = { path = "../geometry", optional = true }
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            parsed.unknown_keys(),
+            vec![
+                "workspace.resolver".to_owned(),
+                "workspace.package.licence".to_owned(),
+                "workspace.dependencies.geometry.optional".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_local_config_still_refuses_a_key_it_does_not_know() {
+        // `.slopium/config.toml` is this checkout's own file and travels
+        // nowhere, so a key nobody knows there is a mistake rather than a
+        // message from a later toolchain (`D-128`).
+        let error = toml::from_str::<LocalConfig>(
+            "[toolchain]
+linker = \"lld\"
+",
         )
         .unwrap_err()
         .to_string();
-        assert!(error.contains("pth"), "{error}");
+        assert!(error.contains("linker"), "{error}");
     }
 
     #[test]

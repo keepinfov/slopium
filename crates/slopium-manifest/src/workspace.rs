@@ -31,6 +31,14 @@ pub struct Workspace {
     /// `.slopium/config.toml` at the root. It belongs to the checkout rather
     /// than to a package, so in a workspace there is one of it, at the top.
     pub config: LocalConfig,
+    /// Every key in a manifest of this workspace that the toolchain does not
+    /// know, as a path and a dotted key (`D-128`).
+    ///
+    /// Collected here and reported by whoever loaded the workspace, because
+    /// this half of the manager prints nothing. It covers the root and the
+    /// members and stops there: a dependency's manifest is the dependency's
+    /// business, exactly as a warning about its source is.
+    pub unknown_keys: Vec<(PathBuf, String)>,
 }
 
 impl Workspace {
@@ -200,6 +208,21 @@ pub fn load_workspace(manifest_path: Option<PathBuf>) -> Result<Workspace, Strin
     }
 
     let config = load_local_config(&root.root)?;
+    let mut unknown_keys: Vec<(PathBuf, String)> = Vec::new();
+    let mut seen: Vec<PathBuf> = Vec::new();
+    for (path, manifest) in std::iter::once((&root.manifest_path, &root.manifest)).chain(
+        members
+            .values()
+            .map(|member| (&member.manifest_path, &member.manifest)),
+    ) {
+        if seen.contains(path) {
+            continue;
+        }
+        seen.push(path.clone());
+        for key in manifest.unknown_keys() {
+            unknown_keys.push((path.clone(), key));
+        }
+    }
     Ok(Workspace {
         root: root.root,
         manifest_path: root.manifest_path,
@@ -208,6 +231,7 @@ pub fn load_workspace(manifest_path: Option<PathBuf>) -> Result<Workspace, Strin
         members,
         current,
         config,
+        unknown_keys,
     })
 }
 

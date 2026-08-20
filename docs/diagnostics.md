@@ -37,7 +37,15 @@ So a build prints each warning once, and a module whose object was already
 fresh prints nothing.
 
 `SL10xx` belongs to the project manager rather than the compiler, and is plain
-text rather than JSON — `slopium` reports one error and exits.
+text rather than JSON — `slopium` reports one error and exits. `SL12xx` is the
+manager's **warning** family, which renders as `warning[SL12xx]` on standard
+error and leaves the command running:
+
+- `SL1200`: a manifest sets a key this toolchain does not know, and the key is
+  ignored (`D-128`). It is raised for the manifests of the workspace being
+  acted on and for no others, because a dependency's manifest is the
+  dependency's business — the same rule `SL08xx` follows about a dependency's
+  source.
 
 A code marks **a refusal about something somebody wrote** — a manifest field, a
 dependency entry, a selection, a graph that cannot exist — which is a thing to
