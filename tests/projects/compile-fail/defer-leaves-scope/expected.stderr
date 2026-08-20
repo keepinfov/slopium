@@ -1,0 +1,3 @@
+error[SL0200]
+`try` cannot be written inside a `defer`
+`break` cannot leave the scope a `defer` is running in

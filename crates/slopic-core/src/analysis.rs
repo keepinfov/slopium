@@ -340,6 +340,7 @@ impl<'a> SymbolIndexBuilder<'a> {
             TExprKind::Var(binding) | TExprKind::Borrow { id: binding, .. } => {
                 self.binding_reference(*binding, expression.span, bindings);
             }
+            TExprKind::Defer(body) => self.expr(body, scope, bindings),
             TExprKind::Let {
                 id, name, value, ..
             } => {

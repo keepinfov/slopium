@@ -1,0 +1,5 @@
+; A `defer` takes a body, as every body has since `D-127`, and a body cannot be
+; empty: a `defer` that says nothing is a form nobody meant to write.
+(fn main () -> i32
+  (defer)
+  0)

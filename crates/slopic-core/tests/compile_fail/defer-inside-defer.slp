@@ -1,0 +1,5 @@
+; The inner one would register into a scope that is already on its way out,
+; which is a question about ordering nobody has answered (`D-133`).
+(fn main () -> i32
+  (defer (defer (len (& "text"))))
+  0)

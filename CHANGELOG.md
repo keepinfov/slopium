@@ -13,6 +13,14 @@ rather than everything it touched.
 
 ## [Unreleased]
 
+### Added
+- `(defer body ...)` runs its body when the enclosing scope ends, whatever
+  ended it: falling off the end, a `break`, a `continue`, or the error arm of a
+  `try`. Deferred expressions run in the reverse of the order they were
+  written, and all of them run before the scope releases what it owns, so a
+  file descriptor, a socket or a lock behind an `i64` is released where it was
+  decided rather than wherever the scope happens to end.
+
 ## [0.11.0] - 2026-08-20
 
 ### Added

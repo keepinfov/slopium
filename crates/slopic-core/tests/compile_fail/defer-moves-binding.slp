@@ -1,0 +1,9 @@
+; A deferred expression runs before the scope releases what it owns (`D-133`),
+; so a move inside one takes a value that is still going to be dropped.
+(fn consume ((text String)) -> i64
+  (len (& text)))
+
+(fn main () -> i32
+  (let message "the handle is closed")
+  (defer (consume message))
+  0)

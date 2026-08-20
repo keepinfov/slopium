@@ -122,6 +122,14 @@ maps and inserts drops at merges, so ownership correctness lives in the
 lowering code rather than in a later pass. `--emit mir-text` renders the whole
 module for reading.
 
+Ending a scope is two phases, in this order: what the scope deferred runs, then
+what it owns is dropped (`D-133`). `drop_scope_except` is the exit that falls
+off the end of a scope, and `unwind_scopes` is the one that leaves a range of
+them at once — a `break`, a `continue`, and the error arm of a `try`, which used
+to walk the live set and reproduce the drop order by hand. A deferred expression
+is held on its scope and lowered again at each exit, because there are no
+landing pads and no unwinder to share one copy between them.
+
 Register allocation is whole-interval: a local lives in one register for its
 entire function or in its frame slot for the entire function, with no interval
 splitting and no mid-interval reload. A local that loses the scan simply keeps
