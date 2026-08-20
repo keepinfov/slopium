@@ -671,6 +671,9 @@ struct Analyzer<'a> {
     /// against. A name the guard *made* is its own, which is what the floor
     /// distinguishes: ids only ever go up.
     guards: Vec<BindingId>,
+    /// How many composition lambdas this compilation has synthesized, so that
+    /// each one's parameter has a name of its own (`D-139`).
+    next_composition: usize,
     /// One entry per `defer` body being typed (`D-133`).
     defers: Vec<DeferFrame>,
     /// Where the `defer` is that reads each binding it borrowed (`D-133`).
@@ -849,6 +852,7 @@ impl<'a> Analyzer<'a> {
                 .map(|omission| (omission.name.clone(), omission.target.clone()))
                 .collect(),
             guards: Vec::new(),
+            next_composition: 0,
             defers: Vec::new(),
             deferred_reads: HashMap::new(),
             unsafe_depth: 0,
@@ -1554,6 +1558,10 @@ impl<'a> Analyzer<'a> {
             }
             ExprKind::Set { name, value } => self.set(expr, name, value),
             ExprKind::Do(expressions) => self.do_expr(expr, expressions, expected),
+            ExprKind::Compose {
+                rightward,
+                operands,
+            } => self.compose(expr, *rightward, operands, expected),
             ExprKind::Defer(body) => self.defer(expr, body),
             // `unsafe` leaves nothing behind in the typed IR. The permission is
             // spent here, at the point the operations inside it are checked, so
@@ -3252,6 +3260,142 @@ impl<'a> Analyzer<'a> {
     /// cannot be moved. The body is then typed against an environment holding
     /// the captures and the parameters and *nothing else*, which is what makes
     /// a name it forgot to capture a diagnostic rather than a silent move.
+    /// `(<< f g h)` and `(>> f g h)` as a value (`D-139`).
+    ///
+    /// It becomes a `lambda`, and it becomes one by being written as an AST
+    /// `lambda` and typed through the ordinary path rather than by assembling a
+    /// `TExprKind::Lambda` here. That is what makes the captures move, the
+    /// environment swap, the borrow refusals and the lifting all behave the way
+    /// they do everywhere else, for free — none of which this would get right
+    /// twice.
+    ///
+    /// Only the operands that are *local* are captured. A top-level `fn` is
+    /// callable from inside a lambda without being closed over, so composing
+    /// two of them — which is what nearly every composition is — allocates a
+    /// block holding nothing at all, and the applied form does not even do
+    /// that.
+    fn compose(
+        &mut self,
+        expr: &Expr,
+        rightward: bool,
+        operands: &[Expr],
+        expected: Option<&Type>,
+    ) -> TExpr {
+        let _ = rightward; // the parser already put them in application order
+        let mut chain = Vec::with_capacity(operands.len());
+        for operand in operands {
+            let ExprKind::Var { name, resolved } = &operand.kind else {
+                self.error(operand.span, "a composition operand is a name");
+                return self.typed(expr, Type::Unit, TExprKind::Unit);
+            };
+            // The resolved name is what the synthesized call uses; the
+            // written one is what a message says, because a module resolver
+            // made the other one up.
+            let written = name.clone();
+            let name = resolved.clone().unwrap_or_else(|| name.clone());
+            let Some((params, result, local)) = self.composed_function(&name) else {
+                self.error(
+                    operand.span,
+                    format!("unknown function `{written}` in a composition"),
+                );
+                return self.typed(expr, Type::Unit, TExprKind::Unit);
+            };
+            // Composition is over functions of one argument: `(f (g x))` has
+            // nowhere to put a second one.
+            let [param] = params.as_slice() else {
+                self.error(
+                    operand.span,
+                    format!(
+                        "`{written}` takes {} arguments, and a composition passes one along",
+                        params.len()
+                    ),
+                );
+                return self.typed(expr, Type::Unit, TExprKind::Unit);
+            };
+            chain.push((name, param.clone(), result, local, operand.span));
+        }
+
+        let Some((_, argument, ..)) = chain.last() else {
+            self.error(expr.span, "a composition composes at least one function");
+            return self.typed(expr, Type::Unit, TExprKind::Unit);
+        };
+        let argument = argument.clone();
+        let result = chain[0].2.clone();
+
+        // `(lambda (captures) ((x A)) -> C (f (g (h x))))`, written out and
+        // handed to the path that types every other lambda.
+        let parameter = self.composition_parameter();
+        let mut body = Expr {
+            kind: ExprKind::Var {
+                name: parameter.clone(),
+                resolved: None,
+            },
+            span: expr.span,
+        };
+        for (name, _, _, _, span) in chain.iter().rev() {
+            body = Expr {
+                kind: ExprKind::Call {
+                    callee: name.clone(),
+                    args: vec![body],
+                },
+                span: *span,
+            };
+        }
+        let captures = chain
+            .iter()
+            .filter(|(_, _, _, local, _)| *local)
+            .map(|(name, _, _, _, span)| Capture {
+                name: name.clone(),
+                span: *span,
+            })
+            .collect();
+        let synthesized = Expr {
+            kind: ExprKind::Lambda {
+                captures,
+                params: vec![Param {
+                    name: parameter,
+                    ty: argument,
+                    span: expr.span,
+                }],
+                result,
+                body: Box::new(body),
+            },
+            span: expr.span,
+        };
+        self.expr(&synthesized, expected)
+    }
+
+    /// What a composition operand is: its parameters, its result, and whether
+    /// it is a local binding rather than a top-level `fn` (`D-139`).
+    ///
+    /// A local has to be captured and a top-level `fn` must not be, which is
+    /// the only thing the caller does differently between them.
+    fn composed_function(&self, name: &str) -> Option<(Vec<Type>, Type, bool)> {
+        if let Some(id) = self.env.lookup_id(name) {
+            if let Some(binding) = self.env.bindings.get(&id) {
+                if let Type::Fn { params, result } = binding.ty.strip_ref() {
+                    return Some((params.clone(), (**result).clone(), true));
+                }
+            }
+        }
+        let signature = self.signatures.get(name)?;
+        // An `extern` is refused as a value by `function_value`, and the same
+        // reason applies here: its arguments are not one machine word each.
+        if signature.is_extern || !signature.type_params.is_empty() {
+            return None;
+        }
+        Some((signature.params.clone(), signature.result.clone(), false))
+    }
+
+    /// The name a composition's lambda gives the value it passes along.
+    ///
+    /// Spelled so that it cannot collide with anything a person wrote: `$` is
+    /// not in the lexer's atom alphabet for a name anybody types.
+    fn composition_parameter(&mut self) -> String {
+        self.next_composition += 1;
+        format!("compose${}", self.next_composition)
+    }
+
     fn lambda(
         &mut self,
         expr: &Expr,
@@ -5236,6 +5380,11 @@ fn collect_variable_names(expr: &Expr, output: &mut HashSet<String>) {
             output.insert(name.clone());
         }
         ExprKind::Let { value, .. } => collect_variable_names(value, output),
+        ExprKind::Compose { operands, .. } => {
+            for operand in operands {
+                collect_variable_names(operand, output);
+            }
+        }
         // A deferred expression runs at the end of the scope, so every name it
         // reads is live until then however far above the last other use it was
         // written (`D-133`).

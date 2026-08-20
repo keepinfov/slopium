@@ -1,0 +1,5 @@
+; `<<` composes at least one function; composing none is a form nobody meant to
+; write (`D-139`).
+(fn main () -> i32
+  (let f (<<))
+  0)

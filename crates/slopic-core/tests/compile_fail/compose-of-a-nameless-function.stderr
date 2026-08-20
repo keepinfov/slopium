@@ -1,0 +1,4 @@
+compose-of-a-nameless-function.slp:7:21: error[SL0100]: `<<` composes functions by name; give this one a name with `let`
+  |
+ 7 |   (let f (<< double (lambda () ((x i64)) -> i64 x)))
+  |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
