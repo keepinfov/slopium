@@ -30,6 +30,10 @@ rather than everything it touched.
   message that says to name the value instead.
 
 ### Changed
+- A manifest key this toolchain does not know is reported as
+  `warning[SL1200]` and ignored, instead of refusing the manifest, so a package
+  written for a later toolchain still resolves and builds. The archive carries
+  the key unchanged. `.slopium/config.toml` still refuses one.
 - The library's six integer and float printers, and the float formatter, lost
   the bindings that existed only to give a value a name.
 - The standard library, the fixtures and the examples are written in the new

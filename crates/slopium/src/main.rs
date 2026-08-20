@@ -349,7 +349,7 @@ fn main() {
             })
         }
         Commands::Fmt { check, select } => {
-            load_workspace(cli.manifest_path).and_then(|workspace| {
+            open_workspace(cli.manifest_path).and_then(|workspace| {
                 let mut differences = Vec::new();
                 for project in select.all(&workspace)? {
                     differences.extend(format_project(project, check)?);
@@ -368,7 +368,7 @@ fn main() {
             })
         }
         Commands::Clean(select) => {
-            load_workspace(cli.manifest_path).and_then(|workspace| clean(&workspace, &select))
+            open_workspace(cli.manifest_path).and_then(|workspace| clean(&workspace, &select))
         }
         Commands::Package {
             index_entry,
@@ -474,6 +474,23 @@ fn main() {
         eprintln!("slopium: {error}");
         std::process::exit(1);
     }
+}
+
+/// The workspace this command acts on, with every manifest key the toolchain
+/// does not know reported once (`D-128`).
+///
+/// The reporting is here rather than in the manager's library half, which
+/// prints nothing at all, and it is the one place a command loads a workspace,
+/// so a key is named once however many members were selected afterwards.
+fn open_workspace(manifest_path: Option<PathBuf>) -> Result<Workspace, String> {
+    let workspace = load_workspace(manifest_path)?;
+    for (path, key) in &workspace.unknown_keys {
+        eprintln!(
+            "slopium: warning[SL1200]: `{}` sets `{key}`, which this toolchain does not know; it is ignored",
+            path.display()
+        );
+    }
+    Ok(workspace)
 }
 
 /// Format one package, returning the files that were not already formatted.
@@ -702,7 +719,7 @@ impl Session {
         replacements: bool,
         update: Option<&Update>,
     ) -> Result<Self, String> {
-        let mut workspace = load_workspace(manifest_path)?;
+        let mut workspace = open_workspace(manifest_path)?;
         if !replacements {
             workspace.config.source.clear();
         }
@@ -1418,7 +1435,7 @@ fn add(
     validate_package_name(name)?;
     let entry = added.entry(requirement)?;
 
-    let workspace = load_workspace(manifest_path.clone())?;
+    let workspace = open_workspace(manifest_path.clone())?;
     let project = select.one(&workspace, "add")?;
     let edited = with_dependency(&project.manifest_source, name, Some(&entry))?;
     fs::write(&project.manifest_path, edited).map_err(|error| {
@@ -1445,7 +1462,7 @@ fn remove(
     args: ResolveArgs,
     select: &SelectArgs,
 ) -> Result<(), String> {
-    let workspace = load_workspace(manifest_path.clone())?;
+    let workspace = open_workspace(manifest_path.clone())?;
     let project = select.one(&workspace, "remove")?;
     if !project.dependencies.contains_key(name) {
         return Err(format!(
@@ -1514,7 +1531,7 @@ fn update(
 
 /// What the lockfile pinned before an update, so the report can say what moved.
 fn updatable_lock(manifest_path: Option<PathBuf>) -> Result<BTreeMap<String, Version>, String> {
-    let workspace = load_workspace(manifest_path)?;
+    let workspace = open_workspace(manifest_path)?;
     let Ok(text) = fs::read_to_string(workspace.lock_path()) else {
         return Ok(BTreeMap::new());
     };

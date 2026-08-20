@@ -317,6 +317,31 @@ which is what putting a package into a static tree takes. It is also where
 `D-054` is enforced from the writing side: a manifest that depends on a
 directory or a repository cannot become an index entry.
 
+### A key the toolchain does not know
+
+A manifest is read by every toolchain that ever sees the package, and not only
+by the one that wrote it. So a key this toolchain does not know is **reported
+and ignored**, not refused (`D-128`):
+
+```text
+slopium: warning[SL1200]: `/w/Slopium.toml` sets `edition`, which this toolchain does not know; it is ignored
+```
+
+The archive carries the key verbatim — nothing is rewritten on the way through
+— and the ignored key changes nothing about what was resolved or built. What
+this costs is the typo check that refusing gave for free, which is why the key
+is named rather than dropped in silence: a setting that quietly does nothing is
+worse than one that is refused.
+
+The warning belongs to the manifests of the workspace being acted on. A
+dependency's manifest is the dependency's business, and a consumer that cannot
+edit it has nothing to do with the message.
+
+`.slopium/config.toml` is the exception and still refuses. It is this
+checkout's own file, written by whoever runs the build and shipped nowhere, so
+a key nobody knows there is a mistake rather than a message from a later
+version.
+
 ## Signing and publishing
 
 ```sh
