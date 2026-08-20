@@ -13,6 +13,8 @@ rather than everything it touched.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-08-20
+
 ### Added
 - The C boundary carries three more shapes: C can fill a `(&mut (List T))` or a
   `(&mut (Array T N))`, write through a `(&mut ...)` out-parameter of a
@@ -297,7 +299,8 @@ The baseline this changelog was reconstructed from: the language core, the
 package manager, the language server and the Neovim plugin as they stood when
 tagging began.
 
-[Unreleased]: https://github.com/keepinfov/slopium/compare/v0.9.2...HEAD
+[Unreleased]: https://github.com/keepinfov/slopium/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/keepinfov/slopium/compare/v0.9.2...v0.10.0
 [0.9.2]: https://github.com/keepinfov/slopium/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/keepinfov/slopium/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/keepinfov/slopium/compare/v0.8.5...v0.9.0
