@@ -65,8 +65,11 @@ command-line protocol is internal and versioned.
    out of the block and jump to it (`D-101`). Every statement carries the span
    of the expression it came from, and every block is terminated by
    construction.
-8. The release profile runs an optimization pipeline to a fixpoint: bounded
-   inlining, cross-block constant propagation — which stops tracking a local
+8. The release profile runs an optimization pipeline to a fixpoint:
+   devirtualization — a call through a closure block built in the same straight
+   line names the symbol instead of jumping through the block, which runs before
+   inlining because an ordinary call is the only shape the inliner matches
+   (`D-141`) — then bounded inlining, cross-block constant propagation — which stops tracking a local
    the moment its address is taken, because a C `extern` with an out-parameter
    writes through that address (`D-124`) — control-flow simplification, and
    dead code elimination. Two behaviours are preserved by construction —
