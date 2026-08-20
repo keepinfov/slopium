@@ -139,6 +139,7 @@ of what was believed at the time is the part worth keeping.
 - [D-124 — the C boundary opens by three rows, and none of them is a slice](#d-124--the-c-boundary-opens-by-three-rows-and-none-of-them-is-a-slice)
 - [D-125 — `format` is reserved at the freeze, and nothing is built](#d-125--format-is-reserved-at-the-freeze-and-nothing-is-built)
 - [D-126 — a temporary is borrowed where a call takes it, and dies there](#d-126--a-temporary-is-borrowed-where-a-call-takes-it-and-dies-there)
+- [D-127 — a body is as many expressions as it needs, and a one-sided condition is `when`](#d-127--a-body-is-as-many-expressions-as-it-needs-and-a-one-sided-condition-is-when)
 - [D-128 — a manifest survives a key it does not know, and a config does not](#d-128--a-manifest-survives-a-key-it-does-not-know-and-a-config-does-not)
 
 ## D-001 — a native compiler, without LLVM
@@ -2387,6 +2388,48 @@ one more producer: the borrow pushes what it owns onto a stack, and the
 expression wrapper drains the stack after any call it lowered, innermost first.
 Neither backend learned anything, and no MIR instruction was added — the borrow
 is the `AddressOf` a borrow always was.
+
+## D-127 — a body is as many expressions as it needs, and a one-sided condition is `when`
+
+Status: approved · 2026-08-20
+
+A `match` arm was one expression and an `if` branch was one expression, so an
+arm that did two things was written `(do ...)` and a condition with no second
+branch was written `(if condition (do ...) ())`. Both are grammar, both had to
+be settled before the freeze, and they are one decision because the second is
+only worth having once the first exists: `when` without a multi-expression body
+would be a word that saves a `()` and still costs a `do`.
+
+An arm takes a pattern, an optional guard and then as many expressions as it
+needs, answering the last. That is why the guard is found by the word `when`
+after the pattern rather than by counting the arm's elements — an arm of four
+elements is now a body of three, and the old rule would have read it as a
+guard.
+
+An `if` puts its extra expressions in the tail, which is the `else` branch;
+`then` stays a single expression. The asymmetry is deliberate. With an `else`
+that is never optional there is no second boundary to find, and the shape the
+language actually writes is a function answering early: the short answer above,
+the work below. The bundled library agreed before the rule existed — twenty-six
+`if`s had a block in the `else` and none had one in both branches — so the tail
+form fits what was already there rather than inviting a new layout.
+
+`when` runs its body when the condition holds and answers `unit` either way. It
+is the same word as the arm guard, in head position, which is decided here
+rather than discovered later: a guard follows a pattern and a `when` form
+begins one, so no arm and no expression is ambiguous. Nothing downstream
+learned the word — it is parsed into an `if` whose `then` is a `do` with a
+`unit` after it and whose `else` is `unit`, so a body ending in a value drops
+it exactly where a `do` would, and neither MIR nor either backend has a case
+for it.
+
+Rewriting the library into the new forms is what showed the size of the thing:
+fifty-seven blocks and twenty-eight `()` branches disappeared, and three of
+those branches were the *first* one — `(if condition () work)` — which is now
+`(when (not condition) work)` and says what it means. The formatter needed no
+change and agreed with the mechanical result line for line, which is the
+strongest evidence available that the new shapes are the ones the layout rules
+were already describing.
 
 ## D-128 — a manifest survives a key it does not know, and a config does not
 

@@ -14,6 +14,11 @@ rather than everything it touched.
 ## [Unreleased]
 
 ### Added
+- `when` is the one-sided conditional: `(when condition body ...)` runs the body
+  when the condition holds and answers `unit` either way, so `()` no longer
+  stands in for a branch nobody wrote.
+- A `match` arm and the `else` branch of an `if` take as many expressions as
+  they need and answer the last, which is where `(do ...)` used to be written.
 - A temporary can be borrowed where a call takes it: `(println (& "hello"))` and
   `(println (& (from-i64 id)))` are programs now. The value lives until that
   call returns and is dropped there, so an argument is the only position it is
@@ -27,6 +32,9 @@ rather than everything it touched.
   the key unchanged. `.slopium/config.toml` still refuses one.
 - The library's six integer and float printers, and the float formatter, lost
   the bindings that existed only to give a value a name.
+- The standard library, the fixtures and the examples are written in the new
+  forms: fifty-seven `(do ...)` blocks are gone, and not one branch is written
+  `()` any more.
 
 ## [0.10.0] - 2026-08-20
 

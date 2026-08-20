@@ -11,9 +11,8 @@
   (let mut messages (list "modules" "ownership"))
   (match (pop (&mut messages))
     ((Option:Some message)
-      (do
-        (println (& message))
-        0))
+      (println (& message))
+      0)
     ((Option:None) 1)))
 
 (test "cross-module call"
