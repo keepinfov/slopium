@@ -14,6 +14,10 @@ rather than everything it touched.
 ## [Unreleased]
 
 ### Added
+- `core:string` writes hexadecimal, re-exported by `std:string`:
+  `hex-from-u64` for the digits and `hex-prefixed-from-u64` for the same under
+  `0x`. The width pads and never truncates, and the glyphs are uppercase, so
+  what is printed can be pasted back into a program as a literal.
 - `when` is the one-sided conditional: `(when condition body ...)` runs the body
   when the condition holds and answers `unit` either way, so `()` no longer
   stands in for a branch nobody wrote.
