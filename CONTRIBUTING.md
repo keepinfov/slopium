@@ -72,6 +72,11 @@ Draft while it settles, ready when the suite is green. The title is the subject
 of the merge commit, so it obeys the commit contract; the description says what
 changed, why, how it was verified, and what could not be verified here.
 
+**Your title is published.** The release page for whichever version your change
+lands in is generated from the merge commits it added, one line each, and
+nobody edits it afterwards — a vague title stays vague in front of everyone who
+downloads the toolchain. Write it for that reader (`D-131`).
+
 CI runs formatting, clippy, the Rust tests, the language fixtures, the commit
 contract, and the whole of `scripts/verify.sh` inside the dev shell with
 `SLOPIUM_STRICT=1`.

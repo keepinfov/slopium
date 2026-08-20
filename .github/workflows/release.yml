@@ -153,24 +153,59 @@ jobs:
       id-token: write
       attestations: write
     steps:
+      # The whole history and every tag: the notes are a walk from the previous
+      # tag to this one, and a shallow clone has neither end of it.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/download-artifact@v4
         with:
           name: release-assets
           path: dist
 
-      - name: the release notes are the changelog's own section
+      - name: the release notes are what was merged, and then why
         env:
+          TAG: ${{ github.ref_name }}
           VERSION: ${{ needs.verify.outputs.version }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           set -eu
-          awk -v version="$VERSION" '
-            $0 == "## [" version "]" || index($0, "## [" version "] - ") == 1 { inside = 1; next }
-            /^## \[/ { inside = 0 }
-            inside { print }
-          ' CHANGELOG.md > notes.md
-          test -s notes.md
+          # One line per pull request, because a merge commit's subject is the
+          # pull request's title and `--first-parent` walks nothing else
+          # (`D-131`). A title nobody thought about is published verbatim,
+          # which is the point of generating this half rather than writing it.
+          # The release commit is dropped: it is the bookkeeping that made this
+          # tag, not something the tag delivers.
+          previous="$(git describe --tags --abbrev=0 "$TAG^" 2>/dev/null || true)"
+          if [ -n "$previous" ]; then
+            range="$previous..$TAG"
+          else
+            range="$TAG"
+          fi
+          {
+            echo "## What changed"
+            echo
+            git log --first-parent --reverse --format='- %s' \
+              --invert-grep --grep='^chore(release): ' "$range"
+            echo
+            echo "## Why"
+            echo
+            # The changelog says what a user would notice and why it was worth
+            # doing, which no subject line can carry. It is the half a person
+            # writes, under the half a machine writes.
+            awk -v version="$VERSION" '
+              $0 == "## [" version "]" || index($0, "## [" version "] - ") == 1 { inside = 1; next }
+              /^## \[/ { inside = 0 }
+              inside { print }
+            ' CHANGELOG.md | sed -e '/./,$!d'
+            if [ -n "$previous" ]; then
+              echo
+              echo "**Full changelog**: https://github.com/$REPOSITORY/compare/$previous...$TAG"
+            fi
+          } > notes.md
+          grep --quiet '^- ' notes.md ||
+            { echo "the tag adds no pull request to $previous" >&2; exit 1; }
           cat notes.md
 
       # For a toolchain people install and run, provenance is not decoration:

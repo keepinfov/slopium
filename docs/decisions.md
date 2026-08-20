@@ -143,6 +143,7 @@ of what was believed at the time is the part worth keeping.
 - [D-128 — a manifest survives a key it does not know, and a config does not](#d-128--a-manifest-survives-a-key-it-does-not-know-and-a-config-does-not)
 - [D-129 — hexadecimal is two functions and an uppercase table](#d-129--hexadecimal-is-two-functions-and-an-uppercase-table)
 - [D-130 — failing on purpose, and a failing test that says what it compared](#d-130--failing-on-purpose-and-a-failing-test-that-says-what-it-compared)
+- [D-131 — the release page is generated from the titles that were merged](#d-131--the-release-page-is-generated-from-the-titles-that-were-merged)
 
 ## D-001 — a native compiler, without LLVM
 
@@ -2557,3 +2558,34 @@ fails.
 asserts that its tests pass, which is precisely the case where a failure has
 nothing to report, so what a failing test says was held to nothing at all until
 a fixture failed on purpose.
+
+## D-131 — the release page is generated from the titles that were merged
+
+Status: approved · 2026-08-20
+
+The release notes were the `CHANGELOG.md` section and nothing else, which meant
+a pull request's title was read once, by whoever merged it, and then never
+again. The title is already load-bearing — it becomes the merge commit's
+subject, which is what `git log --first-parent` prints — so the cheapest way to
+make it matter was to publish it.
+
+The first half of a release page is now one line per pull request the tag adds,
+taken from the merge commits with `git log --first-parent` between the previous
+tag and this one. Nothing rewrites it afterwards, deliberately: a title nobody
+thought about appears verbatim in front of everybody who downloads the
+toolchain, and the place to fix that is the title, before the merge. It is a
+lever on the one piece of writing every change already has to produce, and it
+costs a shell step.
+
+The second half stays the changelog's own section, because a subject line
+cannot carry why a change was worth making and a generated list of them is a
+table of contents rather than an account. So the page reads as the machine's
+half over the person's half, and the version's section still has to exist —
+`release-check.sh` already refuses a tag whose changelog section is missing.
+
+Two details fall out of the walk. The release commit is dropped from the list,
+because `chore(release): vX.Y.Z` is the bookkeeping that made the tag rather
+than something the tag delivers. And the job that builds the page needs the
+whole history and every tag, where every other job in that workflow is happy
+with a shallow clone: a walk from the previous tag has neither end of it
+otherwise.

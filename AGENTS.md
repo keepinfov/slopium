@@ -353,6 +353,14 @@ toolchain, and leaves a **draft** release with the artifacts and their checksums
 attached. A person presses publish, because a release is the one thing in this
 repository that another commit cannot undo.
 
+**The release page is generated, and that is deliberate.** Its first half is
+one line per pull request the tag adds, taken from the merge commits with
+`git log --first-parent`, so a pull request's title is published verbatim
+wherever anybody looks at a release. Nobody rewrites it there afterwards; the
+place to make it read well is the title, before the merge (`D-131`). Its second
+half is that version's `CHANGELOG.md` section, which is the part a person
+writes and says why a change was worth making.
+
 Proposing a release is yours; performing one is not. Do not set a version, cut a
 release branch, or create a tag without being asked to. Tags up to `v0.9.2` are
 lightweight; every tag from now on is annotated.
