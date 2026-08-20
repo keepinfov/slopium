@@ -1,0 +1,4 @@
+(extern "c_apply" (c-apply (step (Fn ((& String)) i64))) -> i64)
+
+(fn main () -> i32
+  0)

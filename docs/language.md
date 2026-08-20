@@ -777,21 +777,64 @@ Slopium calls, and it is an ordinary module-level item — private by default,
   0)
 ```
 
-The type vocabulary is closed. A parameter is any integer type, `f64`, `bool`,
-`(Ptr T)`, `(& String)`, or `(& (Slice T))`. A return is `unit`, one of those
-scalars, `(Ptr T)`, or an owned `String`. Anything else is refused at the
-declaration, and an `extern` cannot be generic: there is nothing a type
-parameter could stand for.
+The type vocabulary is closed, and this is the whole of it (`D-065`, `D-124`):
+
+| Written | C sees | Direction |
+| --- | --- | --- |
+| any integer type, `f64`, `bool` | the same scalar | in |
+| `(Ptr T)` | `T *` | in and out |
+| `(& String)` | `const char *`, NUL-terminated | in |
+| `(& (Slice T))` | `const T *` and an `int64_t` count, two arguments | in |
+| `(&mut (List T))`, `(&mut (Array T N))` | `T *` and an `int64_t` count, two arguments | in, and C may write |
+| `(&mut i64)`, `(&mut u64)`, `(&mut f64)`, `(&mut (Ptr T))` | `int64_t *`, `uint64_t *`, `double *`, `T **` | out |
+| `(Fn (…) …)` over scalars | a function pointer | in |
+
+A return is `unit`, a scalar, `(Ptr T)`, or an owned `String`. Anything else is
+refused at the declaration, and an `extern` cannot be generic: there is nothing
+a type parameter could stand for.
 
 A `(Ptr T)` is C's `T *`. Receiving one needs no `unsafe` — a pointer is an
 ordinary value until something reads through it.
 
-An `extern` borrows and never moves. A `(& String)` arrives as a
-NUL-terminated `const char *`; a `(& (Slice T))` arrives as two arguments, the
-element pointer and then the element count. The borrow ends when the call
-returns, so C must copy anything it intends to keep. To return a `String`, C
-allocates one with the runtime's `sl_rt_string_new(const char *, uint64_t)`;
-the caller owns it and drops it as it would any other.
+An `extern` borrows and never moves. The borrow ends when the call returns, so
+C must copy anything it intends to keep. To return a `String`, C allocates one
+with the runtime's `sl_rt_string_new(const char *, uint64_t)`; the caller owns
+it and drops it as it would any other.
+
+**C writes into what you own, borrowed exclusively.** A `(&mut (List T))` or a
+`(&mut (Array T N))` arrives as the element pointer and the element count, and C
+may fill the elements it was given; it may not resize the collection, and it may
+not keep the pointer. A `(Slice T)` is not offered here: it does not record
+whether it was made from a shared or an exclusive borrow, so writing through one
+could write through a loan somebody else is reading.
+
+**An out-parameter is a whole machine word.** Every integer is held canonical in
+one (`D-113`), so `(&mut i32)` would hand C an `int32_t *` pointing at a slot
+whose upper half the language still owns; the narrow widths and `bool` are
+refused by name, and the answer for one is a `(Ptr i32)` and an `unsafe` read.
+
+**A callback is a named function.** `(Fn (i64) i64)` in a declaration is a C
+function pointer, and the argument at that position must name a top-level `fn`:
+
+```lisp
+(extern "hal_apply" (hal-apply (step (Fn (i64) i64)) (value i64)) -> i64)
+
+(fn add-three ((value i64)) -> i64 (+ value 3))
+
+(fn main () -> i32
+  (println-i64 (hal-apply add-three 1))
+  0)
+```
+
+A `lambda` is refused there, and so is a local holding a function value: both
+are blocks with an environment, and a C function pointer has nowhere to carry
+one. The callback is entered with Slopium's own convention, where every argument
+is one machine word, so its parameters and its result are scalars.
+
+Aggregates do not cross in either direction. A Slopium struct is not a C
+struct — every field is a machine word and the value is a heap block — so a
+record with C's layout is a different kind of type, and it arrives with the
+target that needs it.
 
 Two things the vocabulary does not say for you. C's `size_t` has no Slopium
 spelling and is declared as `u64` on the targets that exist; the fixed widths

@@ -37,6 +37,25 @@ int64_t probe_slice(const int64_t *values, int64_t len) {
 }
 
 SlString *probe_string(void) { return sl_rt_string_new("from C", 6); }
+
+/* What `D-124` opened, and the reason it belongs under a leak checker: a
+ * buffer C writes into is where a length error becomes memory corruption
+ * rather than a wrong answer, and a callback is where a value the caller still
+ * owns is reached from a frame the caller cannot see. */
+void probe_fill(int64_t *values, int64_t len) {
+    for (int64_t index = 0; index < len; index++) {
+        values[index] = index + 1;
+    }
+}
+
+int64_t probe_out(int64_t value, int64_t *doubled) {
+    *doubled = value * 2;
+    return value + 1;
+}
+
+int64_t probe_apply(int64_t (*step)(int64_t), int64_t value) {
+    return step(value);
+}
 PROBE
 
 cat >"$check_dir/runtime.slp" <<'SLOPIUM'
@@ -175,6 +194,12 @@ cat >"$check_dir/runtime.slp" <<'SLOPIUM'
 (extern "probe_strlen" (probe-strlen (text (& String))) -> i64)
 (extern "probe_slice" (probe-slice (values (& (Slice i64)))) -> i64)
 (extern "probe_string" (probe-string) -> String)
+(extern "probe_fill" (probe-fill (into (&mut (List i64)))) -> unit)
+(extern "probe_out" (probe-out (value i64) (doubled (&mut i64))) -> i64)
+(extern "probe_apply" (probe-apply (step (Fn (i64) i64)) (value i64)) -> i64)
+
+(fn stepped ((value i64)) -> i64
+  (+ value 1))
 
 (fn main () -> i32
   (let number
@@ -340,6 +365,16 @@ cat >"$check_dir/runtime.slp" <<'SLOPIUM'
   (println-i64 (probe-slice (& number-view)))
   (let greeting (probe-string))
   (println (& greeting))
+  ; A buffer C fills, an out-parameter it writes through, and a call back into
+  ; a function this program defines. The list is grown first so that what C
+  ; writes into is a heap block the allocator has already moved once.
+  (let mut filled (list 0 0))
+  (do (push (&mut filled) 0))
+  (probe-fill (&mut filled))
+  (println-i64 (+ (+ (get (& filled) 0) (get (& filled) 1)) (get (& filled) 2)))
+  (let mut doubled 0)
+  (println-i64 (+ (probe-out 20 (&mut doubled)) doubled))
+  (println-i64 (probe-apply stepped 41))
   (match message
     ((Message:Empty) 1)
     ((Message:Text value) (do (println (& value)) 0))))

@@ -1,0 +1,6 @@
+(extern "c_apply" (c-apply (step (Fn (i64) i64)) (value i64)) -> i64)
+
+(fn main () -> i32
+  (let held 2)
+  (let answer (c-apply (lambda (held) ((n i64)) -> i64 (+ n held)) 1))
+  0)

@@ -1,0 +1,6 @@
+extern-callback-vocabulary.slp:1:28: error[SL0200]: `Fn(&String) -> i64` cannot cross the C boundary as the parameter `step`
+  |
+ 1 | (extern "c_apply" (c-apply (step (Fn ((& String)) i64))) -> i64)
+  |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  = help: an `extern` parameter is an integer type, `f64`, `bool`, `(Ptr T)`, `(& String)`, `(& (Slice T))`, `(&mut (List T))`, `(&mut (Array T N))`, a `(&mut ...)` of a word-width scalar, or a `(Fn ...)` over scalars
+  = note: a `(Fn ...)` an `extern` takes is entered from C, so each parameter and the result is an integer type, `f64`, `bool` or `(Ptr T)`, and the result may be `unit`

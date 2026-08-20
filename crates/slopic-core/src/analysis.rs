@@ -400,6 +400,10 @@ impl<'a> SymbolIndexBuilder<'a> {
             // function, so rename and go-to-definition must follow it: a
             // rename that misses one renames a program into a different one.
             TExprKind::FnRef { name, .. } => self.top_level_reference(name, expression.span),
+            // The same reference, one word narrower: what C is handed is the
+            // address of a function somebody wrote, and renaming it has to
+            // reach here too (`D-124`).
+            TExprKind::FnPointer { name } => self.top_level_reference(name, expression.span),
             TExprKind::CallValue { callee, args } => {
                 self.binding_reference(*callee, expression.span, bindings);
                 for argument in args {

@@ -1,0 +1,6 @@
+extern-callback-closure.slp:5:24: error[SL0200]: `c-apply` takes a named function here, not a function value
+  |
+ 5 |   (let answer (c-apply (lambda (held) ((n i64)) -> i64 (+ n held)) 1))
+  |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  = help: name a top-level `fn`: C is handed its address
+  = note: a `lambda` is a block holding what it captured, and a C function pointer has nowhere to carry an environment

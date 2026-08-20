@@ -303,8 +303,19 @@ fn apply(instruction: &Instruction, state: &mut State) {
         // reported the destination — a silent coupling between two files, whose
         // failure mode is a device register folded to a constant (`D-067`).
         Instruction::VolatileLoad { dst, .. } => set(state, *dst, Value::Varying),
+        // Taking a local's address ends what this pass can say about the local
+        // itself, and not only about the word the address lands in. The slot is
+        // reachable from somewhere the pass does not model — a C function with
+        // a `(&mut T)` out-parameter writes through it (`D-124`) — so a value
+        // that was known before the borrow is not known after it. Until an
+        // out-parameter existed nothing could write through a scalar borrow and
+        // this was unreachable; the cross-backend suite caught it on the first
+        // release build that had one.
+        Instruction::AddressOf { dst, src } => {
+            set(state, *src, Value::Varying);
+            set(state, *dst, Value::Varying)
+        }
         Instruction::StringNew { dst, .. }
-        | Instruction::AddressOf { dst, .. }
         | Instruction::Call { dst, .. }
         | Instruction::FnAddr { dst, .. }
         | Instruction::CallValue { dst, .. }

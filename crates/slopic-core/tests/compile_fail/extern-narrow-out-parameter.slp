@@ -1,0 +1,4 @@
+(extern "c_count" (c-count (out (&mut i32))) -> unit)
+
+(fn main () -> i32
+  0)

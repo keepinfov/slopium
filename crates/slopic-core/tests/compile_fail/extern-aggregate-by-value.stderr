@@ -1,0 +1,6 @@
+extern-aggregate-by-value.slp:3:28: error[SL0200]: `Point` cannot cross the C boundary as the parameter `at`
+  |
+ 3 | (extern "c_place" (c-place (at Point)) -> unit)
+  |                            ^^^^^^^^^^
+  = help: an `extern` parameter is an integer type, `f64`, `bool`, `(Ptr T)`, `(& String)`, `(& (Slice T))`, `(&mut (List T))`, `(&mut (Array T N))`, a `(&mut ...)` of a word-width scalar, or a `(Fn ...)` over scalars
+  = note: a struct or an enum does not cross the boundary in either direction: a record with C's layout is a different kind of type, and it arrives with the target that needs it

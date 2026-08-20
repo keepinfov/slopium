@@ -136,6 +136,7 @@ of what was believed at the time is the part worth keeping.
 - [D-121 — the everyday forms, and where a type is written down](#d-121--the-everyday-forms-and-where-a-type-is-written-down)
 - [D-122 — an annotation is a list before the name, and a warning belongs to a compilation](#d-122--an-annotation-is-a-list-before-the-name-and-a-warning-belongs-to-a-compilation)
 - [D-123 — the version belongs to the release, and the decision log is public](#d-123--the-version-belongs-to-the-release-and-the-decision-log-is-public)
+- [D-124 — the C boundary opens by three rows, and none of them is a slice](#d-124--the-c-boundary-opens-by-three-rows-and-none-of-them-is-a-slice)
 
 ## D-001 — a native compiler, without LLVM
 
@@ -2226,3 +2227,75 @@ entries a rewrite rather than a copy: the record is what was decided and why,
 addressed to nobody, with no path into anything a clone does not contain.
 `.notes/` keeps what it is for — status, roadmap, plans, handoffs, and drafts of
 decisions not yet taken.
+
+## D-124 — the C boundary opens by three rows, and none of them is a slice
+
+Status: approved · 2026-08-19
+
+`D-065` closed the FFI vocabulary on purpose and the closure held for four
+milestones, at the cost of three things the language could not otherwise reach:
+C could not write into a buffer, so every hosted primitive was shaped "C
+allocates and returns"; there was no spelling for an out-parameter; and a
+function pointer could not cross, which is what a thread library over
+`pthread_create` would be written on. Each is one row, and the rows are opened
+before the freeze because widening a table afterwards is compatible while the
+shape of what the rows *mean* is not.
+
+**C fills what you own, borrowed exclusively.** A `(&mut (List T))` or a
+`(&mut (Array T N))` crosses as the element pointer and the element count, read
+out of `SlList` at fixed offsets the way a `Slice` already was. A `(Slice T)` is
+deliberately not offered on the writing side: it does not record whether it was
+made from a shared or an exclusive borrow, so a safe call could have C write
+through a loan somebody else is reading — and closing that would mean either a
+flag on a binding that does not survive the slice being moved, or mutability in
+the type, which is a change to what a slice *is*. The collection states its
+exclusivity in the type, so the property survives being passed through a Slopium
+signature, and reading is unaffected: that is what `(& (Slice T))` is for.
+Every element is one machine word whatever `T` is (`D-113`), so what C is handed
+is an array of `int64_t` and a byte-at-a-time API needs a shim; the alternative,
+passing the element size as a third word, was refused for making the writing row
+disagree with the reading one about what a buffer looks like.
+
+**An out-parameter is a whole machine word.** `(&mut i64)`, `(&mut u64)`,
+`(&mut f64)` and `(&mut (Ptr T))` cross as `int64_t *`, `uint64_t *`, `double *`
+and `T **`. The narrow integers and `bool` are refused by name, because an
+integer is held canonical in a full word: C writing four bytes through an
+`int32_t *` would leave the upper half of the slot holding what was there, and
+the next read of it would be a different number. That refusal costs `int *out`,
+which is common in POSIX, and it is still the right one — the answer for a
+narrow slot is a `(Ptr i32)` and an `unsafe` write, and widening this row later
+is additive where getting it wrong now is not.
+
+**A callback is a named function.** A `(Fn ...)` in a declaration is a C
+function pointer and the argument at that position must name a top-level `fn`,
+which lowers to the symbol's address and nothing else. A `lambda` is refused by
+name, and so is a local holding a function value: since `D-101` a function value
+is a heap block with a header and an environment, and a `void (*)(...)` has
+nowhere to carry one. The callback is entered with Slopium's own convention, so
+its own parameters and result are scalars — a borrowed string would arrive as a
+pointer to a runtime structure where C would have passed a `char *`, and an
+owned result would move ownership out of a function C called, which `D-065`
+refuses in the other direction for the same reason.
+
+**Aggregates stay refused, by name.** A Slopium struct is not a C struct — every
+field is a machine word and the value is a heap block — so passing one is not a
+row in a table but a foreign record: a second kind of type with C's layout,
+needing `repr`, its own field access and its own drop story. By value it is
+worse, being the eightbyte classification and its AAPCS64 counterpart. It
+arrives with the target that needs it (`D-110`).
+
+None of this costs a MIR instruction or a backend line. The two new words are
+`ExternWord::Indirect` at another offset, the address of a scalar is the
+`AddressOf` that a borrow already emits, and a function pointer is the `FnAddr`
+that `D-092` added — which is why the compiler protocol does not move.
+
+What the work uncovered is worth more than the rows. **Constant propagation kept
+folding a local after its address had been taken**: `AddressOf` marked its
+destination varying and said nothing about its source, so a `(let mut half 0.0)`
+handed to C as an out-parameter still read as `0.0` afterwards in a release
+build. Nothing could write through a scalar borrow before this — a `(&mut T)`
+parameter is refused as an assignment target (`D-120`) — so the hole was
+unreachable rather than absent, and it was reachable the moment C could write.
+The cross-backend suite caught it on the first release build that had one, which
+is `D-026` doing exactly what it is for: the dev build agreed with the release
+build about everything else, and the two disagreed here.

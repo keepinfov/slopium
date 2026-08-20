@@ -1,0 +1,4 @@
+(extern "c_fill" (c-fill (into (&mut (Slice i64)))) -> unit)
+
+(fn main () -> i32
+  0)

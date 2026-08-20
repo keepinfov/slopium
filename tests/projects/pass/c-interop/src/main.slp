@@ -24,6 +24,22 @@
 
 (extern "hal_peek" (hal-peek (at (Ptr u8))) -> i64)
 
+; What `D-124` opened. C fills a collection the caller owns, writes through an
+; out-parameter whose slot is a machine word, and calls a function this program
+; defines.
+(extern "hal_fill" (hal-fill (into (&mut (List i64)))) -> unit)
+
+(extern "hal_fill" (hal-fill-array (into (&mut (Array i64 4)))) -> unit)
+
+(extern "hal_divmod" (hal-divmod (value i64) (by i64) (rest (&mut i64))) -> i64)
+
+(extern "hal_fraction" (hal-fraction (value f64) (whole (&mut f64))) -> f64)
+
+(extern "hal_apply_twice" (hal-apply-twice (step (Fn (i64) i64)) (value i64)) -> i64)
+
+(fn add-three ((value i64)) -> i64
+  (+ value 3))
+
 (fn doubled ((value i32)) -> i32
   (hal-narrow value))
 
@@ -47,6 +63,25 @@
   (let port (hal-buffer))
   (unsafe (volatile-write port 0x2A))
   (println-i64 (hal-peek port))
+  ; C fills what the caller owns. The borrow ends when the call returns, and
+  ; what is in the list afterwards is what C put there.
+  (let mut buffer (list 0 0 0))
+  (hal-fill (&mut buffer))
+  (println-i64 (+ (+ (get (& buffer) 0) (get (& buffer) 1)) (get (& buffer) 2)))
+  (let mut fixed-buffer (array 0 0 0 0))
+  (hal-fill-array (&mut fixed-buffer))
+  (println-i64 (get (& fixed-buffer) 3))
+  ; An out-parameter writes into a slot the caller still owns.
+  (let mut rest 0)
+  (let whole (hal-divmod 17 5 (&mut rest)))
+  (println-i64 whole)
+  (println-i64 rest)
+  (let mut units 0.0)
+  (let fraction (hal-fraction 2.5 (&mut units)))
+  (println-bool (= units 2.0))
+  (println-bool (= fraction 0.5))
+  ; And C calls back into a function this program defines.
+  (println-i64 (hal-apply-twice add-three 1))
   0)
 
 (test "a narrow return is sign-extended before Slopium sees it"
