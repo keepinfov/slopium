@@ -107,6 +107,13 @@ check_release() {
 
   grep -q "^\[$v\]: " CHANGELOG.md ||
     problem "\`CHANGELOG.md\` has no link reference for \`[$v]\`"
+
+  # A fragment still sitting in `changelog.d/` is an entry that did not make the
+  # section above, which is the one way collation can be forgotten (`D-137`).
+  local stray
+  stray="$(find changelog.d -maxdepth 1 -name '*.md' ! -name 'README.md' -printf '%f\n' 2>/dev/null | sort)"
+  [ -z "$stray" ] ||
+    problem "\`changelog.d/\` still holds $(printf '%s\n' "$stray" | wc -l | tr -d ' ') fragment(s); collate with \`scripts/changelog-collate.sh v$v\`"
 }
 
 main() {

@@ -26,6 +26,7 @@ Not run here, and why:
 - [ ] A test that fails without the change, or a fixture for the new behaviour.
 - [ ] A stable `SL` code and a `compile_fail` case, if the compiler refuses
       something new.
-- [ ] A line under `[Unreleased]` in `CHANGELOG.md`, if a user would notice.
+- [ ] An entry under `changelog.d/`, if a user would notice. Not `CHANGELOG.md`,
+      which only a release writes.
 - [ ] The version in `Cargo.toml` is untouched — only a release moves it.
 - [ ] No secret, no build output, no private path anywhere in the diff.

@@ -15,6 +15,7 @@ cd "$workspace_dir"
 # The cheapest check in the suite, and the one whose failure invalidates a
 # release rather than a build, so it runs before anything is compiled.
 "$workspace_dir/scripts/release-check.sh" --check
+"$workspace_dir/scripts/changelog-check.sh"
 
 cargo fmt --all -- --check
 cargo test --workspace
