@@ -963,6 +963,67 @@ fn check_initialization(
     }
 }
 
+/// Checks the one invariant a pass cannot survive being wrong about.
+///
+/// [`check`] answers only when [`enabled`], and a release build is exactly
+/// where it does not — while the release optimizer indexes `function.blocks`
+/// by a terminator's target and renumbers blocks through a table indexed the
+/// same way. An out-of-range target there is a panic rather than a wrong
+/// answer, and a panic is the one failure mode `D-031` does not allow the
+/// compiler, so this much of [`verify_function`] runs in every profile.
+///
+/// It is deliberately only the block targets. Everything else the verifier
+/// says is a claim about types and definedness, and being wrong about one of
+/// those produces a bad program rather than a crashed compiler — which is what
+/// [`check`] is for.
+pub fn check_block_targets(
+    file: &str,
+    module: &MirModule,
+    phase: Option<&str>,
+) -> Result<(), Vec<Diagnostic>> {
+    let after = phase.map_or(String::new(), |phase| format!(" after {phase}"));
+    let mut errors = Vec::new();
+    for function in module
+        .functions
+        .iter()
+        .chain(module.tests.iter().map(|test| &test.function))
+    {
+        let blocks = function.blocks.len();
+        let mut report = |message: String| {
+            errors.push(Diagnostic::error(
+                codes::INTERNAL,
+                file,
+                function.span,
+                format!(
+                    "internal compiler error: MIR verification failed{after} in `{}`: {message}; \
+                     this is a compiler bug",
+                    function.name
+                ),
+            ));
+        };
+        if function.entry >= blocks {
+            report(format!(
+                "entry block {} is out of range ({blocks} blocks)",
+                function.entry
+            ));
+        }
+        for (index, block) in function.blocks.iter().enumerate() {
+            for target in successors(&block.terminator) {
+                if target >= blocks {
+                    report(format!(
+                        "block {index} branches to block {target}, out of range ({blocks} blocks)"
+                    ));
+                }
+            }
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
 /// The pipeline gate: verifies `module` when [`enabled`], naming the pass that
 /// produced it so a failure points at the right stage.
 ///

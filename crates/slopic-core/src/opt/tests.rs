@@ -618,3 +618,101 @@ fn inlining_a_volatile_access_duplicates_it_once_per_call() {
          calls_poke = {calls_poke}"
     );
 }
+
+#[test]
+fn a_lattice_that_has_not_settled_folds_nothing_and_says_so() {
+    // The states of a constant-propagation dataflow are too optimistic until
+    // the loop settles: a local still reads `Known` where a predecessor not yet
+    // visited would have made it `Varying`. Folding on one of those rewrites a
+    // `Branch` into a `Goto` that the program never asked for, so reaching the
+    // bound has to end the compilation rather than produce a result.
+    let source = r#"
+        (fn probe ((limit i64)) -> i64
+          (let mut total 0)
+          (while (< total limit)
+            (set total (+ total 1)))
+          total)
+        (fn main () -> i32 0)
+    "#;
+    let mut module = debug(source);
+    let before = module.clone();
+    let probe = module
+        .functions
+        .iter_mut()
+        .find(|function| function.name.ends_with("probe"))
+        .expect("probe is in the module");
+
+    let error = super::propagate_constants_within("test.slp", probe, 1)
+        .expect_err("one round cannot settle a loop");
+    assert_eq!(error[0].code, "SL0700");
+    assert!(
+        error[0].message.contains("did not settle in"),
+        "unexpected message: {}",
+        error[0].message
+    );
+    assert_eq!(
+        format!("{:?}", instructions(function(&module, "probe"))),
+        format!("{:?}", instructions(function(&before, "probe"))),
+        "a run that did not settle must leave the function alone"
+    );
+}
+
+#[test]
+fn the_same_dataflow_settles_within_its_real_bound() {
+    // The other half of the claim above: the bound is generous, and reaching it
+    // means the bound is wrong rather than that the program is unusual.
+    let source = r#"
+        (fn probe ((limit i64)) -> i64
+          (let mut total 0)
+          (while (< total limit)
+            (set total (+ total 1)))
+          total)
+        (fn main () -> i32 0)
+    "#;
+    let mut module = debug(source);
+    let probe = module
+        .functions
+        .iter_mut()
+        .find(|function| function.name.ends_with("probe"))
+        .expect("probe is in the module");
+    super::propagate_constants("test.slp", probe).expect("the dataflow settles");
+}
+
+#[test]
+fn a_terminator_that_leaves_the_function_is_reported_rather_than_panicked_on() {
+    // `simplify_cfg` indexes `function.blocks` by a terminator's target and
+    // renumbers blocks through a table indexed the same way, so a target past
+    // the end is an out-of-bounds index rather than a bad program. The verifier
+    // catches it, and the verifier does not run in the profile this pipeline
+    // does, which is why the block-target check is unconditional.
+    let mut module = debug("(fn main () -> i32 0)");
+    let last = module.functions[0].blocks.len();
+    module.functions[0].blocks[0].terminator = Terminator::Goto(last + 7);
+
+    let error = optimize("test.slp", &mut module).expect_err("the target is out of range");
+    assert_eq!(error[0].code, "SL0700");
+    assert!(
+        error[0].message.contains("out of range"),
+        "unexpected message: {}",
+        error[0].message
+    );
+}
+
+#[test]
+fn a_pipeline_that_runs_out_of_rounds_still_answers() {
+    // A program can simply be large enough to keep paying off after the last
+    // round. Every pass preserves observable behaviour on its own, so what the
+    // bound costs is optimization; this used to be a `debug_assert!` that
+    // aborted the build instead.
+    let source = r#"
+        (fn probe ((flag bool)) -> i64
+          (let base (if flag 10 10))
+          (let doubled (+ base base))
+          (+ doubled 5))
+        (fn main () -> i32 0)
+    "#;
+    let mut module = debug(source);
+    super::optimize_within("test.slp", &mut module, 1).expect("one round is a valid answer");
+    crate::verify::check("test.slp", &module, "a bounded pipeline")
+        .expect("the MIR is still valid");
+}
