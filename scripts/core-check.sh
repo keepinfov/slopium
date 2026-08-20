@@ -45,7 +45,8 @@ allowed_undefined="sl_rt_abort sl_rt_alloc sl_rt_free sl_rt_panic"
 
 # The answer goes out through `core:string` and comes back, so the string half
 # of the library is linked with `-nostdlib` on every run (`D-083`). A primitive
-# that reached for libc fails here.
+# that reached for libc fails here. Since v0.11 that includes hexadecimal,
+# which is the shape a freestanding program wanted it in first (`D-129`).
 #
 # Since v0.7.2 it goes out through `core:float` as well. That is the exit
 # condition of the milestone in one line — a program with no C library prints a
@@ -54,7 +55,8 @@ allowed_undefined="sl_rt_abort sl_rt_alloc sl_rt_free sl_rt_panic"
 # itself (`D-097`, `D-098`).
 cat > "$work/program.slp" <<'SLP'
 (take core:option Option)
-(take core:string from-i64 to-i64 from-u64 to-u64 hash equals)
+(take core:string from-i64 to-i64 from-u64 to-u64 hash equals
+  hex-from-u64 hex-prefixed-from-u64)
 (take core:float from-f64 to-f64)
 (take core:map Map new insert lookup)
 
@@ -128,7 +130,15 @@ cat > "$work/program.slp" <<'SLP'
                         (let wide (from-u64 0xFFFF_FFFF_FFFF_FFFF))
                         (match (to-u64 (& wide))
                           ((Option:Some back)
-                            (if (= back 0xFFFF_FFFF_FFFF_FFFF) parsed 0))
+                            ; And hexadecimal, which is what a program with a
+                            ; serial port and no libc reads a register as.
+                            (let mask (hex-prefixed-from-u64 0x2A 4))
+                            (let pattern (hex-from-u64 back 0))
+                            (if (and (= back 0xFFFF_FFFF_FFFF_FFFF)
+                                (equals (& mask) (& "0x002A"))
+                                (equals (& pattern) (& "FFFFFFFFFFFFFFFF")))
+                              parsed
+                              0))
                           ((Option:None) 0)))
                       0))
                   ((Option:None) 0)))
