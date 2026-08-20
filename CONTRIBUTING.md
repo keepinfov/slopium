@@ -57,8 +57,11 @@ Three things a reviewer looks for immediately:
 2. **The companions.** AGENTS.md §8 is a table of what has to move with what —
    syntax touches both backends, the docs, the editor word lists and a fixture,
    and forgetting one is the most common way a change is incomplete.
-3. **A changelog line** under `[Unreleased]`, if a user of the language or the
-   toolchain would notice.
+3. **A changelog entry**, if a user of the language or the toolchain would
+   notice — one file under `changelog.d/`, named for the issue the change
+   closes, holding the bullet exactly as it will be published.
+   `changelog.d/README.md` is the whole rule. `CHANGELOG.md` itself is written
+   only by a release, so two changes in flight never meet there.
 
 Commit subjects describe the state after the change rather than the act of
 changing it — `feat(slopium): read what a borrow points at, and match without

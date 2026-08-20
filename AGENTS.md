@@ -60,7 +60,9 @@ Outside the workspace:
 - `docs/` — `decisions.md`, `architecture.md`, `language.md`, `diagnostics.md`,
   `packaging.md`, `security.md`. English, apart from `security.md`;
 - `README.md` — the user-facing guide. Russian, deliberately;
-- `CHANGELOG.md` — what each release changed, in the form §7 keeps it;
+- `CHANGELOG.md` — what each release changed, in the form §7 keeps it, and
+  `changelog.d/` — where a change writes its entry until a release collects
+  it;
 - `CONTRIBUTING.md` — the short path from a clone to a reviewable pull request;
 - `CLAUDE.md` — a symlink to this file, so a tool that looks only for that name
   still reads the contract.
@@ -327,9 +329,19 @@ cannot survive more than one branch at a time: two pull requests would both
 claim the next number, whichever merged second would be claiming a version that
 already existed, and both would have regenerated
 `tests/consumer/Slopium.lock`, which carries the version and the bundled
-library's checksums, into a conflict. What a change owes instead is a line under
-`[Unreleased]` in `CHANGELOG.md`, whenever somebody using the language or the
-toolchain would notice it.
+library's checksums, into a conflict. What a change owes instead is one file
+under `changelog.d/`, whenever somebody using the language or the toolchain
+would notice it.
+
+**A changelog entry is a file, for the same reason the version is not a
+commit** (`D-137`). Every entry written under `[Unreleased]` went at the same
+line, so every two changes in flight conflicted there over nothing — the
+entries never disagreed, they were merely inserted at one anchor. A change
+writes `changelog.d/<issue>[-<discriminator>].<kind>.md` instead, holding one
+bullet exactly as it will be published: a new file collides with no other.
+`[Unreleased]` keeps its heading and holds nothing, and
+`scripts/changelog-check.sh` says so. `changelog.d/README.md` is the whole rule
+for somebody writing one.
 
 Pre-1.0 semantics, decided at the release out of what the changelog collected:
 minor for a language or toolchain capability, patch for a behaviour fix inside
@@ -342,7 +354,9 @@ A release is its own pull request, and it moves more than the manifest:
 3. regenerate the committed registry and consumer with
    `SLOPIUM_UPDATE_FIXTURES=1 scripts/publish-check.sh`, because the bundled
    library's digest moves with the version;
-4. rename `[Unreleased]` to `[X.Y.Z] - <date>` and open an empty one above it;
+4. collate the entries with `scripts/changelog-collate.sh vX.Y.Z`, which
+   writes the `[X.Y.Z] - <date>` section under `[Unreleased]`, adds the link
+   reference, and empties `changelog.d/`;
 5. run `scripts/release-check.sh --check-release vX.Y.Z`, then §9 in full;
 6. commit as `chore(release): vX.Y.Z` and merge the pull request;
 7. tag the merge commit `vX.Y.Z`, annotated, and push the tag.
@@ -384,7 +398,7 @@ reason a contributor without notes can still land a correct commit.
 | A design question you had to decide to finish the work | a new entry in `docs/decisions.md` |
 | A CLI flag or subcommand | the clap definition, generated completions, and `README.md` |
 | Anything a user of the language sees | `README.md` (Russian) |
-| Anything a user of the language or the toolchain would notice | a line under `[Unreleased]` in `CHANGELOG.md` |
+| Anything a user of the language or the toolchain would notice | a file under `changelog.d/`, named for the issue |
 | The commit contract, the branch and pull-request flow, or the release steps | `scripts/commit-check.sh`, `scripts/release-check.sh`, `CONTRIBUTING.md`, the templates under `.github/` |
 
 Regenerate the committed registry and consumer with:
@@ -405,7 +419,8 @@ The gate for a code change is the full suite, from the repository root:
 scripts/verify.sh
 ```
 
-It runs `release-check.sh --check`, `cargo fmt --all -- --check`,
+It runs `release-check.sh --check`, `changelog-check.sh`,
+`cargo fmt --all -- --check`,
 `cargo test --workspace`,
 `cargo clippy --workspace --all-targets -- -D warnings`, then
 `project-tests.sh`, `package-check.sh`, `git-check.sh`, `registry-check.sh`,
@@ -454,8 +469,9 @@ Rules:
 - [ ] `scripts/verify.sh` is green, or the exact subset that ran, and why, is in
       the pull request.
 - [ ] The companions in §8 are updated.
-- [ ] `CHANGELOG.md` has a line under `[Unreleased]`, unless nobody using the
-      language or the toolchain would notice the change.
+- [ ] `changelog.d/` has this change's entry, unless nobody using the language
+      or the toolchain would notice it — and `CHANGELOG.md` itself is untouched,
+      because only a release writes there.
 - [ ] `git status` and `git diff --cached --name-only` reviewed in their own
       right — every path is one you touched, and none is `.notes/`, build
       output, or a stray fixture.

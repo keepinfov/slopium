@@ -17,7 +17,8 @@
         src = ./.;
         filter = path: type:
           let name = baseNameOf path;
-          in name != ".git" && name != ".notes" && name != "target";
+          in name != ".git" && name != ".notes" && name != "target"
+             && name != "changelog.d";
       };
 
       # Both the overlay and the per-system outputs build from these two

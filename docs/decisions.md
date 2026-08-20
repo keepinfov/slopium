@@ -149,6 +149,7 @@ of what was believed at the time is the part worth keeping.
 - [D-134 — `;;` above a declaration is documentation, read out of the trivia](#d-134--above-a-declaration-is-documentation-read-out-of-the-trivia)
 - [D-135 — the manifest says what a module is for each target](#d-135--the-manifest-says-what-a-module-is-for-each-target)
 - [D-136 — a declaration says which target it is for, and `cfg` is not built](#d-136--a-declaration-says-which-target-it-is-for-and-cfg-is-not-built)
+- [D-137 — a changelog entry is a file, because two of them are not a conflict](#d-137--a-changelog-entry-is-a-file-because-two-of-them-are-not-a-conflict)
 
 ## D-001 — a native compiler, without LLVM
 
@@ -2817,3 +2818,49 @@ name, and everywhere else that is where the story ends — the reader is left to
 work out that the definition is in the file in front of them and simply not
 theirs. The `Program` keeps a record of what was removed and which target asked
 for it, so the refusal says so.
+
+## D-137 — a changelog entry is a file, because two of them are not a conflict
+
+Status: approved · 2026-08-20
+
+Every change wrote its line at the same place, the line after `## [Unreleased]`,
+so every two changes in flight conflicted there. Five pull requests merged in
+one afternoon cost three resolutions in `CHANGELOG.md` and not one of them was a
+disagreement: the entries were independent and git stopped only because they had
+been inserted at a single anchor. One of those resolutions was also wrong, and
+nothing caught it — an entry about a new form was concatenated under `### Fixed`
+and read as a bug fix until the next person opened the file.
+
+`D-123` already made this argument one file over. A `feat` used to bump
+`workspace.package.version` in its own commit, and that could not survive more
+than one branch at a time, so the number stopped being written where branches
+collide and is decided at the release instead. A changelog entry has the same
+shape and takes the same answer: a change writes
+`changelog.d/<issue>[-<discriminator>].<kind>.md`, and a new file collides with
+nothing.
+
+The fragment holds **one bullet, exactly as it will be published** — the marker,
+the two-space continuation, wrapped at 80. A collator that added the marker
+would own the wrapping too, and then the width a writer sees would not be the
+width that ships; the same argument `D-134` makes about the formatter leaving a
+`;;` block alone. It is named for the issue because §5 already requires one, so
+the number exists before the entry does and no two changes can pick the same
+name. The discriminator is for a change that owes two entries of one kind, which
+the very first batch already did.
+
+`[Unreleased]` keeps its heading and holds nothing. `release-check.sh` already
+refused a *release* that left entries under it; that rule is now the invariant
+rather than a release-time one, and `changelog-check.sh` decides it on every
+pull request. A release collates with `scripts/changelog-collate.sh`, which
+orders by kind and then by issue number so that the same fragments always
+produce the same section, writes the link reference the release check asks for,
+and empties the directory — and the release check refuses a version that left a
+fragment behind, which is the one way collation can be forgotten.
+
+Two cheaper answers were weighed and both lose. A `merge=union` driver in
+`.gitattributes` costs one line and silently produces two `### Fixed` headings
+when two branches each add one, which is the same failure as the wrong
+resolution above with nobody to notice it. Generating the changelog from commit
+subjects is what `D-131` deliberately declined: it generates the release page's
+first half from titles and keeps the changelog as the half a person writes,
+because a subject line cannot carry why a change was worth making.
