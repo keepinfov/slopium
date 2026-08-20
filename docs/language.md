@@ -395,6 +395,26 @@ the matched value; `_` discards it. Boolean and enum matches must be
 exhaustive or contain an irrefutable arm. Integer matches require a final
 irrefutable arm.
 
+**A `match` is not only for aggregates.** An integer, a byte read out of a
+string, a `bool` — anything a literal pattern can name — is matched the same
+way, and a ladder of `if`s comparing one value against a list of constants is
+a `match` written the long way:
+
+```lisp
+(fn escaped ((byte i64)) -> String
+  (match byte
+    (34 "\\\"")
+    (92 "\\\\")
+    (10 "\\n")
+    (13 "\\r")
+    (9 "\\t")
+    (other (if (< other 32) (unicode-escape other) ""))))
+```
+
+The last arm binds, which is what makes the match exhaustive: an integer has
+too many values to enumerate, so one arm has to answer for the rest. `_`
+discards where the value is not needed.
+
 An arm may carry a **guard**, written `when` between the pattern and the body
 (`D-121`). It is tested after the pattern matched and before the arm is taken,
 so two arms can share a pattern and differ only in the condition. A guarded arm
