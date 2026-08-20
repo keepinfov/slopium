@@ -13,6 +13,17 @@ rather than everything it touched.
 
 ## [Unreleased]
 
+### Added
+- A temporary can be borrowed where a call takes it: `(println (& "hello"))` and
+  `(println (& (from-i64 id)))` are programs now. The value lives until that
+  call returns and is dropped there, so an argument is the only position it is
+  allowed in, and a borrow of a temporary bound with `let` is refused with a
+  message that says to name the value instead.
+
+### Changed
+- The library's six integer and float printers, and the float formatter, lost
+  the bindings that existed only to give a value a name.
+
 ## [0.10.0] - 2026-08-20
 
 ### Added

@@ -670,6 +670,13 @@ struct Builder {
     /// exactly as it does for the function itself.
     lifted: Vec<MirFunction>,
     layouts: Vec<MirStruct>,
+    /// What a borrowed temporary owns, until the call it was passed to returns
+    /// (`D-126`).
+    ///
+    /// A stack rather than a field, because a call inside an argument list is
+    /// ordinary — `(println (& (concat (& a) (& b))))` opens three — and each
+    /// one releases exactly what was borrowed inside it.
+    temporaries: Vec<Value>,
 }
 
 /// The field a name bound through an exclusive borrow stands for (`D-120`).
@@ -714,6 +721,7 @@ impl Builder {
             current_span: span,
             lifted: Vec::new(),
             layouts: Vec::new(),
+            temporaries: Vec::new(),
         }
     }
 
@@ -946,7 +954,20 @@ impl Builder {
     /// them to the wrong line.
     fn expr(&mut self, expr: &TExpr) -> Option<Value> {
         let enclosing = std::mem::replace(&mut self.current_span, expr.span);
+        let temporaries = self.temporaries.len();
         let value = self.expr_kind(expr);
+        // A temporary borrowed in an argument list dies when the call it was
+        // passed to returns (`D-126`), and this is that point: every path out
+        // of a call's lowering has been taken by now, and the drops land after
+        // the call instruction in the order a scope would have released them.
+        if matches!(
+            expr.kind,
+            TExprKind::Call { .. } | TExprKind::CallValue { .. }
+        ) {
+            for temporary in self.temporaries.split_off(temporaries).into_iter().rev() {
+                self.drop_temporary(Some(temporary));
+            }
+        }
         self.current_span = enclosing;
         value
     }
@@ -1120,6 +1141,24 @@ impl Builder {
             }
             TExprKind::Const { value, .. } => self.expr(value),
             TExprKind::Match { value, arms } => self.lower_match(expr, value, arms),
+            // The value has no binding, so it is lowered here and its address
+            // is what the call receives. What it owns is remembered rather than
+            // dropped: this expression does not know where the enclosing call
+            // ends, and `expr` does (`D-126`).
+            TExprKind::BorrowTemporary { value } => {
+                let inner = self.expr(value)?;
+                let src = inner.local;
+                if inner.owned_temporary && !inner.ty.is_copy() {
+                    self.temporaries.push(inner);
+                }
+                let dst = self.temp(expr.ty.clone());
+                self.emit(Instruction::AddressOf { dst, src });
+                Some(Value {
+                    local: dst,
+                    ty: expr.ty.clone(),
+                    owned_temporary: false,
+                })
+            }
             TExprKind::Borrow { id, .. } => {
                 let src = self.bindings[id];
                 let dst = self.temp(expr.ty.clone());

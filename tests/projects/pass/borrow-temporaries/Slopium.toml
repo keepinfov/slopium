@@ -1,0 +1,16 @@
+[package]
+name = "borrow-temporaries"
+version = "0.1.0"
+source = "src"
+entry = "src/main.slp"
+
+[dependencies]
+std = { toolchain = true }
+
+[profile.dev]
+opt-level = 0
+debug = true
+
+[profile.release]
+opt-level = 1
+debug = false

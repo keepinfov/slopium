@@ -1,0 +1,6 @@
+(fn apply ((step (Fn () (& String)))) -> i64
+  (len (step)))
+
+(fn main () -> i32
+  (let total (apply (lambda () () -> (& String) (& "nothing calls this"))))
+  0)

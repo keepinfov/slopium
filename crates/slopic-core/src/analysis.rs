@@ -404,6 +404,9 @@ impl<'a> SymbolIndexBuilder<'a> {
             // address of a function somebody wrote, and renaming it has to
             // reach here too (`D-124`).
             TExprKind::FnPointer { name } => self.top_level_reference(name, expression.span),
+            // The value behind the borrow is an ordinary expression and every
+            // name in it is an ordinary reference (`D-126`).
+            TExprKind::BorrowTemporary { value } => self.expr(value, scope, bindings),
             TExprKind::CallValue { callee, args } => {
                 self.binding_reference(*callee, expression.span, bindings);
                 for argument in args {

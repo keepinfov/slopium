@@ -322,7 +322,21 @@ binding holds.
 ```
 
 Owned values move by default. `(& value)` and `(&mut value)` create shared and
-exclusive borrows. A borrow ends after its last use where the control-flow
+exclusive borrows.
+
+**A borrow may name a temporary where a call takes it** (`D-126`):
+
+```lisp
+(println (& "hello"))
+(println (& (concat (& "task #") (& (from-i64 id)))))
+```
+
+The value the borrow names lives until that call returns, and is dropped there.
+That is why an argument is the only position it is allowed in: anywhere else
+there is no point at which the value could be released, so `(let text (& "x"))`
+is refused and the message says to name the value instead. Each call releases
+what was borrowed inside its own argument list, so the nesting above drops three
+strings at three different points, innermost first. A borrow ends after its last use where the control-flow
 analysis can prove that it is dead; references still cannot escape a function
 or be stored in aggregate fields or collection elements. Borrowed slices
 cannot be returned either. `clone` recursively copies strings, lists, arrays,

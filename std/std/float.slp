@@ -26,12 +26,10 @@
 ; Plain decimal, seventeen significant digits, and no exponent form ever
 ; (`D-098`) — so a printed float is also something the compiler can read.
 (fn print-f64 ((value f64)) -> unit
-  (let text (from-f64 value))
-  (print (& text)))
+  (print (& (from-f64 value))))
 
 (fn println-f64 ((value f64)) -> unit
-  (let text (from-f64 value))
-  (println (& text)))
+  (println (& (from-f64 value))))
 
 ; A line off a terminal usually has spaces around it, and a line that is only
 ; spaces is not a number, so the trim happens here and not in `to-f64` — the
