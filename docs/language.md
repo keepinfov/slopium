@@ -198,6 +198,31 @@ that answers: `(and (holds table key) (trust (lookup table key)))` does not
 look the key up when the table does not hold it. Each takes two operands or
 more and every one must be a `bool`. `not` is an ordinary operator over one.
 
+## Documentation comments
+
+A comment beginning `;;`, written on the lines directly above a declaration, is
+that declaration's documentation (`D-134`). The language server shows it on
+hover, above the type:
+
+```lisp
+;; The distance between two points, in whatever units they were given in.
+;; Negative coordinates are fine; the answer never is.
+(fn distance ((a (& Point)) (b (& Point))) -> f64
+  (sqrt (+ (square (- (. b x) (. a x))) (square (- (. b y) (. a y))))))
+```
+
+A single `;` is an ordinary comment and means nothing to any tool. The block is
+the run of `;;` lines immediately above the declaration: a blank line ends it,
+because a comment separated by one is about the file rather than about what
+follows, and so does a comment sharing its line with code, because
+`(fn a ...) ;; note` belongs to the line it is on.
+
+The block sits above a declaration's annotation slot rather than inside it, and
+it is read out of the source text rather than the syntax tree — which is why the
+formatter leaves it exactly as it was written. A `;;` inside a form, above a
+struct field or an enum variant, is an ordinary comment for now; reading one
+later stays compatible.
+
 ## Function types
 
 ```lisp
@@ -407,6 +432,52 @@ hand back.
 `set` assigns to a `(let mut ...)` binding, and to a field bound by a `(&mut
 ...)` match — see the patterns below. In both cases the value that was there is
 dropped.
+
+`(defer body ...)` runs its body when the enclosing scope ends, whatever ended it:
+falling off the end, a `break`, a `continue`, or the error arm of a `try`
+(`D-133`). Deferred expressions run in the reverse of the order they were
+written, and all of them run *before* the scope releases what it owns, so a
+deferred expression still finds the values the scope was holding:
+
+```lisp
+(fn read-through ((path (& String))) -> i64
+  (let handle (open path))
+  (defer (close handle))
+  (let banner (concat (& "reading ") path))
+  (defer (println (& banner)))
+  (size handle))
+```
+
+Nothing is captured where a `defer` is written and nothing is evaluated there:
+the whole body runs at the end of the scope, so a deferred call reads whatever
+its operands hold then. Whatever it answers is dropped, exactly as a `do` drops
+everything but its last expression. The body takes as many expressions as it
+needs, like every other body (`D-127`).
+
+Nothing in the body may leave the scope it is running out of: a `try` returns
+from the function and a `break` or a `continue` jumps out of the loop whose exit
+is running the body, and either would ask that exit to run the same body again.
+A loop the body opened for itself is a different scope, and breaking out of that
+one is ordinary.
+
+Two rules keep that honest, and both are about the same hazard — the scope is
+still going to drop what it owns, after the deferred expression has run. A
+`defer` may not move a name it found already in scope, and a name it reads
+that owns something cannot be moved by anything written below it either.
+Borrow the value or `clone` it. A `defer` inside a `defer` is refused.
+
+A `defer` belongs to the innermost scope open where it is written, which is the
+body of the `when`, arm, branch or loop it is inside rather than the function:
+
+```lisp
+(when retrying
+  (defer (println (& "the retry ended")))
+  (attempt))
+```
+
+There is no destructor and a `defer` is not one (`D-084`). It runs on the exits
+a scope has, and a program that ends inside the scope — `panic`, `exit` — takes
+none of them.
 
 ## Structs, enums, and patterns
 

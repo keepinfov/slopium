@@ -1,0 +1,4 @@
+defer-inside-defer.slp:4:10: error[SL0200]: `defer` cannot be written inside a `defer`
+  |
+ 4 |   (defer (defer (len (& "text"))))
+  |          ^^^^^^^^^^^^^^^^^^^^^^^^

@@ -1,0 +1,18 @@
+; A deferred expression runs while its scope is already ending, so nothing in
+; it may leave that scope: a `try` returns from the function and a `break`
+; jumps out of the loop whose exit is running the body (`D-133`).
+
+(take std:result Result)
+
+(fn fails () -> (Result i64 i64)
+  (Result:Err 3))
+
+(fn returns-from-a-defer () -> (Result i64 i64)
+  (defer (try (fails)))
+  (Result:Ok 1))
+
+(fn breaks-from-a-defer () -> unit
+  (loop
+    (defer (break))))
+
+(fn main () -> i32 0)

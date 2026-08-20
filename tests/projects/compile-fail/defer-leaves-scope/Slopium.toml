@@ -1,0 +1,8 @@
+[package]
+name = "defer-leaves-scope"
+version = "0.11.0"
+source = "src"
+entry = "src/main.slp"
+
+[dependencies]
+std = { toolchain = true }

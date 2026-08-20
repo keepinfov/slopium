@@ -1,0 +1,6 @@
+; The loop's scope is what the `defer` is on its way out of, so a `break` here
+; would ask that exit to run the same deferred body again (`D-133`).
+(fn main () -> i32
+  (loop
+    (defer (break)))
+  0)

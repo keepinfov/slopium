@@ -659,6 +659,15 @@ pub enum ExprKind {
         value: Box<Expr>,
     },
     Do(Vec<Expr>),
+    /// `(defer body ...)` — work that runs when the enclosing scope ends
+    /// (`D-133`).
+    ///
+    /// The whole body is evaluated at the end of the scope rather than partly
+    /// at the point it is written: nothing is captured here, so a deferred
+    /// call reads whatever its operands hold when it runs. That is the simpler
+    /// of the two possible rules and the one a reader guesses, since
+    /// `(defer (close handle))` is written to say what happens later.
+    Defer(Box<Expr>),
     /// A block that permits raw-pointer operations (`D-067`).
     ///
     /// It is a `do` with a permission, not a second type system: the value and
@@ -1546,6 +1555,17 @@ impl AstBuilder<'_> {
                                 span: form.span,
                             }),
                         }
+                    }
+                    // A `defer` belongs to the innermost scope open where it
+                    // is written, and answers `unit` there and then (`D-133`).
+                    // Its body is as many expressions as it needs, like every
+                    // other body since `D-127`.
+                    "defer" => {
+                        if items.len() < 2 {
+                            self.error(form.span, "`defer` expects a body");
+                            return None;
+                        }
+                        ExprKind::Defer(Box::new(self.body(&items[1..], form.span)?))
                     }
                     "and" | "or" => {
                         let op = if head == "and" {

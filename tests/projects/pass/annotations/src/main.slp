@@ -10,6 +10,10 @@
 ; into its callers. Everything that decides whether inlining is *sound* — the
 ; module boundary, recursion, the C boundary — is still the optimizer's, so the
 ; annotation cannot make this program mean anything else.
+;
+;; Mixes two numbers, slowly enough to be worth a look at whether it inlined.
+;; A `;;` block above a declaration is documentation (`D-134`), and it sits
+;; above the annotation slot rather than inside it.
 (fn (inline) blend ((a i64) (b i64)) -> i64
   (let one (+ a b))
   (let two (* one 3))
