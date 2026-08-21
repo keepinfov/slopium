@@ -59,6 +59,7 @@ cat > "$work/program.slp" <<'SLP'
   hex-from-u64 hex-prefixed-from-u64)
 (take core:float from-f64 to-f64)
 (take core:map Map new insert lookup)
+(take core:builder (new :as builder-new) write-str write-i64 build)
 (take core:panic assert)
 
 ; Named `main` and exported, because the link below is asked to validate an
@@ -86,6 +87,16 @@ cat > "$work/program.slp" <<'SLP'
   (if (and (= quotient (as u64 42)) (= shifted (as u64 63)))
     (as i64 quotient)
     0))
+
+; And a builder, which is `core` because a growing buffer needs an allocator
+; and not an operating system (`D-145`). Linking it here is what says the
+; module reaches no further than the two string entry points it declares.
+(fn builder-answer () -> i64
+  (let mut out (builder-new))
+  (write-str (&mut out) (& "answer "))
+  (write-i64 (&mut out) 42)
+  (let text (build out))
+  (if (equals (& text) (& "answer 42")) 42 0))
 
 ; A volatile access is instructions and never a call (`D-067`), which is what
 ; makes a raw pointer usable in a program with no operating system under it. A
@@ -128,7 +139,8 @@ cat > "$work/program.slp" <<'SLP'
                 (let key "two")
                 (match (lookup (& table) (& key))
                   ((Option:Some held)
-                    (if (and (= held 2) (= (narrow-answer) 42) (= (pointer-answer) 42))
+                    (if (and (= held 2) (= (narrow-answer) 42) (= (pointer-answer) 42)
+                        (= (builder-answer) 42))
                       (do
                         ; And unsigned text, which is the one thing `D-107`
                         ; added to the library.

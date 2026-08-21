@@ -1,0 +1,11 @@
+[package]
+name = "string-builder"
+version = "0.13.0"
+source = "src"
+entry = "src/main.slp"
+
+[dependencies]
+std = { toolchain = true }
+
+[build]
+target = "x86_64-unknown-linux-gnu"

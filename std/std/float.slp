@@ -12,12 +12,12 @@
 ; for a float only when it mentions one.
 
 (take core:option Option)
-(take core:float from-f64 to-f64)
+(take core:float from-f64 to-f64 write-f64)
 (take std:io print println read-line)
 (take std:string trim)
 
 (export print-f64 println-f64 read-f64 (core:float:from-f64 :as from-f64)
-  (core:float:to-f64 :as to-f64))
+  (core:float:to-f64 :as to-f64) (core:float:write-f64 :as write-f64))
 
 ; Plain decimal, seventeen significant digits, and no exponent form ever
 ; (`D-098`) — so a printed float is also something the compiler can read.
