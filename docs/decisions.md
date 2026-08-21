@@ -3205,8 +3205,18 @@ were handed.
 `swap` is the one worth describing. `replace` puts a value in and takes one out
 in the same breath, so a swap has nowhere to start: exchanging two slots needs
 one element held outside the list, and the only element that can leave without
-moving the rest is the last. So `swap` pops it, rotates through `replace`, and
-pushes what falls out — five runtime calls and no element moved but the two. An
+moving the rest is the last. So `swap` takes the last one out, rotates through
+`replace`, and pushes what falls out — five runtime calls and no element moved
+but the two.
+
+**It uses `remove` at the last index and not `pop`, and that is a constraint on
+the whole of `core`.** `pop` answers an `Option`, so it needs the `option`
+language item, which the toolchain registers for the bundled `core` and nothing
+registers for a `core` vendored into a registry as an ordinary package —
+`scripts/registry-check.sh` builds exactly that, and it is where the first
+version of this was caught. Removing the last element shifts nothing, so the
+two cost the same, and `core` keeps the property that it builds without the
+toolchain having introduced itself first. An
 index outside the list ends the program the way an out-of-range `get` does,
 which is why `core:list` takes `core:panic` and is the only thing it takes it
 for: a bad index is a bug in the caller, not an answer it can be given.

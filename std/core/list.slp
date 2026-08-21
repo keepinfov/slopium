@@ -117,31 +117,33 @@
 ; Exchanges two elements without moving anything else, which is what a sort
 ; needs and what the list could not do before.
 ;
-; It is written around `pop` because `replace` puts a value in and takes one
-; out in the same breath, so a swap needs one element held outside the list to
-; start the rotation with — and the last one is the only one that can leave
-; without moving the rest.
+; It is written around the last element because `replace` puts a value in and
+; takes one out in the same breath, so a swap needs one element held outside
+; the list to start the rotation with — and the last one is the only one that
+; can leave without moving the rest.
 (fn swap (T) ((items (&mut (List T))) (left i64) (right i64)) -> unit
   (let size (len items))
   (assert (and (>= left 0) (< left size)) (& "swap index out of bounds"))
   (assert (and (>= right 0) (< right size)) (& "swap index out of bounds"))
   (when (!= left right)
     (let last (- size 1))
-    (match (pop items)
-      ((Option:Some held)
-        (if (or (= left last) (= right last))
-          ; One of the two has already left, so it goes straight into the
-          ; other's slot and what came out goes on the end.
-          (do
-            (let other (if (= left last) right left))
-            (let displaced (replace items other held))
-            (push items displaced))
-          (do
-            (let first (replace items left held))
-            (let second (replace items right first))
-            (let back (replace items left second))
-            (push items back))))
-      ((Option:None) ()))))
+    ; `remove` at the last index and not `pop`, which answers an `Option` and
+    ; so needs the `option` language item — which a `core` vendored as an
+    ; ordinary package does not have (`D-146`). Removing the last element
+    ; shifts nothing, so the two cost the same.
+    (let held (remove items last))
+    (if (or (= left last) (= right last))
+      ; One of the two has already left, so it goes straight into the other's
+      ; slot and what came out goes on the end.
+      (do
+        (let other (if (= left last) right left))
+        (let displaced (replace items other held))
+        (push items displaced))
+      (do
+        (let first (replace items left held))
+        (let second (replace items right first))
+        (let back (replace items left second))
+        (push items back)))))
 
 ; Drops every element from the back, so each one is released rather than
 ; forgotten. A list of owned values is the case that makes the difference.
@@ -151,8 +153,8 @@
 (fn truncate (T) ((items (&mut (List T))) (length i64)) -> unit
   (let mut remaining (len items))
   (while (> remaining length)
-    (let dropped (pop items))
-    (set remaining (- remaining 1))))
+    (set remaining (- remaining 1))
+    (let dropped (remove items remaining))))
 
 ; `before` answers whether the first element belongs ahead of the second. A sort
 ; parameterised by a function is what a language with traits gets from `Ord`,
