@@ -1,0 +1,4 @@
+mutably-borrow-immutable.slp:4:15: error[SL0300]: cannot mutably borrow immutable `values`
+  |
+ 4 |   (push (&mut values) "two")
+  |               ^^^^^^

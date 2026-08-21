@@ -1,0 +1,4 @@
+borrow-moved-value.slp:11:15: error[SL0300]: cannot borrow moved value `message`
+  |
+11 |   (measure (& message))
+  |               ^^^^^^^

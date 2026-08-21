@@ -1,0 +1,13 @@
+; A shared borrow taken while an exclusive one of the same binding is alive.
+(struct Holder ((label String)))
+
+(fn compare ((held (&mut Holder)) (seen (& Holder))) -> i64
+  (match held
+    ((Holder :label label) (set label "held")))
+  (match seen
+    ((Holder :label label) (len label))))
+
+(fn main () -> i32
+  (let mut holder (Holder :label "one"))
+  (compare (&mut holder) (& holder))
+  0)

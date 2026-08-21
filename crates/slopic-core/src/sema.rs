@@ -1797,7 +1797,8 @@ impl<'a> Analyzer<'a> {
                 );
             }
             OwnershipState::MutBorrowed if consume => {
-                self.error(
+                self.error_with_code(
+                    codes::OWNERSHIP,
                     expr.span,
                     format!("cannot use `{name}` while it is mutably borrowed"),
                 );
@@ -1819,7 +1820,8 @@ impl<'a> Analyzer<'a> {
                              the value",
                         ),
                     ),
-                    None => self.error(
+                    None => self.error_with_code(
+                        codes::OWNERSHIP,
                         expr.span,
                         format!("cannot move `{name}` while it is borrowed"),
                     ),
@@ -2066,7 +2068,8 @@ impl<'a> Analyzer<'a> {
             binding.state,
             OwnershipState::SharedBorrowed(_) | OwnershipState::MutBorrowed
         ) {
-            self.error(
+            self.error_with_code(
+                codes::OWNERSHIP,
                 expr.span,
                 format!("cannot assign to `{name}` while it is borrowed"),
             );
@@ -2447,10 +2450,15 @@ impl<'a> Analyzer<'a> {
         };
         let binding = self.env.bindings.get(&id).cloned().expect("binding exists");
         if binding.state == OwnershipState::Moved {
-            self.error(value.span, format!("cannot borrow moved value `{name}`"));
+            self.error_with_code(
+                codes::OWNERSHIP,
+                value.span,
+                format!("cannot borrow moved value `{name}`"),
+            );
         }
         if mutable && !binding.mutable {
-            self.error(
+            self.error_with_code(
+                codes::OWNERSHIP,
                 value.span,
                 format!("cannot mutably borrow immutable `{name}`"),
             );
@@ -2462,11 +2470,13 @@ impl<'a> Analyzer<'a> {
             // second reachable often enough to be worth telling apart.
             match binding.state {
                 OwnershipState::Available | OwnershipState::Moved => {}
-                OwnershipState::MutBorrowed => self.error(
+                OwnershipState::MutBorrowed => self.error_with_code(
+                    codes::OWNERSHIP,
                     value.span,
                     format!("cannot mutably borrow `{name}` more than once"),
                 ),
-                OwnershipState::SharedBorrowed(_) => self.error(
+                OwnershipState::SharedBorrowed(_) => self.error_with_code(
+                    codes::OWNERSHIP,
                     value.span,
                     format!("cannot mutably borrow `{name}` while it is shared-borrowed"),
                 ),
@@ -2477,7 +2487,8 @@ impl<'a> Analyzer<'a> {
                 OwnershipState::Available => OwnershipState::SharedBorrowed(1),
                 OwnershipState::SharedBorrowed(count) => OwnershipState::SharedBorrowed(count + 1),
                 OwnershipState::MutBorrowed => {
-                    self.error(
+                    self.error_with_code(
+                        codes::OWNERSHIP,
                         value.span,
                         format!("cannot share-borrow mutably borrowed `{name}`"),
                     );

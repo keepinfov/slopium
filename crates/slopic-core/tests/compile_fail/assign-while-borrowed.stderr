@@ -1,0 +1,4 @@
+assign-while-borrowed.slp:8:3: error[SL0300]: cannot assign to `count` while it is borrowed
+  |
+ 8 |   (set count 2)
+  |   ^^^^^^^^^^^^^

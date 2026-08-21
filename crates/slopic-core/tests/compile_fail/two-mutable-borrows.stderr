@@ -1,0 +1,4 @@
+two-mutable-borrows.slp:14:29: error[SL0300]: cannot mutably borrow `holder` more than once
+  |
+14 |   (pair (&mut holder) (&mut holder))
+  |                             ^^^^^^

@@ -1,4 +1,4 @@
-match-mut-while-borrowed.slp:10:16: error[SL0200]: cannot mutably borrow `counter` while it is shared-borrowed
+match-mut-while-borrowed.slp:10:16: error[SL0300]: cannot mutably borrow `counter` while it is shared-borrowed
   |
 10 |   (match (&mut counter)
   |                ^^^^^^^

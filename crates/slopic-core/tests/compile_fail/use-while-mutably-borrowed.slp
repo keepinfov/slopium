@@ -1,0 +1,15 @@
+; `SL0300` is ownership and borrowing (`docs/diagnostics.md`), and using a
+; value through its own name while an exclusive borrow of it is alive is that.
+(struct Holder ((label String)))
+
+(fn consume ((holder Holder)) -> i64
+  (match holder
+    ((Holder :label label) (len (& label)))))
+
+(fn main () -> i32
+  (let mut holder (Holder :label "one"))
+  (match (&mut holder)
+    ((Holder :label label)
+      (set label "two")
+      (consume holder)))
+  0)

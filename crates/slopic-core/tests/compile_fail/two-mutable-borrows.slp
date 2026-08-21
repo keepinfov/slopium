@@ -1,0 +1,15 @@
+; Two exclusive borrows of one binding, alive at the same call.
+(struct Holder ((label String)))
+
+(fn pair ((left (&mut Holder)) (right (&mut Holder))) -> unit
+  (set-label left "left")
+  (set-label right "right"))
+
+(fn set-label ((holder (&mut Holder)) (text String)) -> unit
+  (match holder
+    ((Holder :label label) (set label text))))
+
+(fn main () -> i32
+  (let mut holder (Holder :label "one"))
+  (pair (&mut holder) (&mut holder))
+  0)

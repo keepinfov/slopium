@@ -1,0 +1,5 @@
+; An exclusive borrow of a binding that was never declared `mut`.
+(fn main () -> i32
+  (let values (list "one"))
+  (push (&mut values) "two")
+  0)

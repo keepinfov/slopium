@@ -1,0 +1,12 @@
+; A value that has been moved out has nothing left to borrow.
+(fn consume ((text String)) -> i64
+  (len (& text)))
+
+(fn measure ((text (& String))) -> i64
+  (len text))
+
+(fn main () -> i32
+  (let message "gone")
+  (consume message)
+  (measure (& message))
+  0)
