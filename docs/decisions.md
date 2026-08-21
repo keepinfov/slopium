@@ -158,6 +158,7 @@ of what was believed at the time is the part worth keeping.
 - [D-143 — a form has two shapes, and a body starts on its own line](#d-143--a-form-has-two-shapes-and-a-body-starts-on-its-own-line)
 - [D-144 — every refusal about ownership carries an `SL03xx` code](#d-144--every-refusal-about-ownership-carries-an-sl03xx-code)
 - [D-145 — a string is built in one buffer, and the buffer is a `(List u8)`](#d-145--a-string-is-built-in-one-buffer-and-the-buffer-is-a-list-u8)
+- [D-146 — a list can be written into, and the sort is a merge sort over indices](#d-146--a-list-can-be-written-into-and-the-sort-is-a-merge-sort-over-indices)
 
 ## D-001 — a native compiler, without LLVM
 
@@ -3189,3 +3190,54 @@ formatter's answer is a `String` and there is nowhere else for the digits to go.
 `(format "task #{}: {}" id title)` is not built on top of this. It is reserved
 as a form at the freeze (`D-125`), and the cost this issue was about is the
 copying rather than the spelling.
+
+## D-146 — a list can be written into, and the sort is a merge sort over indices
+
+Status: approved · 2026-08-21
+
+A list could be pushed, popped, removed from and replaced into, and that was
+all. `insert`, `swap`, `clear` and `truncate` are the four things `replace`
+(`D-103`) makes possible and nothing had written yet. All four take
+`(&mut (List T))` and answer `unit`, because what they change is the list they
+were handed.
+
+`swap` is the one worth describing. `replace` puts a value in and takes one out
+in the same breath, so a swap has nowhere to start: exchanging two slots needs
+one element held outside the list, and the only element that can leave without
+moving the rest is the last. So `swap` pops it, rotates through `replace`, and
+pushes what falls out — five runtime calls and no element moved but the two. An
+index outside the list ends the program the way an out-of-range `get` does,
+which is why `core:list` takes `core:panic` and is the only thing it takes it
+for: a bad index is a bug in the caller, not an answer it can be given.
+
+**The sort is a merge sort over the indices, and the permutation is applied with
+`swap`.** What it replaces was a selection sort that compared every remaining
+pair for every position and then moved each element out with `remove`, so it was
+quadratic in comparisons and moved the tail of the list on every placement. Its
+own comment said a better algorithm needed a way to overwrite one element, which
+`replace` had been for two versions.
+
+Sorting the elements directly is what a language with a default value would do,
+and this one has none: filling a slot means having something to put in it, and
+an owned `T` has nothing to leave behind. An index does. So a `(List i64)` of
+positions is merged bottom-up into a second list of the same length — two lists
+that trade places on every pass, which is why one is a clone rather than
+something built empty — and the elements are moved once each at the end, by
+following the permutation's cycles with `swap`. That is `O(n log n)` comparisons
+and at most `n` swaps.
+
+Merge and not quicksort, because `sort-by` already promises that equal elements
+keep the order they arrived in. Merge sort keeps it by taking from the left run
+on a tie; quicksort does not keep it at all, and would also want a random access
+pattern this list is worse at than a sequential one.
+
+Sorting 10,000 scrambled integers took 3,262 milliseconds and takes 21. Four
+times the elements used to cost twenty-seven times the time; it now costs about
+five.
+
+An insertion sort in place over `swap` was written first and measured **slower**
+than the selection sort it replaced — 1,881 milliseconds against 577 at 4,000
+elements — because the number of moves stays quadratic and each move became five
+runtime calls instead of one memory copy. That is the whole argument for
+measuring a performance claim rather than reasoning about it, and the reason
+this entry describes an algorithm rather than a refactor.

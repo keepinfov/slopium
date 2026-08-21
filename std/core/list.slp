@@ -22,8 +22,9 @@
 ; fixing it is a `reverse` and a second pass, and it changes no signature here.
 
 (take core:option Option)
+(take core:panic assert)
 
-(export map filter fold find sort-by)
+(export map filter fold find sort-by insert swap clear truncate)
 
 ; `f` is handed each element in order and owns it. This is the one function
 ; here that can return a list of a different type, and therefore the one that
@@ -88,86 +89,178 @@
     (set index (+ index 1)))
   (if (< found 0) (Option:None) (Option:Some found)))
 
+; Writing into a list, which is `replace` (`D-103`) and the four things it
+; makes possible. Every one of them takes the list exclusively and answers
+; `unit`: what they change is the list they were handed.
+;
+; An index outside the list is a bug in the caller rather than an answer, so it
+; ends the program the way an out-of-range `get` does (`D-146`). That is why
+; this module takes `core:panic`, and it is the only thing it takes it for.
+
+; Puts `value` at `index` and moves everything from there up one place. The
+; displaced element is carried forward into the next slot, so each element is
+; written once and the list grows by exactly one at the end.
+(fn insert (T) ((items (&mut (List T))) (index i64) (value T)) -> unit
+  (let size (len items))
+  (assert (and (>= index 0) (<= index size)) (& "insert index out of bounds"))
+  (if (= index size)
+    (push items value)
+    (do
+      (let mut carried (replace items index value))
+      (let mut position (+ index 1))
+      (while (< position size)
+        (let displaced (replace items position carried))
+        (set carried displaced)
+        (set position (+ position 1)))
+      (push items carried))))
+
+; Exchanges two elements without moving anything else, which is what a sort
+; needs and what the list could not do before.
+;
+; It is written around `pop` because `replace` puts a value in and takes one
+; out in the same breath, so a swap needs one element held outside the list to
+; start the rotation with — and the last one is the only one that can leave
+; without moving the rest.
+(fn swap (T) ((items (&mut (List T))) (left i64) (right i64)) -> unit
+  (let size (len items))
+  (assert (and (>= left 0) (< left size)) (& "swap index out of bounds"))
+  (assert (and (>= right 0) (< right size)) (& "swap index out of bounds"))
+  (when (!= left right)
+    (let last (- size 1))
+    (match (pop items)
+      ((Option:Some held)
+        (if (or (= left last) (= right last))
+          ; One of the two has already left, so it goes straight into the
+          ; other's slot and what came out goes on the end.
+          (do
+            (let other (if (= left last) right left))
+            (let displaced (replace items other held))
+            (push items displaced))
+          (do
+            (let first (replace items left held))
+            (let second (replace items right first))
+            (let back (replace items left second))
+            (push items back))))
+      ((Option:None) ()))))
+
+; Drops every element from the back, so each one is released rather than
+; forgotten. A list of owned values is the case that makes the difference.
+(fn clear (T) ((items (&mut (List T)))) -> unit
+  (truncate items 0))
+
+(fn truncate (T) ((items (&mut (List T))) (length i64)) -> unit
+  (let mut remaining (len items))
+  (while (> remaining length)
+    (let dropped (pop items))
+    (set remaining (- remaining 1))))
+
 ; `before` answers whether the first element belongs ahead of the second. A sort
 ; parameterised by a function is what a language with traits gets from `Ord`,
 ; and this is the parametric answer to it (`D-088`). It is also where two
 ; borrows of the same list are alive at once, which shared borrows have always
 ; allowed and nothing in the library had asked for.
 ;
-; Selection sort: every comparison happens against the list as it arrived, and
-; only then is anything moved, because `before` holds a borrow and removing
-; needs the list back. Quadratic in comparisons, which for a sort is the point
-; at which it stops being an implementation detail — a better algorithm sorts
-; in place, and in place needs a way to overwrite one element, which the
-; language does not have.
-(fn sort-by (T) ((items (List T)) (before (Fn ((& T) (& T)) bool))) -> (List T)
-  (let mut source items)
-  (let size (len (& source)))
-  (if (< size 2)
-    source
-    (let order (selection-order (& source) before size))
-    (take-in-order source order)))
-
-; The indices of the list in sorted order. Nothing is moved out of `items`
-; here, so `before` sees the same list for every comparison it is asked to
-; make. What shrinks instead is the list of indices still to be placed.
+; Merge sort over the indices, and then the permutation applied in place with
+; `swap` (`D-146`). Sorting the elements directly needs somewhere to put one
+; while its slot is being filled, and an owned `T` has no value to leave
+; behind; an index does, so the comparisons decide an order in a `(List i64)`
+; and the elements are moved once each at the end.
 ;
-; `before` is handed on by borrow, because since `D-101` a function value owns
-; whatever a `lambda` moved into it and passing one is a move. This is the same
-; rule the header states about elements, applied to the function itself: a
-; caller that only wants a comparison made takes a borrow of the comparator.
-(fn selection-order (T)
-  ((items (& (List T))) (before (Fn ((& T) (& T)) bool)) (size i64))
+; What this replaces was a selection sort that compared every remaining pair
+; for every position and then moved each element out of the list with `remove`,
+; so it was quadratic in comparisons and moved the tail of the list on every
+; placement. Its own comment said a better algorithm needed a way to overwrite
+; one element, which `replace` has been since `D-103`.
+;
+; `before` is strict and a tie takes from the left run, so equal elements keep
+; the order they arrived in and the sort is stable.
+(fn sort-by (T) ((items (List T)) (before (Fn ((& T) (& T)) bool))) -> (List T)
+  (let mut sorted items)
+  (let size (len (& sorted)))
+  (if (< size 2)
+    sorted
+    (do
+      (let order (sorted-order (& sorted) (& before) size))
+      (apply-order (&mut sorted) (& order))
+      sorted)))
+
+; The indices of the list in sorted order, merged bottom-up. Two index lists of
+; the same length trade places on every pass, which is why one of them is a
+; clone rather than something built empty: a `(List i64)` merged into has to
+; have the slots already.
+(fn sorted-order (T)
+  ((items (& (List T))) (before (& (Fn ((& T) (& T)) bool))) (size i64))
   -> (List i64)
-  (let mut remaining (list 0))
-  (let mut fill 1)
-  (while (< fill size)
-    (push (&mut remaining) fill)
-    (set fill (+ fill 1)))
-  (let head (least-slot items (& before) (& remaining)))
-  (let mut order (list (remove (&mut remaining) head)))
-  (while (> (len (& remaining)) 0)
-    (let slot (least-slot items (& before) (& remaining)))
-    (push (&mut order) (remove (&mut remaining) slot)))
-  order)
+  (let mut current (list 0))
+  (let mut index 1)
+  (while (< index size)
+    (push (&mut current) index)
+    (set index (+ index 1)))
+  (let mut scratch (clone (& current)))
+  (let mut width 1)
+  (while (< width size)
+    (let span (* width 2))
+    (let mut start 0)
+    (while (< start size)
+      (let middle (least (+ start width) size))
+      (let end (least (+ start span) size))
+      (merge-run items before (& current) (&mut scratch) start middle end)
+      (set start (+ start span)))
+    (let held current)
+    (set current scratch)
+    (set scratch held)
+    (set width span))
+  current)
 
-; Where in `remaining` the smallest element is. `before` is strict and ties
-; keep the slot they already had, so the sort is stable.
-(fn least-slot (T)
-  ((items (& (List T))) (before (& (Fn ((& T) (& T)) bool))) (remaining (& (List i64))))
-  -> i64
-  (let size (len remaining))
-  (let mut best 0)
-  (let mut slot 1)
-  (while (< slot size)
-    (when (before (get-ref items (get remaining slot))
-                  (get-ref items (get remaining best)))
-      (set best slot))
-    (set slot (+ slot 1)))
-  best)
+(fn least ((left i64) (right i64)) -> i64
+  (if (< left right) left right))
 
-; Move the elements out in the order given. An index counts positions in the
-; list as it arrived, and every earlier removal has shifted the ones after it,
-; so the position to remove is the original minus how many already went.
-(fn take-in-order (T) ((items (List T)) (order (List i64))) -> (List T)
-  (let mut source items)
-  (let mut sequence order)
-  (let first (remove (&mut sequence) 0))
-  (let mut gone (list first))
-  (let mut output (list (remove (&mut source) first)))
-  (while (> (len (& sequence)) 0)
-    (let original (remove (&mut sequence) 0))
-    (let position (- original (earlier-than (& gone) original)))
-    (push (&mut output) (remove (&mut source) position))
-    (push (&mut gone) original))
-  output)
+; One merge of two neighbouring runs, `[start, middle)` and `[middle, end)`,
+; from `source` into the same range of `target`.
+(fn merge-run (T)
+  ((items (& (List T)))
+    (before (& (Fn ((& T) (& T)) bool)))
+    (source (& (List i64)))
+    (target (&mut (List i64)))
+    (start i64)
+    (middle i64)
+    (end i64))
+  -> unit
+  (let mut left start)
+  (let mut right middle)
+  (let mut at start)
+  (while (< at end)
+    (let from-left
+      (if (>= left middle)
+        false
+        (if (>= right end)
+          true
+          ; Asked the other way round: the right element wins only if it comes
+          ; strictly before the left one, so a tie takes from the left.
+          (not
+            (before (get-ref items (get source right))
+                    (get-ref items (get source left)))))))
+    (if from-left
+      (do
+        (let discarded (replace target at (get source left)))
+        (set left (+ left 1)))
+      (do
+        (let discarded (replace target at (get source right)))
+        (set right (+ right 1))))
+    (set at (+ at 1))))
 
-(fn earlier-than ((gone (& (List i64))) (index i64)) -> i64
-  (let size (len gone))
-  (let mut count 0)
-  (let mut position 0)
-  (while (< position size)
-    (when (< (get gone position) index)
-      (set count (+ count 1)))
-    (set position (+ position 1)))
-  count)
+; `order` says which element belongs at each position, counted in the list as
+; it arrived. Following each cycle forward puts one element home per `swap`, so
+; the whole permutation costs at most one swap per element and no second list.
+(fn apply-order (T) ((items (&mut (List T))) (order (& (List i64)))) -> unit
+  (let size (len order))
+  (let mut at 0)
+  (while (< at size)
+    (let mut from (get order at))
+    ; A source below `at` has already been swapped away; where it went is what
+    ; the order says about it.
+    (while (< from at)
+      (set from (get order from)))
+    (when (!= from at)
+      (swap items at from))
+    (set at (+ at 1))))
