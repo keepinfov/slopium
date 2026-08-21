@@ -13,6 +13,44 @@ rather than everything it touched.
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-08-21
+
+### Added
+- `=` and `!=` compare two values of an enum no variant of which carries
+  anything, so asking whether a state is `(Status:Done)` no longer costs a
+  `match`. Such an enum is now represented as its tag — one machine word,
+  copied rather than owned — so nothing is allocated to build one, nothing is
+  freed when it dies, and comparing one does not consume it. An enum that does
+  carry something keeps the representation it had, and comparing two of those
+  is still refused, now with a message pointing at `match`.
+- `<<` and `>>` compose functions and take as many as they are given:
+  `((<< f g h) x)` is `(f (g (h x)))` and `((>> f g h) x)` is the same chain
+  written in the order it happens. Applied where it is written, a composition
+  expands to the nesting and costs exactly what the nesting costs — two direct
+  calls and no allocation. Left as a value it becomes a closure, and only the
+  operands that are local are captured, because a top-level `fn` needs no
+  closing over.
+
+### Changed
+- A release build calls a closure directly when the block it reads the address
+  out of was built in the same straight line, instead of jumping through the
+  block. The inliner then sees an ordinary call, so an unapplied composition of
+  two top-level functions lowers to the same two direct calls the applied form
+  does. The block is still allocated and released; only the indirection is
+  gone.
+- `scripts/project-tests.sh` says what a fixture directory with no manifest
+  usually is — a build directory left behind by the branch that added the
+  fixture — instead of reporting a missing file and leaving the reason to be
+  worked out.
+
+### Fixed
+- Asking the compiler library for an object while also asking for debug
+  information is refused rather than answered with a stripped object. The
+  object writer emits no debug sections at all, so the request could never have
+  been honoured; a debug build emits assembly and assembles it, which is what
+  the `slopium` and `slopic` commands already do.
+
+
 ## [0.12.0] - 2026-08-20
 
 ### Added
@@ -395,6 +433,7 @@ package manager, the language server and the Neovim plugin as they stood when
 tagging began.
 
 [Unreleased]: https://github.com/keepinfov/slopium/compare/v0.11.0...HEAD
+[0.13.0]: https://github.com/keepinfov/slopium/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/keepinfov/slopium/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/keepinfov/slopium/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/keepinfov/slopium/compare/v0.9.2...v0.10.0
