@@ -822,7 +822,8 @@ what makes the refusal honest (`D-088`). A combinator takes its value **by
 ownership**, because it makes a new one out of it; a question takes a borrow and
 leaves the value where it was.
 
-`std:list` is `map`, `filter`, `fold`, `find` and `sort-by`. Two shapes of
+`std:list` is `map`, `filter`, `fold`, `find`, `sort-by`, and the four that
+write into a list — `insert`, `swap`, `clear` and `truncate`. Two shapes of
 function appear here, and the difference is ownership rather than style. A
 function that consumes each element takes the element: `map` is `(Fn (T) U)` and
 `fold` is `(Fn (A T) A)`. A function that only looks at one takes a borrow of
@@ -845,11 +846,30 @@ owns.
 (let kept (sort-by (filter (list 5 2 3 9) odd) ascending))
 ```
 
-`sort-by` is stable, and both it and every consuming function here are
-quadratic: each removal from the front moves the rest of the list. `replace`
-now makes an in-place sort writable, and nothing here has been rewritten to use
-it — the signatures do not change either way, so it is a later patch's work and
-not an interface promise.
+`sort-by` is stable and is a merge sort over the indices, with the resulting
+permutation applied by `swap` (`D-146`): `O(n log n)` comparisons and at most
+one swap per element. `map`, `filter` and `fold` consume their list from the
+front and are still quadratic in the moves that costs; their signatures say
+nothing about it either way.
+
+`insert`, `swap`, `clear` and `truncate` take `(&mut (List T))` and answer
+`unit`, because what they change is the list they were handed. `insert` accepts
+an index from `0` up to and including the length, where it appends; `swap`
+takes two indices into the list. An index outside that range ends the program
+the way an out-of-range `get` does — a bad index is a bug in the caller rather
+than an answer it can be given. `clear` and `truncate` pop, so every element
+they remove is dropped rather than forgotten:
+
+```lisp
+(take std:list insert swap clear truncate)
+
+(let mut queue (list "b" "d"))
+(insert (&mut queue) 1 "c")
+(insert (&mut queue) 0 "a")
+(swap (&mut queue) 0 3)
+(truncate (&mut queue) 2)
+(clear (&mut queue))
+```
 
 `std:string` is bytes: `byte-at`, `substring`, `concat`, `from-bytes`,
 `equals`, `starts-with`, `find`, `contains`, `trim`, `split` on a separator
