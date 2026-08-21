@@ -5,11 +5,7 @@
 ; `prelude` because `core:option` and `core:result` both call theirs `map`, and
 ; a prelude that exported both would have to rename one of them.
 
-(export
-  (core:option:Option :as Option)
-  (core:option:is-some :as is-some)
-  (core:option:is-none :as is-none)
-  (core:option:map :as map)
-  (core:option:and-then :as and-then)
-  (core:option:unwrap-or :as unwrap-or)
+(export (core:option:Option :as Option) (core:option:is-some :as is-some)
+  (core:option:is-none :as is-none) (core:option:map :as map)
+  (core:option:and-then :as and-then) (core:option:unwrap-or :as unwrap-or)
   (core:option:or-else :as or-else))

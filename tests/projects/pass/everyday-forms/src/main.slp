@@ -19,7 +19,7 @@
   (map-insert (&mut table) (clone (& ann)) 30)
   (map-insert (&mut table) (clone (& bo)) 12)
   (+ (unwrap-or (map-lookup (& table) (& ann)) 0)
-    (unwrap-or (map-lookup (& table) (& bo)) 0)))
+     (unwrap-or (map-lookup (& table) (& bo)) 0)))
 
 ; A `loop` is an expression: the value leaves through the `break` rather than
 ; through a `let mut` written above the loop. The condition is one-sided, so it
@@ -28,7 +28,8 @@
   (let mut n 0)
   (loop
     (set n (+ n 1))
-    (when (= n stop) (break (* n 2)))))
+    (when (= n stop)
+      (break (* n 2)))))
 
 (enum Reading
   (Port ((address u16)))

@@ -6,7 +6,8 @@
 (take std:test equal-i64 equal-u64 equal-text)
 (take std:string from-i64)
 
-(fn sum ((a i64) (b i64)) -> i64 (+ a b))
+(fn sum ((a i64) (b i64)) -> i64
+  (+ a b))
 
 (fn main () -> i32
   (println-i64 (sum 20 22))
@@ -24,5 +25,4 @@
 (test "text says both sides in quotes"
   (equal-text (& (from-i64 41)) (& "42")))
 
-(test "a bare condition still fails with nothing to say"
-  false)
+(test "a bare condition still fails with nothing to say" false)

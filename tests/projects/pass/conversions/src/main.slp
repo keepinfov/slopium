@@ -8,7 +8,8 @@
 
 (fn small () -> i32 42)
 
-(fn negative () -> i32 (- 0 7))
+(fn negative () -> i32
+  (- 0 7))
 
 (fn label ((value i32)) -> String
   (from-i64 (as i64 value)))

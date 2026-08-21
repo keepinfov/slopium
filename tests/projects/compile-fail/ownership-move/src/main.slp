@@ -1,6 +1,7 @@
 (take std:io println-i64)
 
-(fn consume ((value String)) -> unit ())
+(fn consume ((value String)) -> unit
+  ())
 
 (fn main () -> i32
   (let value "moved")

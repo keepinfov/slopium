@@ -42,8 +42,7 @@
 ; not a saving, it is what lets this be written: an empty `(List (List (Entry K
 ; V)))` needs the type from somewhere, and the field of the struct being built
 ; is somewhere. A `let` is not, which is why nothing below writes one.
-(fn new (K V) ((hash (Fn ((& K)) i64)) (same (Fn ((& K) (& K)) bool)))
-  -> (Map K V)
+(fn new (K V) ((hash (Fn ((& K)) i64)) (same (Fn ((& K) (& K)) bool))) -> (Map K V)
   (Map :slots (list) :count 0 :hash hash :same same))
 
 (fn size (K V) ((map (& (Map K V)))) -> i64
@@ -115,8 +114,7 @@
 ; The way to walk a map, and the only one: `start` is what an empty map folds
 ; to, so nothing here has to invent an empty collection of a type it does not
 ; know.
-(fn fold (K V A) ((map (& (Map K V))) (start A) (step (Fn (A (& K) (& V)) A)))
-  -> A
+(fn fold (K V A) ((map (& (Map K V))) (start A) (step (Fn (A (& K) (& V)) A))) -> A
   (match map
     ((Map :slots slots :count _ :hash _ :same _)
       (let capacity (len slots))
@@ -139,23 +137,19 @@
 ; nothing says a hash function must not be.
 (fn bucket-of ((raw i64) (capacity i64)) -> i64
   (let rest (% raw capacity))
-  (if (< rest 0)
-    (+ rest capacity)
-    rest))
+  (if (< rest 0) (+ rest capacity) rest))
 
 ; Where in a bucket a key is, or `-1`. A bucket is short, so this is a scan,
 ; which is the half of a hash table that is allowed to be linear.
 (fn index-of (K V)
-  ((bucket (& (List (Entry K V))))
-    (same (& (Fn ((& K) (& K)) bool)))
-    (key (& K)))
+  ((bucket (& (List (Entry K V)))) (same (& (Fn ((& K) (& K)) bool))) (key (& K)))
   -> i64
   (let size (len bucket))
   (let mut at 0)
   (let mut found -1)
   (while (< at size)
     (when (match (get-ref bucket at)
-        ((Entry :key held :value _) (same key held)))
+            ((Entry :key held :value _) (same key held)))
       (set found at)
       (break))
     (set at (+ at 1)))
@@ -186,8 +180,7 @@
           (while (> (len (& carried)) 0)
             (place slots hash (remove (&mut carried) 0))))))))
 
-(fn add-buckets (K V)
-  ((slots (&mut (List (List (Entry K V))))) (count i64)) -> unit
+(fn add-buckets (K V) ((slots (&mut (List (List (Entry K V))))) (count i64)) -> unit
   (let mut index 0)
   (while (< index count)
     (push slots (list))

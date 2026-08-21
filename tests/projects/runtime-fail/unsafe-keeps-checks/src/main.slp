@@ -6,8 +6,7 @@
 ;; exactly as it does outside one.
 
 (fn main () -> i32
-  (unsafe
-    (println-i64 (+ 9223372036854775807 1)))
+  (unsafe (println-i64 (+ 9223372036854775807 1)))
   0)
 
 (test "fixture compiles" true)

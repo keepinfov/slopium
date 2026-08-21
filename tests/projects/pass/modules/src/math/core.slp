@@ -3,5 +3,4 @@
 (fn add ((left i64) (right i64)) -> i64
   (+ left right))
 
-(fn private-helper ((value i64)) -> i64
-  value)
+(fn private-helper ((value i64)) -> i64 value)

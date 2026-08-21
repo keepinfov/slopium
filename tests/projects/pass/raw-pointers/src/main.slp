@@ -17,8 +17,7 @@
 ; writable: `bit-or` is v0.8.0's, `u8` is v0.8.1's, and reaching the register at
 ; all is this patch's.
 (fn set-bits ((port (Ptr u8)) (mask u8)) -> unit
-  (unsafe
-    (volatile-write port (bit-or (volatile-read port) mask))))
+  (unsafe (volatile-write port (bit-or (volatile-read port) mask))))
 
 (fn main () -> i32
   (unsafe
@@ -76,8 +75,7 @@
   (unsafe
     (let base (rt-alloc 8))
     (volatile-write (as (Ptr u16) base) 0x0F41)
-    (and (= (volatile-read base) 0x41)
-      (= (volatile-read (ptr-offset base 1)) 0x0F))))
+    (and (= (volatile-read base) 0x41) (= (volatile-read (ptr-offset base 1)) 0x0F))))
 
 (test "a pointer narrows to the low bytes of its address"
   ; The regression this exists for: a pointer answers `None` when asked for an
@@ -86,7 +84,7 @@
   (unsafe
     (let base (rt-alloc 8))
     (and (= (as u8 base) (as u8 (as u64 base)))
-      (= (as i64 (as u8 base)) (bit-and (as i64 base) 0xFF)))))
+         (= (as i64 (as u8 base)) (bit-and (as i64 base) 0xFF)))))
 
 (test "`unsafe` does not turn off the overflow check"
   ; `D-031` calls the checks untouchable and `D-067` does not touch them. The

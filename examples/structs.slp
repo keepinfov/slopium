@@ -8,4 +8,6 @@
   0)
 
 (test "struct fields"
-  (do (let point (Point :x 20 :y 22)) (= (+ (. point x) (. point y)) 42)))
+  (do
+    (let point (Point :x 20 :y 22))
+    (= (+ (. point x) (. point y)) 42)))

@@ -116,8 +116,8 @@
 (test "find answers with an index, or with nothing"
   (let haystack (list 1 2 9 4))
   (let small (list 1 2))
-  (and (= 2 (unwrap-or (find (& haystack) over-three) (- 0 1))) (= (- 0 1) (unwrap-or (
-          find (& small) over-three) (- 0 1)))))
+  (and (= 2 (unwrap-or (find (& haystack) over-three) (- 0 1)))
+       (= (- 0 1) (unwrap-or (find (& small) over-three) (- 0 1)))))
 
 (test "sort-by orders by the comparator it is given"
   (let up (sort-by (list 5 3 9 1 3) ascending))

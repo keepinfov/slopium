@@ -8,7 +8,8 @@
 (export println)
 
 (extern "sl_rt_println_bytes"
-  (write-line-bytes (bytes (& String)) (length i64)) -> unit)
+  (write-line-bytes (bytes (& String)) (length i64))
+  -> unit)
 
 (fn println ((text (& String))) -> unit
   (write-line-bytes text (len text)))

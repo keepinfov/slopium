@@ -12,8 +12,8 @@
 
 (take core:option Option)
 
-(export Result (Result:Ok :as Ok) (Result:Err :as Err)
-  is-ok is-err map map-err and-then unwrap-or or-else ok)
+(export Result (Result:Ok :as Ok) (Result:Err :as Err) is-ok is-err map map-err and-then
+  unwrap-or or-else ok)
 
 (enum Result (T E)
   (Ok ((value T)))

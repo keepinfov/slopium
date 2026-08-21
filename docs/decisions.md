@@ -155,6 +155,7 @@ of what was believed at the time is the part worth keeping.
 - [D-140 — a fieldless enum is its tag, and `=` reaches one](#d-140--a-fieldless-enum-is-its-tag-and--reaches-one)
 - [D-141 — a call through a block built in the same breath names its symbol](#d-141--a-call-through-a-block-built-in-the-same-breath-names-its-symbol)
 - [D-142 — an object with no debug information is refused, not handed back](#d-142--an-object-with-no-debug-information-is-refused-not-handed-back)
+- [D-143 — a form has two shapes, and a body starts on its own line](#d-143--a-form-has-two-shapes-and-a-body-starts-on-its-own-line)
 
 ## D-001 — a native compiler, without LLVM
 
@@ -3062,3 +3063,54 @@ the same build without it succeeds. And with `--target` it hands foreign
 assembly to whatever `cc` resolved to, because `slopic`'s `--cc` defaults to
 `"cc"` whatever the target is. Neither is a bug to fix here; both are behaviour
 somebody should be able to read about before it surprises them.
+
+## D-143 — a form has two shapes, and a body starts on its own line
+
+Status: approved · 2026-08-21
+
+`format_source` was not a layout algorithm. It walked the token stream, indented
+by nesting depth, kept whatever line breaks the author had written, and wrapped
+only when the next token would cross column 88 — so a break landed wherever that
+column fell, between two arguments as readily as inside one. Deep nesting was
+unreadable for that reason and not because it was deep.
+
+It lays the source out from the tree `parse_lossless` already builds, and every
+form has two shapes: it fits on the line it starts on, or it does not. When it
+does not, one of four things happens. A **head-line table** says how many
+arguments stay beside the head — a `fn` keeps its name, its generics, its
+parameters and its return type, an `if` keeps its condition, a `match` keeps
+what it matches — and the rest go one per line at the body indent. A form whose
+arguments have no structure under them, an `export` or a `take` or a literal
+list, **packs** as many per line as fit. Anything else **aligns** its arguments
+under the first one, when every one of them has a flat shape that fits there,
+and otherwise puts each on its own line at the body indent with the first
+staying beside the head when it fits.
+
+**A body starts on its own line, however short it is.** `fn`, `test`, `when`,
+`while`, `loop`, `do`, `match` and `enum` are laid out that way because what
+follows their head line is a sequence rather than an argument, and a reader
+looking for what a loop does is looking down the left margin. `if` joins them
+only when it takes a fourth argument, because with three it is the expression
+`(if flag 1 0)` is; `lambda` never does, because it is an argument far more
+often than it is a declaration; and a body that is a single literal is not a
+body, so `(fn com1-data () -> u16 0x3F8)` names a constant on one line.
+
+Two things the tree does not say are marked before the layout runs. A `match`
+arm's head is a list exactly as a struct's field list is, so the form above it
+is what says which is which, and a guard belongs to the arm's question rather
+than to its answer — `when` and what it tests stay on the pattern's line. And
+`->`, `:` and a field keyword bind to what follows them, so a return type, a
+declared type and a named field are never split across two lines.
+
+**The tree is not changed.** The output parses to the same parens, atoms,
+strings and comments in the same order, which is what makes `fmt --check` a
+statement about whitespace rather than about the code, and what makes it safe on
+every save. Rewriting an expression into a different one is a different tool
+with a different guarantee. A `;;` block is emitted as it was written, because
+`D-134` says hover reads the bytes rather than the tree.
+
+The migration is asserted rather than described: `std/` is byte-identical to
+what the formatter produces, every fixture is `fmt --check`ed, and two
+properties run over the bundled library and the hundred refused sources beside
+it — laying out a source whose indentation has been taken away gives the same
+bytes as laying out the source, and a layout changes nothing but the whitespace.

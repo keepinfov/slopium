@@ -103,22 +103,20 @@
   0)
 
 (test "a remainder agrees with its division in every quadrant"
-  (and (division-identity 17 5)
-    (division-identity -17 5)
-    (division-identity 17 -5)
+  (and (division-identity 17 5) (division-identity -17 5) (division-identity 17 -5)
     (division-identity -17 -5)))
 
 (test "a bit operation is its own inverse"
   (and (= 42 (bit-xor (bit-xor 42 0x5A5A) 0x5A5A))
-    (= -1 (bit-not 0))
-    (= 0 (bit-and 0xFF00 0x00FF))
-    (= 0xFFFF (bit-or 0xFF00 0x00FF))))
+       (= -1 (bit-not 0))
+       (= 0 (bit-and 0xFF00 0x00FF))
+       (= 0xFFFF (bit-or 0xFF00 0x00FF))))
 
 (test "a shift and a division agree where both are defined"
   (and (= (shl 1 10) 1024)
-    (= (shr 1024 10) 1)
-    (= (shr -1024 10) -1)
-    (= (arithmetic-shift -1 63) -1)))
+       (= (shr 1024 10) 1)
+       (= (shr -1024 10) -1)
+       (= (arithmetic-shift -1 63) -1)))
 
 (test "and and or stop at the operand that answers"
   ; `(/ 100 0)` would trap, so reaching it is what a failure looks like.
@@ -126,19 +124,16 @@
 
 (test "the new comparisons accept what their counterparts do"
   (and (ordered 1 1)
-    (ordered -1 0)
-    (not (ordered 1 0))
-    (ordered-float 1.5 1.5)
-    (!= 1 2)
-    (not (!= 1 1))
-    (!= true false)))
+       (ordered -1 0)
+       (not (ordered 1 0))
+       (ordered-float 1.5 1.5)
+       (!= 1 2)
+       (not (!= 1 1))
+       (!= true false)))
 
 (test "a NaN is unequal to itself and ordered against nothing"
   (let nan (/ 0.0 0.0))
-  (and (unequal-float nan nan)
-    (not (= nan nan))
-    (not (<= nan nan))
-    (not (>= nan nan))))
+  (and (unequal-float nan nan) (not (= nan nan)) (not (<= nan nan)) (not (>= nan nan))))
 
 ; `0.0 - 0.0` is `+0.0` and `-(0.0)` is `-0.0`, so the constant a negation
 ; subtracts from has to be the negative zero. Printing is the only thing that
@@ -150,18 +145,18 @@
 
 (test "a literal reads the same in every base"
   (and (= 255 0xFF)
-    (= 255 0b1111_1111)
-    (= 1000000 1_000_000)
-    (= -1 0xFFFF_FFFF_FFFF_FFFF)
-    (= 0x7FFF_FFFF_FFFF_FFFF (bit-not 0x8000_0000_0000_0000))))
+       (= 255 0b1111_1111)
+       (= 1000000 1_000_000)
+       (= -1 0xFFFF_FFFF_FFFF_FFFF)
+       (= 0x7FFF_FFFF_FFFF_FFFF (bit-not 0x8000_0000_0000_0000))))
 
 (test "a text literal holds any byte"
   (let payload "\x00\x7f\x80\xff")
   (and (= 4 (len (& payload)))
-    (= 0 (byte-at (& payload) 0))
-    (= 127 (byte-at (& payload) 1))
-    (= 128 (byte-at (& payload) 2))
-    (= 255 (byte-at (& payload) 3))))
+       (= 0 (byte-at (& payload) 0))
+       (= 127 (byte-at (& payload) 1))
+       (= 128 (byte-at (& payload) 2))
+       (= 255 (byte-at (& payload) 3))))
 
 (test "a hexadecimal literal matches as a pattern"
   (let answer

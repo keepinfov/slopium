@@ -27,8 +27,7 @@
 ; A generic function taken as a value needs its instance chosen here, because a
 ; value is the address of one monomorphized body. The expected type says which,
 ; so this takes `identity$<i64>`; where nothing says which, it is refused.
-(fn identity (T) ((value T)) -> T
-  value)
+(fn identity (T) ((value T)) -> T value)
 
 (fn twice ((f (Fn (i64) i64)) (value i64)) -> i64
   (f (f value)))

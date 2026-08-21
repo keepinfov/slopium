@@ -3,7 +3,5 @@
 ; They are `core`'s (`D-083`), and a package that depends on `std` has no name
 ; for `core`, so this module re-exports them the way `std:string` does.
 
-(export
-  (core:panic:panic :as panic)
-  (core:panic:assert :as assert)
+(export (core:panic:panic :as panic) (core:panic:assert :as assert)
   (core:panic:unreachable :as unreachable))

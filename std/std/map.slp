@@ -1,11 +1,6 @@
 ; What a hosted package does with a map. `core`'s (`D-083`), re-exported.
 
-(export
-  (core:map:Map :as Map)
-  (core:map:new :as map-new)
-  (core:map:insert :as map-insert)
-  (core:map:lookup :as map-lookup)
-  (core:map:contains :as map-contains)
-  (core:map:delete :as map-delete)
-  (core:map:size :as map-size)
-  (core:map:fold :as map-fold))
+(export (core:map:Map :as Map) (core:map:new :as map-new)
+  (core:map:insert :as map-insert) (core:map:lookup :as map-lookup)
+  (core:map:contains :as map-contains) (core:map:delete :as map-delete)
+  (core:map:size :as map-size) (core:map:fold :as map-fold))

@@ -59,7 +59,9 @@ All module dependency cycles are rejected.
 
 (fn identity (T) ((value T)) -> T value)
 (struct Box (T) ((value T)))
-(enum Option (T) None (Some ((value T))))
+(enum Option (T)
+  None
+  (Some ((value T))))
 
 (test "addition"
   (= (add 20 22) 42))
@@ -86,7 +88,8 @@ ambiguous (`D-122`). `export` and `take` have no slot: neither introduces a
 name.
 
 ```lisp
-(fn (inline) blend ((a i64) (b i64)) -> i64 (* (+ a b) 2))
+(fn (inline) blend ((a i64) (b i64)) -> i64
+  (* (+ a b) 2))
 (fn (deprecated "call `parse-line` instead") parse ((s (& String))) -> i64 0)
 (const (deprecated) retry-limit 3)
 (fn (inline) (deprecated) legacy () -> i64 0)
@@ -253,6 +256,44 @@ formatter leaves it exactly as it was written. A `;;` inside a form, above a
 struct field or an enum variant, is an ordinary comment for now; reading one
 later stays compatible.
 
+## Layout
+
+`slopium fmt` decides where the lines go, and `slopium fmt --check` says whether
+they are already there. It is a statement about whitespace alone: the output
+holds the same parens, atoms, strings and comments in the same order, so running
+it on every save cannot change what a program means (`D-143`).
+
+Every form has two shapes — it fits on the line it starts on, or it does not:
+
+```lisp
+(fn starts-with ((text (& String)) (prefix (& String))) -> bool
+  (let width (len prefix))
+  (if (> width (len text))
+    false
+    (let head (substring text 0 width))
+    (equals (& head) prefix)))
+```
+
+A form that does not fit puts its arguments one per line. A declaration keeps
+its signature on the head line and starts its body below it; an `if`, a `when`,
+a `while` and a `match` keep the question they ask beside the head; and
+everything else aligns its arguments under the first one when they all fit
+there:
+
+```lisp
+(fn describe ((id i64) (title (& String)) (owner (& String))) -> String
+  (concat (& (concat (& (from-i64 id)) (& ": ")))
+          (& (concat title (& (concat (& " — ") owner))))))
+```
+
+A body begins on its own line however short it is, which is why
+`(when done (break))` is two lines. A body that is a single literal is not a
+body, so `(fn com1-data () -> u16 0x3F8)` stays on one. An `export`, a `take`
+and a literal list pack as many names per line as fit rather than becoming a
+column.
+
+A `;;` documentation block is left exactly as it was written.
+
 ## Function types
 
 ```lisp
@@ -300,8 +341,8 @@ refused with `SL0452` rather than guessed at.
 `<<` and `>>` compose functions, and take as many as you give them (`D-139`):
 
 ```lisp
-((<< f g h) x)   ; f(g(h(x))) — right to left, the order a nested call reads in
-((>> f g h) x)   ; h(g(f(x))) — left to right, the order things happen in
+((<< f g h) x) ; f(g(h(x))) — right to left, the order a nested call reads in
+((>> f g h) x) ; h(g(f(x))) — left to right, the order things happen in
 ```
 
 Each is the other reversed; `<<` keeps the order of names a nested call has, and
@@ -365,8 +406,7 @@ Because a closure owns its captures, it may outlive the function that built one:
 
 ```lisp
 (fn greeter ((who String)) -> (Fn ((& String)) String)
-  (lambda (who) ((mark (& String))) -> String
-    (concat (& who) mark)))
+  (lambda (who) ((mark (& String))) -> String (concat (& who) mark)))
 ```
 
 **A capture may not be a borrow.** Because a closure can outlive the frame it
@@ -450,12 +490,15 @@ so giving the permission up costs nothing and taking it is not offered.
 (let mut counter 0)
 (while (< counter 10)
   (set counter (+ counter 1))
-  (when (= counter 5) (continue))
-  (when (= counter 8) (break)))
+  (when (= counter 5)
+    (continue))
+  (when (= counter 8)
+    (break)))
 
 (loop
   (set counter (+ counter 1))
-  (when (= counter 10) (break)))
+  (when (= counter 10)
+    (break)))
 ```
 
 `if` has a value and both branches must have the same type. `do` evaluates a
@@ -490,7 +533,8 @@ hand back.
 (let doubled
   (loop
     (set counter (+ counter 1))
-    (when (= counter 8) (break (* counter 2)))))
+    (when (= counter 8)
+      (break (* counter 2)))))
 ```
 
 `set` assigns to a `(let mut ...)` binding, and to a field bound by a `(&mut
@@ -652,7 +696,10 @@ machine word, copied rather than owned, with nothing allocated, freed or cloned
 does not consume it:
 
 ```lisp
-(enum Status Pending Done Failed)
+(enum Status
+  Pending
+  Done
+  Failed)
 
 (let status (Status:Done))
 (if (= status (Status:Done)) (report status) (retry status))
@@ -670,7 +717,8 @@ before that question is asked.
 
 ```lisp
 (let mut values (list "one" "two"))
-(do (push (&mut values) "three"))
+(do
+  (push (&mut values) "three"))
 (let first (get-ref (& values) 0))
 (println first)
 (let removed (remove (&mut values) 1))
@@ -813,9 +861,9 @@ write the same value in base sixteen — the second under `0x`, which is a
 separate name rather than a `bool` at the call site (`D-129`):
 
 ```lisp
-(hex-from-u64 0x2A 0)            ; "2A"
-(hex-from-u64 0x2A 6)            ; "00002A"
-(hex-prefixed-from-u64 0x2A 4)   ; "0x002A"
+(hex-from-u64 0x2A 0) ; "2A"
+(hex-from-u64 0x2A 6) ; "00002A"
+(hex-prefixed-from-u64 0x2A 4) ; "0x002A"
 ```
 
 The width is a floor: fewer digits are padded with zeros and a value that needs
@@ -944,7 +992,8 @@ leave a note behind on a mismatch:
 ```lisp
 (take std:test equal-i64)
 
-(test "the sum" (equal-i64 (add 20 21) 42))
+(test "the sum"
+  (equal-i64 (add 20 21) 42))
 ; test main:the sum ... FAILED: expected 42, got 41
 ```
 
@@ -1075,7 +1124,8 @@ function pointer, and the argument at that position must name a top-level `fn`:
 ```lisp
 (extern "hal_apply" (hal-apply (step (Fn (i64) i64)) (value i64)) -> i64)
 
-(fn add-three ((value i64)) -> i64 (+ value 3))
+(fn add-three ((value i64)) -> i64
+  (+ value 3))
 
 (fn main () -> i32
   (println-i64 (hal-apply add-three 1))

@@ -9,8 +9,8 @@
 
 (take std:io println println-i64)
 (take std:string hash equals from-i64 concat)
-(take std:map Map map-new map-insert map-lookup map-contains map-delete
-  map-size map-fold)
+(take std:map Map map-new map-insert map-lookup map-contains map-delete map-size
+  map-fold)
 (take std:set Set set-of set-add set-holds set-discard set-count set-each)
 (take std:option Option unwrap-or)
 
@@ -39,9 +39,7 @@
 ; the smallest `i64` is where a hash that took an absolute value would trap.
 (fn below-zero ((key (& i64))) -> i64
   (let value (clone key))
-  (if (> value 0)
-    (- 0 value)
-    value))
+  (if (> value 0) (- 0 value) value))
 
 (fn empty-marks () -> (Map i64 i64)
   (map-new below-zero same-i64))
@@ -55,9 +53,7 @@
   (+ carried (clone value)))
 
 (fn longest ((carried i64) (key (& String))) -> i64
-  (if (> (len key) carried)
-    (len key)
-    carried))
+  (if (> (len key) carried) (len key) carried))
 
 ; Forty keys into a table that starts with four buckets: three rehashes, and
 ; every key has to still be findable in the bucket the new size gives it.
@@ -90,9 +86,7 @@
   (println (& found))
   (map-delete (&mut notes) (& seven))
   (println-i64 (map-size (& notes)))
-  (if (map-contains (& notes) (& seven))
-    (println-i64 1)
-    (println-i64 0))
+  (if (map-contains (& notes) (& seven)) (println-i64 1) (println-i64 0))
 
   ; A set is a map whose values carry nothing, and `each` is its fold.
   (let mut names (empty-names))
@@ -103,9 +97,7 @@
   (println-i64 (set-each (& names) 0 longest))
   (let bo "bo")
   (set-discard (&mut names) (& bo))
-  (if (set-holds (& names) (& bo))
-    (println-i64 1)
-    (println-i64 0))
+  (if (set-holds (& names) (& bo)) (println-i64 1) (println-i64 0))
   (println-i64 (set-count (& names)))
   0)
 
