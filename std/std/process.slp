@@ -5,8 +5,16 @@
 ; handle rather than things it got wrong (`D-087`).
 
 (take core:option Option)
+(take core:result Result Ok Err)
+(take core:builder new write-str write-byte build)
 
-(export args-len arg args env exit)
+(export args-len arg args env exit Error Child spawn capture wait read-output
+  close-output pid-of)
+
+; Every call that can fail sets the runtime's status slot and every function
+; below reads it in the form immediately after the call (`D-085`). The code in
+; an `Error` is an `errno`.
+(struct Error ((code i64)))
 
 (extern "sl_rt_args_len" (args-len) -> i64)
 
@@ -44,3 +52,96 @@
 (fn env ((name (& String))) -> (Option String)
   (let value (env-raw name (len name)))
   (if (= (last-error) 0) (Option:Some value) (Option:None)))
+
+; Starting a child, waiting for it, and reading what it wrote (`D-148`).
+;
+; A `Child` carries a pid and a descriptor, and neither owns anything: a struct
+; wrapping an `i64` has no drop glue, so nothing runs when it dies (`D-084`).
+; That is why the descriptor is closed by a `defer` and why this is expressible
+; now and was not before `D-133` — `close-output` is written beside the call
+; that opened it and runs however the scope ends.
+;
+; A `Child` that inherited the parent's output carries `-1`, and closing that
+; is a no-op, so the same `defer` is written either way.
+(struct Child ((pid i64) (output i64)))
+
+; Zero and one rather than a `bool`, because what crosses the boundary is a
+; scalar and the two spellings are separate names here (`D-129`).
+(extern "sl_rt_process_spawn"
+  (spawn-raw (program (& String))
+             (program-length i64)
+             (arguments (& String))
+             (arguments-length i64)
+             (capture i64)
+             (output (&mut i64)))
+  -> i64)
+
+(extern "sl_rt_process_wait" (wait-raw (pid i64)) -> i64)
+
+(extern "sl_rt_process_read" (read-raw (descriptor i64)) -> String)
+
+(extern "sl_rt_process_close" (close-raw (descriptor i64)) -> i64)
+
+; The arguments as one buffer of NUL-separated pieces, which is how a list of
+; strings crosses a boundary whose vocabulary has no row for one.
+(fn joined ((arguments (& (List String)))) -> String
+  (let mut out (new))
+  (let count (len arguments))
+  (let mut index 0)
+  (while (< index count)
+    (when (> index 0)
+      (write-byte (&mut out) (as u8 0)))
+    (write-str (&mut out) (get-ref arguments index))
+    (set index (+ index 1)))
+  (build out))
+
+(fn started ((program (& String)) (arguments (& (List String))) (capture i64))
+  -> (Result Child Error)
+  (let blob (joined arguments))
+  (let mut output -1)
+  (let pid
+    (spawn-raw program (len program) (& blob) (len (& blob)) capture (&mut output)))
+  (let code (last-error))
+  (if (= code 0)
+    (Result:Ok (Child :pid pid :output output))
+    (Result:Err (Error :code code))))
+
+; The child writes where this program writes. What a build tool wants, and what
+; leaves nothing to close.
+(fn spawn ((program (& String)) (arguments (& (List String)))) -> (Result Child Error)
+  (started program arguments 0))
+
+; The child's standard output is a pipe this program holds the read end of.
+; Read it before waiting: a child writing more than a pipe holds blocks until
+; somebody drains it.
+(fn capture ((program (& String)) (arguments (& (List String)))) -> (Result Child Error)
+  (started program arguments 1))
+
+(fn pid-of ((child (& Child))) -> i64
+  (match child
+    ((Child :pid pid :output _) (clone pid))))
+
+; The exit status, or `128` plus the signal for a child something killed, which
+; is what a shell reports. A program that could not be started at all is `127`,
+; delivered by the child rather than by this call, because a failed `exec`
+; after a successful `fork` is already a running process.
+(fn wait ((child (& Child))) -> (Result i64 Error)
+  (let status (wait-raw (pid-of child)))
+  (let code (last-error))
+  (if (= code 0) (Result:Ok status) (Result:Err (Error :code code))))
+
+(fn read-output ((child (& Child))) -> (Result String Error)
+  (match child
+    ((Child :pid _ :output output)
+      (let text (read-raw (clone output)))
+      (let code (last-error))
+      (if (= code 0) (Result:Ok text) (Result:Err (Error :code code))))))
+
+; Written as a `defer` beside the call that opened the descriptor. It answers
+; nothing: a close that fails has already lost the descriptor, and there is
+; nothing a caller could do about it that it could not do about a leak.
+(fn close-output ((child (&mut Child))) -> unit
+  (match child
+    ((Child :pid _ :output output)
+      (let discarded (close-raw (clone output)))
+      (set output -1))))

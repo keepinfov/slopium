@@ -62,7 +62,7 @@ cat >"$check_dir/runtime.slp" <<'SLOPIUM'
 (take std:io println println-i64 read-i64)
 (take std:string concat from-i64 split substring to-i64 trim)
 (take std:float from-f64 println-f64 to-f64)
-(take std:process arg args-len)
+(take std:process arg args-len capture wait read-output close-output)
 (take std:fs delete exists read write Error)
 (take std:prelude Option Result)
 (take std:list (map :as list-map) (sort-by :as list-sort-by))
@@ -388,6 +388,22 @@ cat >"$check_dir/runtime.slp" <<'SLOPIUM'
   (println-i64
     (match (bytes 48)
       ((Result:Ok drawn) (len (& drawn)))
+      ((Result:Err _) (- 0 1))))
+  ; A child, its output read through a pipe, and the descriptor closed by a
+  ; `defer` — so the fork, the pipe and the buffer C fills are all seen by ASan
+  ; and by valgrind (`D-148`).
+  (println-i64
+    (match (capture (& "/bin/echo") (& (list "runtime")))
+      ((Result:Ok child)
+        (let mut held child)
+        (defer (close-output (&mut held)))
+        (let spoken
+          (match (read-output (& held))
+            ((Result:Ok text) (len (& text)))
+            ((Result:Err _) (- 0 1))))
+        (match (wait (& held))
+          ((Result:Ok status) (+ status spoken))
+          ((Result:Err _) (- 0 1))))
       ((Result:Err _) (- 0 1))))
   (match message
     ((Message:Empty) 1)

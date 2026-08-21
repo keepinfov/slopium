@@ -785,12 +785,12 @@ ordinary modules of the bundled library, written in Slopium over `extern`
 declarations, and a program that uses one says so.
 
 The library is two packages. `core` is what a program with no C library under
-it can have — `option`, `result`, `list`, `string`, `float`, `map` and `set`.
-`std` is `core` plus what needs an operating system — `io`, `process` and
-`fs` — and it re-exports `core` through `std:prelude`, `std:option`,
-`std:result`, `std:list`, `std:string`, `std:float`, `std:map` and `std:set`,
-so a package that depends on `std` alone reaches everything by
-that name. The combinators live in modules of their own rather than in
+it can have — `option`, `result`, `list`, `string`, `builder`, `float`, `map`
+and `set`. `std` is `core` plus what needs an operating system — `io`,
+`process`, `fs`, `time` and `random` — and it re-exports `core` through
+`std:prelude`, `std:option`, `std:result`, `std:list`, `std:string`,
+`std:builder`, `std:float`, `std:map` and `std:set`, so a package that depends
+on `std` alone reaches everything by that name. The combinators live in modules of their own rather than in
 `prelude` because `option` and `result` both call theirs `map`.
 
 ```lisp
@@ -1021,7 +1021,40 @@ value would have nothing to close it, because a struct wrapping an `i64` owns
 nothing and no drop glue runs for it (`D-084`).
 
 `std:process` has `args-len`, `arg` and `args`, `env` returning
-`(Option String)`, and `exit`.
+`(Option String)`, `exit`, and the six that start a child (`D-148`).
+
+`spawn` leaves the child's standard output where this program's is, which is
+what a build tool wants. `capture` gives the child a pipe and hands back the
+read end. `wait` answers the exit status — or `128` plus the signal for a child
+something killed, and `127` for a program that could not be run at all, which is
+what a shell reports for each. A `Child` owns nothing: a struct wrapping an
+`i64` has no drop glue, so the descriptor is closed by a `defer` written beside
+the call that opened it. A `Child` that inherited carries `-1` and closing that
+is a no-op, so the same line is written either way.
+
+```lisp
+(take std:process Child capture wait read-output close-output)
+(take std:result Result)
+
+(fn said ((program (& String)) (arguments (& (List String)))) -> String
+  (match (capture program arguments)
+    ((Result:Ok child)
+      (let mut held child)
+      (defer (close-output (&mut held)))
+      ; Read before waiting: a child writing more than a pipe holds blocks
+      ; until somebody drains it.
+      (let spoken
+        (match (read-output (& held))
+          ((Result:Ok text) text)
+          ((Result:Err _) "")))
+      (match (wait (& held))
+        ((Result:Ok _) spoken)
+        ((Result:Err _) "")))
+    ((Result:Err _) "")))
+```
+
+The arguments are a `(& (List String))` and `argv[0]` is added by the runtime,
+so what a caller passes is the arguments and not the convention.
 
 `std:time` is `monotonic` and `realtime`, each `(Result i64 Error)` and each
 nanoseconds — the first since a point that does not move, so two readings can be

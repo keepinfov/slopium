@@ -160,6 +160,7 @@ of what was believed at the time is the part worth keeping.
 - [D-145 — a string is built in one buffer, and the buffer is a `(List u8)`](#d-145--a-string-is-built-in-one-buffer-and-the-buffer-is-a-list-u8)
 - [D-146 — a list can be written into, and the sort is a merge sort over indices](#d-146--a-list-can-be-written-into-and-the-sort-is-a-merge-sort-over-indices)
 - [D-147 — the clock and the entropy are the operating system's, in nanoseconds and bytes](#d-147--the-clock-and-the-entropy-are-the-operating-systems-in-nanoseconds-and-bytes)
+- [D-148 — a child process is started with its arguments joined by NUL, and its output is a descriptor a `defer` closes](#d-148--a-child-process-is-started-with-its-arguments-joined-by-nul-and-its-output-is-a-descriptor-a-defer-closes)
 
 ## D-001 — a native compiler, without LLVM
 
@@ -3285,3 +3286,51 @@ because asking for minus one byte is a mistake and an empty list would hide it.
 Neither module aborts (`D-087`). A call that fails is an `Err` carrying the
 `errno` the status slot held (`D-085`), which is what `std:fs` and `std:process`
 already do.
+
+## D-148 — a child process is started with its arguments joined by NUL, and its output is a descriptor a `defer` closes
+
+Status: approved · 2026-08-21
+
+`std:process` could read its own arguments, read the environment and exit. It
+could not start anything. It can: `spawn`, `capture`, `wait`, `read-output`,
+`close-output` and `pid-of`, over `fork`, `execvp`, `waitpid`, `pipe` and
+`close`, in the shape `std:fs` and the rest of `std:process` already are — a
+Slopium module over `extern`s, with a failure carried through the status slot
+(`D-085`) as an `Err` rather than an abort (`D-087`).
+
+**Both, and not one.** Inheriting the parent's output is what a build tool
+wants; capturing is what everything else does, and it is the half that cannot be
+worked around from outside. `spawn` leaves the child's standard output where the
+parent's is; `capture` gives the child the write end of a pipe and hands the read
+end back.
+
+**The argument vector crosses as one buffer of NUL-separated pieces with its
+length beside it.** A list of strings is not in the `extern` vocabulary
+(`D-065`), and adding a row for one would open the boundary to collections of
+owned values for the sake of this call. The buffer is the shape `D-079`
+established for every string the runtime is handed, and the only one an embedded
+NUL does not truncate; joining the pieces is three lines over `core:builder`,
+which is what `D-145` built. `argv[0]` is the program's own name, added by the
+runtime, so what a caller passes is the arguments and not the convention.
+
+**The descriptor is closed by a `defer`, and that is why this is expressible
+now.** A `Child` carries a pid and a descriptor, and neither owns anything: a
+struct wrapping an `i64` has no drop glue, so nothing runs when it dies
+(`D-084`). Before `D-133` the honest minimum was inheriting the parent's output,
+because a pipe held in a value nothing closes is a leak the compiler cannot see.
+`close-output` is written beside the call that opened it and runs however the
+scope ends, which is the same thing `tests/projects/pass/defer` demonstrates
+against a C handle. A `Child` that inherited carries `-1`, and closing that is a
+no-op, so the same `defer` is written either way.
+
+Two behaviours are the shell's rather than this library's invention, because a
+caller comparing a status against zero already handles both. A child something
+killed reports `128 + signal`. A program that could not be `exec`'d reports
+`127`, and it arrives as an ordinary exit status rather than an `Err`, because a
+failed `exec` after a successful `fork` is already a running process and the news
+is the child's to deliver.
+
+Capturing means reading before waiting: a child writing more than a pipe holds
+blocks until somebody drains it. That is a property of pipes and not of this
+design, and it is written down here and in the module because the deadlock it
+causes is the first thing anybody meets.
