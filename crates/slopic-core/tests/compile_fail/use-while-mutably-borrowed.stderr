@@ -1,0 +1,4 @@
+use-while-mutably-borrowed.slp:14:16: error[SL0300]: cannot use `holder` while it is mutably borrowed
+  |
+14 |       (consume holder)))
+  |                ^^^^^^

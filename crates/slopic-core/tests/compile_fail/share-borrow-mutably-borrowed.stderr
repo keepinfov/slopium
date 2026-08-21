@@ -1,0 +1,4 @@
+share-borrow-mutably-borrowed.slp:12:29: error[SL0300]: cannot share-borrow mutably borrowed `holder`
+  |
+12 |   (compare (&mut holder) (& holder))
+  |                             ^^^^^^

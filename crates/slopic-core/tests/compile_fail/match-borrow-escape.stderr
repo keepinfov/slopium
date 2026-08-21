@@ -1,4 +1,4 @@
-match-borrow-escape.slp:15:12: error[SL0200]: cannot move `message` while it is borrowed
+match-borrow-escape.slp:15:12: error[SL0300]: cannot move `message` while it is borrowed
   |
 15 |   (consume message)
   |            ^^^^^^^

@@ -1,0 +1,10 @@
+; Assigning to a name while something is still reading through a borrow of it.
+(fn look ((value (& i64))) -> i64
+  (clone value))
+
+(fn main () -> i32
+  (let mut count 1)
+  (let seen (& count))
+  (set count 2)
+  (look seen)
+  0)

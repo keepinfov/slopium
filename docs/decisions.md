@@ -156,6 +156,7 @@ of what was believed at the time is the part worth keeping.
 - [D-141 — a call through a block built in the same breath names its symbol](#d-141--a-call-through-a-block-built-in-the-same-breath-names-its-symbol)
 - [D-142 — an object with no debug information is refused, not handed back](#d-142--an-object-with-no-debug-information-is-refused-not-handed-back)
 - [D-143 — a form has two shapes, and a body starts on its own line](#d-143--a-form-has-two-shapes-and-a-body-starts-on-its-own-line)
+- [D-144 — every refusal about ownership carries an `SL03xx` code](#d-144--every-refusal-about-ownership-carries-an-sl03xx-code)
 
 ## D-001 — a native compiler, without LLVM
 
@@ -3114,3 +3115,32 @@ what the formatter produces, every fixture is `fmt --check`ed, and two
 properties run over the bundled library and the hundred refused sources beside
 it — laying out a source whose indentation has been taken away gives the same
 bytes as laying out the source, and a layout changes nothing but the whitespace.
+
+## D-144 — every refusal about ownership carries an `SL03xx` code
+
+Status: approved · 2026-08-21
+
+`docs/diagnostics.md` says what the families mean: `SL02xx` is name resolution
+and types, `SL03xx` is ownership and borrowing. Eight refusals that are plainly
+about ownership went through `Sema::error`, which defaults to
+`codes::NAME_OR_TYPE`, and shipped as `SL0200` — using a value while it is
+mutably borrowed, moving one while it is borrowed, assigning to one while it is
+borrowed, borrowing a moved value, borrowing an immutable binding exclusively,
+borrowing one exclusively twice, borrowing exclusively over a shared loan, and
+share-borrowing over an exclusive one. Their siblings in the same file pass
+`codes::OWNERSHIP` explicitly. So the same kind of mistake was reported under
+two families depending on which line raised it.
+
+They pass `codes::OWNERSHIP`. Two neighbours are deliberately untouched: "only a
+binding can be borrowed here" is about what a borrow may be taken of rather than
+about a loan, and "`{name}` is captured more than once" is about a list written
+twice.
+
+The reason it is this version and not a later one is `#23`. A frozen code never
+changes meaning, so after the freeze moving these is a compatibility break
+rather than a correction, and leaving them is a permanent promise that `SL02xx`
+sometimes means ownership.
+
+Five of the eight were pinned by no snapshot anywhere, which is how they drifted
+in the first place, and each now has a `compile_fail` case of its own. The
+document did not change: this makes it true.
