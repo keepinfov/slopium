@@ -1,2 +1,1 @@
-(fn main ((argument i64)) -> i32
-  0)
+(fn main ((argument i64)) -> i32 0)

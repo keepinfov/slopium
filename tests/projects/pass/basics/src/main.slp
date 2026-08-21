@@ -4,9 +4,7 @@
 (take std:io print println-bool println-i64)
 
 (fn factorial ((value i64)) -> i64
-  (if (< value 2)
-    1
-    (* value (factorial (- value 1)))))
+  (if (< value 2) 1 (* value (factorial (- value 1)))))
 
 (fn sum-eight ((a i64) (b i64) (c i64) (d i64) (e i64) (f i64) (g i64) (h i64)) -> i64
   (+ (+ (+ a b) (+ c d)) (+ (+ e f) (+ g h))))
@@ -22,7 +20,8 @@
   (println-bool true)
   (println-i64 (factorial 6))
   (println-i64 (sum-eight 1 2 3 4 5 6 7 8))
-  (do ())
+  (do
+    ())
   0)
 
 (test "integer and floating arithmetic"

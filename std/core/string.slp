@@ -11,21 +11,22 @@
 
 (take core:option Option)
 
-(export byte-at substring concat from-bytes equals starts-with find contains
-  trim split from-i64 to-i64 from-u64 to-u64 hex-from-u64
-  hex-prefixed-from-u64 hash)
+(export byte-at substring concat from-bytes equals starts-with find contains trim split
+  from-i64 to-i64 from-u64 to-u64 hex-from-u64 hex-prefixed-from-u64 hash)
 
 ; The length travels beside the pointer, because a Slopium string may contain a
 ; NUL byte and C would stop at it (`D-079`).
 (extern "sl_rt_string_byte"
-  (byte-raw (text (& String)) (length i64) (index i64)) -> i64)
+  (byte-raw (text (& String)) (length i64) (index i64))
+  -> i64)
 
 (extern "sl_rt_string_slice"
-  (slice-raw (text (& String)) (length i64) (start i64) (end i64)) -> String)
+  (slice-raw (text (& String)) (length i64) (start i64) (end i64))
+  -> String)
 
 (extern "sl_rt_string_concat"
-  (concat-raw (left (& String)) (left-length i64)
-    (right (& String)) (right-length i64)) -> String)
+  (concat-raw (left (& String)) (left-length i64) (right (& String)) (right-length i64))
+  -> String)
 
 ; One `i64` per byte: a slice is how a list of bytes crosses the boundary, and
 ; `i64` is the narrowest element type there is.
@@ -75,9 +76,7 @@
         (set found index)
         (break))
       (set index (+ index 1)))
-    (if (< found 0)
-      (Option:None)
-      (Option:Some found))))
+    (if (< found 0) (Option:None) (Option:Some found))))
 
 (fn contains ((text (& String)) (needle (& String))) -> bool
   (match (find text needle)
@@ -196,9 +195,7 @@
     (set text next)
     (set remaining (/ remaining 16))
     (set written (+ written 1)))
-  (if (= (len (& text)) 0)
-    "0"
-    text))
+  (if (= (len (& text)) 0) "0" text))
 
 (fn hex-from-u64 ((value u64) (width i64)) -> String
   (hex-digits-of value width))
@@ -236,9 +233,7 @@
     (if ok
       (if negative
         (Option:Some total)
-        (if (< total smallest)
-          (Option:None)
-          (Option:Some (- total))))
+        (if (< total smallest) (Option:None) (Option:Some (- total))))
       (Option:None))))
 
 ; The unsigned counterpart of `to-i64`. No sign is accepted — a `u64` has none

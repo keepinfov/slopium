@@ -4,7 +4,8 @@
 
 (fn main () -> i32
   (let mut numbers (list 1 2))
-  (do (push (&mut numbers) 3))
+  (do
+    (push (&mut numbers) 3))
   (println-i64 (get (& numbers) 2))
   (println-i64 (remove (&mut numbers) 1))
   (println-i64 (len (& numbers)))
@@ -12,7 +13,8 @@
   (let mut words (list "one" "two"))
   (let first (get-ref (& words) 0))
   (println first)
-  (do (push (&mut words) "three"))
+  (do
+    (push (&mut words) "three"))
   (let removed (remove (&mut words) 1))
   (println (& removed))
   (match (pop (&mut words))
@@ -40,7 +42,8 @@
 (test "copy list operations"
   (do
     (let mut values (list 10 20))
-    (do (push (&mut values) 30))
+    (do
+      (push (&mut values) 30))
     (= (+ (remove (&mut values) 1) (len (& values))) 22)))
 
 (test "pop reports empty"

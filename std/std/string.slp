@@ -4,21 +4,13 @@
 ; for `core`, so this module re-exports them the way `prelude` re-exports the
 ; language items (`D-082`).
 
-(export
-  (core:string:byte-at :as byte-at)
-  (core:string:substring :as substring)
-  (core:string:concat :as concat)
-  (core:string:from-bytes :as from-bytes)
-  (core:string:equals :as equals)
-  (core:string:starts-with :as starts-with)
-  (core:string:find :as find)
-  (core:string:contains :as contains)
-  (core:string:trim :as trim)
-  (core:string:split :as split)
-  (core:string:from-i64 :as from-i64)
-  (core:string:to-i64 :as to-i64)
-  (core:string:from-u64 :as from-u64)
-  (core:string:to-u64 :as to-u64)
+(export (core:string:byte-at :as byte-at) (core:string:substring :as substring)
+  (core:string:concat :as concat) (core:string:from-bytes :as from-bytes)
+  (core:string:equals :as equals) (core:string:starts-with :as starts-with)
+  (core:string:find :as find) (core:string:contains :as contains)
+  (core:string:trim :as trim) (core:string:split :as split)
+  (core:string:from-i64 :as from-i64) (core:string:to-i64 :as to-i64)
+  (core:string:from-u64 :as from-u64) (core:string:to-u64 :as to-u64)
   (core:string:hex-from-u64 :as hex-from-u64)
   (core:string:hex-prefixed-from-u64 :as hex-prefixed-from-u64)
   (core:string:hash :as hash))

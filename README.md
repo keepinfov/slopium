@@ -419,7 +419,7 @@ modules = { arch = "src/arch/aarch64.slp" }
 ```
 
 ```lisp
-(take arch name pointer-bits)   ; одна и та же строка под любой таргет
+(take arch name pointer-bits) ; одна и та же строка под любой таргет
 ```
 
 Работает здесь именно имя. Если просто отбирать файлы, они останутся названными
@@ -923,9 +923,7 @@ cc = "x86_64-unknown-linux-gnu-gcc"
 (take std:io println println-i64)
 
 (fn fib ((n i64)) -> i64
-  (if (< n 2)
-      n
-      (+ (fib (- n 1)) (fib (- n 2)))))
+  (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2)))))
 
 (fn main () -> i32
   (let message "fib(10)")
@@ -982,6 +980,7 @@ cc = "x86_64-unknown-linux-gnu-gcc"
 ;; Расстояние между двумя точками, в тех единицах, в которых их дали.
 (fn distance ((a (& Point)) (b (& Point))) -> f64
   (sqrt (+ (square (- (. b x) (. a x))) (square (- (. b y) (. a y))))))
+```
 
 `(defer body ...)` выполняет своё тело, когда заканчивается область, — чем бы
 она ни закончилась: концом тела функции, `break`, `continue` или ошибочной
@@ -1020,7 +1019,8 @@ cc = "x86_64-unknown-linux-gnu-gcc"
 (`D-139`).
 
 ```lisp
-(fn leftward ((n i64)) -> i64 ((<< double increment) n))
+(fn leftward ((n i64)) -> i64
+  ((<< double increment) n))
 
 (let composed (<< double increment))
 ```
@@ -1038,7 +1038,10 @@ cc = "x86_64-unknown-linux-gnu-gcc"
 их не съедает:
 
 ```lisp
-(enum Status Pending Done Failed)
+(enum Status
+  Pending
+  Done
+  Failed)
 
 (let status (Status:Done))
 (if (= status (Status:Done)) (report status) (retry status))
@@ -1061,7 +1064,11 @@ cc = "x86_64-unknown-linux-gnu-gcc"
 ```lisp
 (fn escaped ((byte i64)) -> String
   (match byte
-    (34 "\\\"") (92 "\\\\") (10 "\\n") (13 "\\r") (9 "\\t")
+    (34 "\\\"")
+    (92 "\\\\")
+    (10 "\\n")
+    (13 "\\r")
+    (9 "\\t")
     (other (if (< other 32) (unicode-escape other) ""))))
 
 (const com1-data 0x3F8 : u16)
@@ -1076,7 +1083,8 @@ cc = "x86_64-unknown-linux-gnu-gcc"
   (let mut n 0)
   (loop
     (set n (+ n 1))
-    (when (= n stop) (break (* n 2)))))
+    (when (= n stop)
+      (break (* n 2)))))
 
 (fn scores () -> (Map String i64)
   (let mut table (map-new hash equals) : (Map String i64))
@@ -1113,7 +1121,8 @@ cc = "x86_64-unknown-linux-gnu-gcc"
 говорит, под какой таргет оно объявлено.
 
 ```lisp
-(fn (inline) blend ((a i64) (b i64)) -> i64 (* (+ a b) 2))
+(fn (inline) blend ((a i64) (b i64)) -> i64
+  (* (+ a b) 2))
 
 (fn (deprecated "вызывайте `parse-line`") parse ((s (& String))) -> i64 0)
 
@@ -1161,8 +1170,7 @@ cc = "x86_64-unknown-linux-gnu-gcc"
 
 ```lisp
 (fn set-bits ((port (Ptr u8)) (mask u8)) -> unit
-  (unsafe
-    (volatile-write port (bit-or (volatile-read port) mask))))
+  (unsafe (volatile-write port (bit-or (volatile-read port) mask))))
 ```
 
 Указывать можно только на скаляр, `ptr-offset` считает элементы, а не байты.

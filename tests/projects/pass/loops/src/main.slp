@@ -5,8 +5,10 @@
   (let mut total 0)
   (while (< value 10)
     (set value (+ value 1))
-    (when (= value 2) (continue))
-    (when (= value 6) (break))
+    (when (= value 2)
+      (continue))
+    (when (= value 6)
+      (break))
     (set total (+ total value)))
   total)
 
@@ -14,7 +16,8 @@
   (let mut value 0)
   (loop
     (set value (+ value 1))
-    (when (= value 8) (break)))
+    (when (= value 8)
+      (break)))
   value)
 
 (fn main () -> i32

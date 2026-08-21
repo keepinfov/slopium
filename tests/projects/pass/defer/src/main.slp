@@ -83,8 +83,7 @@
   (let before-close (handle-closed))
   (let handle (reads-and-returns))
   (and (> handle 0)
-    (and (= (handle-opened) (+ before-open 1))
-      (= (handle-closed) (+ before-close 1)))))
+    (and (= (handle-opened) (+ before-open 1)) (= (handle-closed) (+ before-close 1)))))
 
 (test "a deferred close runs once on each of break, continue and try"
   (let before-close (handle-closed))

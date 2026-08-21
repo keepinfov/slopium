@@ -1,8 +1,4 @@
 ; What a hosted package does with a list. `core`'s (`D-083`), re-exported.
 
-(export
-  (core:list:map :as map)
-  (core:list:filter :as filter)
-  (core:list:fold :as fold)
-  (core:list:find :as find)
-  (core:list:sort-by :as sort-by))
+(export (core:list:map :as map) (core:list:filter :as filter) (core:list:fold :as fold)
+  (core:list:find :as find) (core:list:sort-by :as sort-by))

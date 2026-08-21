@@ -22,8 +22,7 @@
 ; block owns `who` from the moment the lambda is written, and its drop helper
 ; is what releases it — which is the whole reason a `Fn` is not `Copy`.
 (fn greeter ((who String)) -> (Fn ((& String)) String)
-  (lambda (who) ((mark (& String))) -> String
-    (concat (& who) mark)))
+  (lambda (who) ((mark (& String))) -> String (concat (& who) mark)))
 
 ; A `lambda` written inside a generic body is monomorphized with it: the
 ; capture is a `T` here and an `i64` and a `String` in the program below.
@@ -37,8 +36,7 @@
 (fn nothing () -> (Option String)
   (Option:None))
 
-(fn rank-of ((names (& (List String))) (ranks (& (List i64))) (name (& String)))
-  -> i64
+(fn rank-of ((names (& (List String))) (ranks (& (List i64))) (name (& String))) -> i64
   (let size (len names))
   (let mut index 0)
   (let mut found 0)

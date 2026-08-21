@@ -86,9 +86,7 @@
       (set found index)
       (break))
     (set index (+ index 1)))
-  (if (< found 0)
-    (Option:None)
-    (Option:Some found)))
+  (if (< found 0) (Option:None) (Option:Some found)))
 
 ; `before` answers whether the first element belongs ahead of the second. A sort
 ; parameterised by a function is what a language with traits gets from `Ord`,
@@ -118,8 +116,9 @@
 ; whatever a `lambda` moved into it and passing one is a move. This is the same
 ; rule the header states about elements, applied to the function itself: a
 ; caller that only wants a comparison made takes a borrow of the comparator.
-(fn selection-order (T) ((items (& (List T)))
-    (before (Fn ((& T) (& T)) bool)) (size i64)) -> (List i64)
+(fn selection-order (T)
+  ((items (& (List T))) (before (Fn ((& T) (& T)) bool)) (size i64))
+  -> (List i64)
   (let mut remaining (list 0))
   (let mut fill 1)
   (while (< fill size)
@@ -134,16 +133,15 @@
 
 ; Where in `remaining` the smallest element is. `before` is strict and ties
 ; keep the slot they already had, so the sort is stable.
-(fn least-slot (T) ((items (& (List T)))
-    (before (& (Fn ((& T) (& T)) bool)))
-    (remaining (& (List i64)))) -> i64
+(fn least-slot (T)
+  ((items (& (List T))) (before (& (Fn ((& T) (& T)) bool))) (remaining (& (List i64))))
+  -> i64
   (let size (len remaining))
   (let mut best 0)
   (let mut slot 1)
   (while (< slot size)
-    (when (before
-        (get-ref items (get remaining slot))
-        (get-ref items (get remaining best)))
+    (when (before (get-ref items (get remaining slot))
+                  (get-ref items (get remaining best)))
       (set best slot))
     (set slot (+ slot 1)))
   best)

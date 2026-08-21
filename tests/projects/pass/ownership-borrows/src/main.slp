@@ -28,7 +28,8 @@
     (let mut values (list "one"))
     (let first (get-ref (& values) 0))
     (println first)
-    (do (push (&mut values) "two"))
+    (do
+      (push (&mut values) "two"))
     (= (len (& values)) 2)))
 
 (test "clone keeps the source available"

@@ -8,26 +8,34 @@
 
 (take std:io println-i64 println-bool)
 
-(fn double ((n i64)) -> i64 (* n 2))
+(fn double ((n i64)) -> i64
+  (* n 2))
 
-(fn increment ((n i64)) -> i64 (+ n 1))
+(fn increment ((n i64)) -> i64
+  (+ n 1))
 
-(fn negate ((n i64)) -> i64 (- 0 n))
+(fn negate ((n i64)) -> i64
+  (- 0 n))
 
-(fn apply-to ((f (Fn (i64) i64)) (n i64)) -> i64 (f n))
+(fn apply-to ((f (Fn (i64) i64)) (n i64)) -> i64
+  (f n))
 
 ; `<<` keeps the order of names a nested call has: this is
 ; `(double (increment n))`.
-(fn leftward ((n i64)) -> i64 ((<< double increment) n))
+(fn leftward ((n i64)) -> i64
+  ((<< double increment) n))
 
 ; `>>` reads in the order things happen, so the same computation reverses.
-(fn rightward ((n i64)) -> i64 ((>> increment double) n))
+(fn rightward ((n i64)) -> i64
+  ((>> increment double) n))
 
 ; As many as you give it.
-(fn three ((n i64)) -> i64 ((<< negate double increment) n))
+(fn three ((n i64)) -> i64
+  ((<< negate double increment) n))
 
 ; Composing one function is that function.
-(fn one ((n i64)) -> i64 ((<< double) n))
+(fn one ((n i64)) -> i64
+  ((<< double) n))
 
 (fn main () -> i32
   (println-i64 (leftward 20))
@@ -46,4 +54,4 @@
 
 (test "composition answers what the nesting answers"
   (and (= (leftward 20) (double (increment 20)))
-    (= (rightward 20) (double (increment 20)))))
+       (= (rightward 20) (double (increment 20)))))

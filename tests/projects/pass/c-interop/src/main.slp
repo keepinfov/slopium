@@ -4,11 +4,15 @@
 
 (take std:io println println-bool println-i64)
 
-(extern "hal_sum_ten" (hal-sum-ten (a i64) (b i64) (c i64) (d i64) (e i64) (f i64) (g
-      i64) (h i64) (i i64) (j i64)) -> i64)
+(extern "hal_sum_ten"
+  (hal-sum-ten (a i64) (b i64) (c i64) (d i64) (e i64) (f i64) (g i64) (h i64) (i i64)
+    (j i64))
+  -> i64)
 
-(extern "hal_sum_ten_doubles" (hal-sum-ten-doubles (a f64) (b f64) (c f64) (d f64) (e
-      f64) (f f64) (g f64) (h f64) (i f64) (j f64)) -> f64)
+(extern "hal_sum_ten_doubles"
+  (hal-sum-ten-doubles (a f64) (b f64) (c f64) (d f64) (e f64) (f f64) (g f64) (h f64)
+    (i f64) (j f64))
+  -> f64)
 
 (extern "hal_narrow" (hal-narrow (value i32)) -> i32)
 

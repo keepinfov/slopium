@@ -9,9 +9,16 @@
 (take std:io println-i64 println-bool)
 (take std:option Option)
 
-(enum Status Pending Done Failed)
+(enum Status
+  Pending
+  Done
+  Failed)
 
-(enum Direction North South East West)
+(enum Direction
+  North
+  South
+  East
+  West)
 
 (fn rank ((status Status)) -> i64
   (match status
@@ -49,5 +56,4 @@
 
 (test "a fieldless enum compares and survives the comparison"
   (let status (Status:Failed))
-  (and (= status (Status:Failed))
-    (and (!= status (Status:Done)) (= (rank status) 2))))
+  (and (= status (Status:Failed)) (and (!= status (Status:Done)) (= (rank status) 2))))

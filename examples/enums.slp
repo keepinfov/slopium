@@ -19,7 +19,7 @@
   0)
 
 (fn state () -> i64
-  (println(+ 1 2))
+  (println (+ 1 2))
   0)
 
 (test "enum payload"
@@ -27,5 +27,3 @@
 
 (test "owned enum payload"
   (= (score (Choice::Message "hello enum")) 1))
-
-

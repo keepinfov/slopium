@@ -22,7 +22,8 @@
 (extern "sl_rt_print_bytes" (write-bytes (bytes (& String)) (length i64)) -> unit)
 
 (extern "sl_rt_println_bytes"
-  (write-line-bytes (bytes (& String)) (length i64)) -> unit)
+  (write-line-bytes (bytes (& String)) (length i64))
+  -> unit)
 
 (extern "sl_rt_read_line" (read-line-raw) -> String)
 
@@ -58,9 +59,7 @@
 ; status slot and not the length is what says which happened.
 (fn read-line () -> (Option String)
   (let line (read-line-raw))
-  (if (= (last-error) 0)
-    (Option:Some line)
-    (Option:None)))
+  (if (= (last-error) 0) (Option:Some line) (Option:None)))
 
 ; A line read from a terminal usually has spaces around it, and a line that is
 ; only spaces is not a number, so the trim happens here and not in `to-i64`.

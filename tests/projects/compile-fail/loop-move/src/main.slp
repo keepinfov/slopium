@@ -1,4 +1,5 @@
-(fn consume ((value String)) -> unit ())
+(fn consume ((value String)) -> unit
+  ())
 
 (fn main () -> i32
   (let mut i 0)

@@ -87,8 +87,10 @@
   (equals (& tenth) (& expected)))
 
 (test "every shape of value survives the trip"
-  (and (round-trips 0.1) (round-trips (/ 1.0 3.0)) (round-trips (- 0.0 3.75)) (
-      round-trips 12345.6789)))
+  (and (round-trips 0.1)
+       (round-trips (/ 1.0 3.0))
+       (round-trips (- 0.0 3.75))
+       (round-trips 12345.6789)))
 
 (test "a zero keeps the sign it had"
   (let plain (from-f64 0.0))
@@ -104,13 +106,15 @@
   (let expected-up "inf")
   (let expected-down "-inf")
   (let expected-none "nan")
-  (and (equals (& up) (& expected-up)) (equals (& down) (& expected-down)) (equals (&
-        none) (& expected-none))))
+  (and (equals (& up) (& expected-up))
+       (equals (& down) (& expected-down))
+       (equals (& none) (& expected-none))))
 
 (test "a name reads back as the value it names"
   (let up "inf")
   (let down "-inf")
-  (and (= (read (& up)) (infinity)) (do
+  (and (= (read (& up)) (infinity))
+    (do
       (let value (read (& down)))
       (= value (- 0.0 (infinity))))))
 
@@ -120,8 +124,11 @@
   (let trailing "1.")
   (let leading ".5")
   (let empty "")
-  (and (refused (& doubled)) (refused (& letters)) (refused (& trailing)) (refused (&
-        leading)) (refused (& empty))))
+  (and (refused (& doubled))
+       (refused (& letters))
+       (refused (& trailing))
+       (refused (& leading))
+       (refused (& empty))))
 
 (test "a whole number needs no point to be read"
   (let text "42")

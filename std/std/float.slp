@@ -16,11 +16,7 @@
 (take std:io print println read-line)
 (take std:string trim)
 
-(export
-  print-f64
-  println-f64
-  read-f64
-  (core:float:from-f64 :as from-f64)
+(export print-f64 println-f64 read-f64 (core:float:from-f64 :as from-f64)
   (core:float:to-f64 :as to-f64))
 
 ; Plain decimal, seventeen significant digits, and no exponent form ever

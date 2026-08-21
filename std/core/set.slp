@@ -37,6 +37,7 @@
 (fn each (T A) ((set (& (Set T))) (start A) (step (Fn (A (& T)) A))) -> A
   (match set
     ((Set :entries entries)
-      (fold entries start
+      (fold entries
+        start
         (lambda (step) ((carried A) (key (& T)) (value (& bool))) -> A
           (step carried key))))))

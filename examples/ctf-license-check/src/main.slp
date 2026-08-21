@@ -38,9 +38,7 @@
   (println (& pin-prompt))
   (let pin (entered))
   (if (= (mix-ticket ticket) 41904900)
-    (if (= (mix-pin pin) 411463)
-      (reveal-flag)
-      (reject-license))
+    (if (= (mix-pin pin) 411463) (reveal-flag) (reject-license))
     (reject-license)))
 
 ; Anything that is not a number is a wrong answer, not a crash.
