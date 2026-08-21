@@ -23,8 +23,9 @@
 
 (take core:option Option)
 (take core:string byte-at concat equals substring)
+(take core:builder Builder write-str)
 
-(export from-f64 to-f64)
+(export from-f64 to-f64 write-f64)
 
 (extern "sl_rt_f64_bits" (raw-bits (value f64)) -> i64)
 
@@ -445,3 +446,15 @@
             (let digits (without-high-zeros (& raw)))
             (Option:Some (assemble digits below negative)))
           (Option:None))))))
+
+; A float into a builder, here and not in `core:builder`, for the reason
+; `std:float` gives about `std:io` and `std:string`: a whole Slopium module is
+; one `.text` section, so taking one brings everything it calls, and a decimal
+; formatter is not small (`D-097`). A program that builds a string without
+; mentioning a float should not link one.
+;
+; It is the one write that allocates, because the formatter's answer is a
+; `String` and there is nowhere else to put the digits.
+(fn write-f64 ((into (&mut Builder)) (value f64)) -> unit
+  (let text (from-f64 value))
+  (write-str into (& text)))

@@ -878,6 +878,35 @@ signed value is rendered by its bit pattern — `(hex-from-u64 (as u64 value) 16
 two because arithmetic traps here: the usual mixing constants are written for a
 language where overflow wraps.
 
+`std:builder` — `core:builder` for a freestanding program — is how a string is
+built out of many pieces. `concat` allocates a fresh `String` and copies both
+sides, so accumulating with `(set out (concat (& out) (& piece)))` copies
+everything written so far on every piece, and a document of ten thousand
+entries costs the sum of its own prefixes. A builder writes each piece into one
+buffer that grows and allocates once, at the end (`D-145`):
+
+```lisp
+(take std:builder new write-str write-i64 write-byte build)
+
+(fn lines ((count i64)) -> String
+  (let mut out (new))
+  (let mut index 0)
+  (while (< index count)
+    (write-str (&mut out) (& "item "))
+    (write-i64 (&mut out) index)
+    (write-byte (&mut out) 10)
+    (set index (+ index 1)))
+  (build out))
+```
+
+`new`, `write-str`, `write-byte`, `write-i64`, `write-u64`, `size` and `build`.
+Everything that writes takes `(&mut Builder)` and returns `unit`; `build` takes
+the builder by value, because the bytes leave with the string. `write-i64` and
+`write-u64` put the digits straight into the buffer rather than formatting to a
+`String` first. A float goes in through `write-f64` in `std:float`, which is
+where the decimal formatter already lives (`D-097`) and the one write that
+allocates.
+
 `std:map` and `std:set` are a hash map and a hash set, and neither knows what a
 key is. Both take the two functions that make a key a key:
 

@@ -157,6 +157,7 @@ of what was believed at the time is the part worth keeping.
 - [D-142 — an object with no debug information is refused, not handed back](#d-142--an-object-with-no-debug-information-is-refused-not-handed-back)
 - [D-143 — a form has two shapes, and a body starts on its own line](#d-143--a-form-has-two-shapes-and-a-body-starts-on-its-own-line)
 - [D-144 — every refusal about ownership carries an `SL03xx` code](#d-144--every-refusal-about-ownership-carries-an-sl03xx-code)
+- [D-145 — a string is built in one buffer, and the buffer is a `(List u8)`](#d-145--a-string-is-built-in-one-buffer-and-the-buffer-is-a-list-u8)
 
 ## D-001 — a native compiler, without LLVM
 
@@ -3144,3 +3145,47 @@ sometimes means ownership.
 Five of the eight were pinned by no snapshot anywhere, which is how they drifted
 in the first place, and each now has a `compile_fail` case of its own. The
 document did not change: this makes it true.
+
+## D-145 — a string is built in one buffer, and the buffer is a `(List u8)`
+
+Status: approved · 2026-08-21
+
+`concat` takes two strings, allocates a third and copies both into it. That is
+the only way the library had to join anything, so accumulating a document was
+written as `(set out (concat (& out) (& piece)))` — which copies everything
+accumulated so far on every piece, and costs the sum of the prefixes. Building
+40,000 JSON records that way takes 41.0 seconds and 1.07 MB of output; through
+a builder it takes 88 milliseconds, and the curve is a straight line rather than
+a parabola.
+
+`core:builder` is a `Builder` over one `(List u8)` that grows in place, with
+`new`, `write-str`, `write-byte`, `write-i64`, `write-u64`, `size` and `build`.
+Everything that writes takes `(&mut Builder)`; `build` takes the builder by
+value, because the bytes leave with the string and a buffer that has been handed
+over is not one to keep writing to.
+
+**The buffer is a `(List u8)` and that is a word per byte.** Every integer in
+this language is one machine word wide whatever its type says (`D-107`), so a
+byte list is eight times the size of the string it will become. That is the
+price of not adding a byte-packed collection to a language whose type vocabulary
+is closed, it is paid only while the string is being built, and the alternative
+— a growable buffer inside the runtime — would be a resource with no destructor
+in a language whose argument is that it has none (`D-084`). It also means the
+module needs no runtime entry point of its own: `sl_rt_string_from_bytes`
+already takes one word per byte, and `sl_rt_string_byte` is how a piece is read.
+
+`write-i64` and `write-u64` put digits into the buffer directly rather than
+calling `core:string`'s `from-i64`, which builds its answer by prepending one
+`String` per digit. That is also why the module does not `take core:string`: a
+whole Slopium module is one `.text` section (`D-097`), and a program that builds
+strings should not link a parser and a splitter to do it.
+
+**`write-f64` lives in `core:float`,** for the same reason `std:float` is a
+module rather than five names in `std:io` and `std:string`: the decimal
+formatter is not small, and a program that builds a string without mentioning a
+float should not link one. It is the one write that allocates, because the
+formatter's answer is a `String` and there is nowhere else for the digits to go.
+
+`(format "task #{}: {}" id title)` is not built on top of this. It is reserved
+as a form at the freeze (`D-125`), and the cost this issue was about is the
+copying rather than the spelling.

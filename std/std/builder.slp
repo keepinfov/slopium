@@ -1,0 +1,6 @@
+; What a hosted package builds a string with. `core`'s (`D-083`), re-exported.
+
+(export (core:builder:Builder :as Builder) (core:builder:new :as new)
+  (core:builder:write-str :as write-str) (core:builder:write-byte :as write-byte)
+  (core:builder:write-i64 :as write-i64) (core:builder:write-u64 :as write-u64)
+  (core:builder:size :as size) (core:builder:build :as build))
