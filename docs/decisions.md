@@ -159,6 +159,7 @@ of what was believed at the time is the part worth keeping.
 - [D-144 — every refusal about ownership carries an `SL03xx` code](#d-144--every-refusal-about-ownership-carries-an-sl03xx-code)
 - [D-145 — a string is built in one buffer, and the buffer is a `(List u8)`](#d-145--a-string-is-built-in-one-buffer-and-the-buffer-is-a-list-u8)
 - [D-146 — a list can be written into, and the sort is a merge sort over indices](#d-146--a-list-can-be-written-into-and-the-sort-is-a-merge-sort-over-indices)
+- [D-147 — the clock and the entropy are the operating system's, in nanoseconds and bytes](#d-147--the-clock-and-the-entropy-are-the-operating-systems-in-nanoseconds-and-bytes)
 
 ## D-001 — a native compiler, without LLVM
 
@@ -3241,3 +3242,46 @@ elements — because the number of moves stays quadratic and each move became fi
 runtime calls instead of one memory copy. That is the whole argument for
 measuring a performance claim rather than reasoning about it, and the reason
 this entry describes an algorithm rather than a refactor.
+
+## D-147 — the clock and the entropy are the operating system's, in nanoseconds and bytes
+
+Status: approved · 2026-08-21
+
+A program had no way to ask what time it is and no way to get a byte nobody can
+predict. Both come from the operating system, so both are `std` and neither is
+`core`: a freestanding program has no clock to read and no kernel to ask.
+
+`std:time` is `monotonic` and `realtime`, and there are two because they answer
+different questions. A monotonic reading only ever goes forward and is what a
+duration is measured with; a wall-clock reading is what a timestamp is written
+from and can move backwards when something corrects it, so measuring an interval
+with it is a bug that surfaces about once a year. Both are **nanoseconds in an
+`i64`** rather than seconds in an `f64`: a wall-clock reading is around
+1.7 × 10^18 nanoseconds and an `f64` stops holding consecutive integers at 2^53,
+so a float would have been rounding the clock away since 1970. An `i64` of
+nanoseconds is exact until 2262.
+
+`struct timespec` is not in the `extern` vocabulary (`D-065`) and adding a row
+for it would open the boundary to records for the sake of one call, so the
+runtime is where a reading is flattened into one number. That is the same
+division `std:fs` already makes: what crosses is scalars, and the shape stays in
+C.
+
+`std:random` is `bytes` and `number`, over `getrandom` with `/dev/urandom` as
+the fallback a kernel too old for it still offers. There is no seed and no
+generator, because a sequence a caller can reproduce and one nobody can predict
+are different things and only the second is safe to reach for without being
+asked for by name; a reproducible one is a few lines over `core:list` and
+belongs to whoever needs it. `number` shifts eight bytes together with `shl` and
+`bit-or` rather than multiplying, because arithmetic traps on overflow (`D-031`)
+and the top byte of a random word overflows every time.
+
+The buffer is filled by C into slots the library made first: `(&mut (List u8))`
+hands over the elements and their count and C may not resize the collection
+(`D-124`), so the length is decided in Slopium and the bytes are written into
+it. A negative count is refused with `EINVAL` rather than clamped to nothing,
+because asking for minus one byte is a mistake and an empty list would hide it.
+
+Neither module aborts (`D-087`). A call that fails is an `Err` carrying the
+`errno` the status slot held (`D-085`), which is what `std:fs` and `std:process`
+already do.

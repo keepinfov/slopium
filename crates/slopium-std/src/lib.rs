@@ -78,6 +78,8 @@ pub const TOOLCHAIN_PACKAGES: &[ToolchainPackage] = &[
             ("float", include_str!("../../../std/std/float.slp")),
             ("process", include_str!("../../../std/std/process.slp")),
             ("fs", include_str!("../../../std/std/fs.slp")),
+            ("time", include_str!("../../../std/std/time.slp")),
+            ("random", include_str!("../../../std/std/random.slp")),
             ("panic", include_str!("../../../std/std/panic.slp")),
             ("test", include_str!("../../../std/std/test.slp")),
         ],

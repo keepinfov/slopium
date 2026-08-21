@@ -28,7 +28,7 @@ dependencies = []
 name = "std"
 version = "0.13.0"
 source = "toolchain"
-checksum = "7d54d6693da7fb33c7677e91a118f53ed47dc6e5890d73ce301ba5453f7d33ba"
+checksum = "d544754bc24023827d5763c1dd81bfd00d1cfd8d89da71f11d62cb6b1b68f207"
 dependencies = [
     "core",
 ]
