@@ -13,6 +13,41 @@ rather than everything it touched.
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-08-21
+
+### Added
+- `core:builder` and `std:builder` build a string out of many pieces in one
+  growing buffer, with `new`, `write-str`, `write-byte`, `write-i64`,
+  `write-u64`, `size` and `build`, and `write-f64` in `std:float`. Accumulating
+  with `concat` copies everything written so far on every piece; a document of
+  40,000 records that took 41.0s to build that way takes 88ms through a builder.
+- `std:time` reads the clock — `monotonic` for a duration and `realtime` for a
+  timestamp, both nanoseconds in an `i64` — and `std:random` draws entropy with
+  `bytes` and `number`. Both are Slopium over the runtime, and a call that fails
+  is an `Err` carrying its `errno` rather than an abort.
+- `std:process` starts a child: `spawn` leaves its output where this program's
+  is, `capture` gives it a pipe and hands back the read end, and `wait` answers
+  the exit status. A `Child` owns nothing, so the descriptor is closed by a
+  `defer` written beside the call that opened it.
+- A list has `insert`, `swap`, `clear` and `truncate`, in `core:list` and
+  `std:list`, and `sort-by` is a merge sort over the indices with the
+  permutation applied by `swap` instead of a selection sort that moved the tail
+  of the list on every placement. Sorting 10,000 scrambled integers took 3,262ms
+  and takes 21ms.
+
+### Changed
+- `slopium fmt` lays a form out instead of wrapping it: a form fits on its line
+  or its arguments go one per line, a declaration's body starts below its
+  signature, and an `export` packs rather than becoming a column. A break can no
+  longer land inside an argument, which is what column-88 wrapping used to do.
+
+### Fixed
+- A refusal about ownership or borrowing is reported as `SL0300` wherever it is
+  raised. Eight of them — using, moving or assigning to a value that is
+  borrowed, and the four ways two borrows can conflict — used to arrive as
+  `SL0200`, which `docs/diagnostics.md` reserves for names and types.
+
+
 ## [0.13.0] - 2026-08-21
 
 ### Added
@@ -433,6 +468,7 @@ package manager, the language server and the Neovim plugin as they stood when
 tagging began.
 
 [Unreleased]: https://github.com/keepinfov/slopium/compare/v0.11.0...HEAD
+[0.14.0]: https://github.com/keepinfov/slopium/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/keepinfov/slopium/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/keepinfov/slopium/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/keepinfov/slopium/compare/v0.10.0...v0.11.0
