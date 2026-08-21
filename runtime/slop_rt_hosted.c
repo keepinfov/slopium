@@ -14,6 +14,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/random.h>
+#include <sys/types.h>
+#include <time.h>
 
 typedef struct SlString SlString;
 
@@ -286,4 +289,78 @@ int32_t sl_rt_test_result(const char *name, int32_t passed) {
     }
     sl_test_noted = 0;
     return passed ? 0 : 1;
+}
+
+/* A clock and entropy, both of which belong to the operating system, so both
+ * are here and not in `slop_rt_core.c`.
+ *
+ * `struct timespec` is not in the `extern` vocabulary (`D-065`), so this is
+ * where a reading is flattened into one `int64_t` of nanoseconds — which holds
+ * a monotonic reading for as long as a machine stays up and a wall-clock one
+ * until the year 2262 (`D-147`). */
+static int64_t sl_clock_nanos(clockid_t clock) {
+    sl_last_error = 0;
+    struct timespec now;
+    if (clock_gettime(clock, &now) != 0) {
+        sl_last_error = errno;
+        return 0;
+    }
+    return (int64_t)now.tv_sec * 1000000000 + (int64_t)now.tv_nsec;
+}
+
+int64_t sl_rt_time_monotonic(void) {
+    return sl_clock_nanos(CLOCK_MONOTONIC);
+}
+
+int64_t sl_rt_time_realtime(void) {
+    return sl_clock_nanos(CLOCK_REALTIME);
+}
+
+/* `/dev/urandom` is what a kernel without `getrandom` still offers, and what a
+ * `getrandom` refused for any reason other than a signal falls back to. */
+static int sl_random_from_urandom(unsigned char *out, size_t want) {
+    FILE *source = fopen("/dev/urandom", "rb");
+    if (source == NULL) {
+        return 0;
+    }
+    size_t got = fread(out, 1, want, source);
+    fclose(source);
+    return got == want;
+}
+
+/* Fills a `(&mut (List u8))` the caller already sized: C is handed the
+ * elements and their count and may not resize the collection (`D-124`). One
+ * machine word per byte, because that is what a list of any integer type is
+ * (`D-107`). Returns how many bytes were written, which the library compares
+ * against what it asked for. */
+int64_t sl_rt_random_bytes(int64_t *elements, int64_t count) {
+    sl_last_error = 0;
+    if (count < 0) {
+        sl_last_error = EINVAL;
+        return 0;
+    }
+    unsigned char chunk[256];
+    int64_t filled = 0;
+    while (filled < count) {
+        size_t want = (size_t)(count - filled);
+        if (want > sizeof chunk) {
+            want = sizeof chunk;
+        }
+        ssize_t got = getrandom(chunk, want, 0);
+        if (got < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            if (!sl_random_from_urandom(chunk, want)) {
+                sl_last_error = errno;
+                return filled;
+            }
+            got = (ssize_t)want;
+        }
+        for (ssize_t index = 0; index < got; index += 1) {
+            elements[filled + index] = (int64_t)chunk[index];
+        }
+        filled += (int64_t)got;
+    }
+    return filled;
 }

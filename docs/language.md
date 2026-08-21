@@ -1023,6 +1023,27 @@ nothing and no drop glue runs for it (`D-084`).
 `std:process` has `args-len`, `arg` and `args`, `env` returning
 `(Option String)`, and `exit`.
 
+`std:time` is `monotonic` and `realtime`, each `(Result i64 Error)` and each
+nanoseconds — the first since a point that does not move, so two readings can be
+subtracted and one alone means nothing; the second since 1970, so it is a
+timestamp and can move backwards when something corrects the clock. Nanoseconds
+in an `i64` rather than seconds in an `f64`, because an `f64` stops holding
+consecutive integers long before a wall-clock reading reaches it (`D-147`).
+
+`std:random` is `bytes`, answering `(Result (List u8) Error)` with as many bytes
+as it was asked for, and `number`, answering `(Result u64 Error)`. There is no
+seed and no generator: what a program gets is what the kernel gives it, and a
+reproducible sequence is a different thing that belongs to whoever needs one.
+
+```lisp
+(take std:time monotonic)
+(take std:random number)
+(take std:result Result unwrap-or)
+
+(let started (unwrap-or (monotonic) 0))
+(let die (+ 1 (% (unwrap-or (number) 0) 6)))
+```
+
 `std:panic` — `core:panic` for a freestanding program — is how a program fails
 on purpose: `(panic message)`, `(assert condition message)` and
 `(unreachable)`. All three end the program with status 101, the same one an

@@ -1,0 +1,52 @@
+; Entropy, which belongs to the operating system and not to the language.
+;
+; There is no seed and no generator here. What a program gets is what the
+; kernel gives it, because a pseudo-random sequence a caller can reproduce and
+; one nobody can predict are different things and only the second is safe to
+; reach for without saying so. A reproducible one is a few lines of Slopium
+; over `core:list` and belongs to whoever needs it.
+;
+; The buffer is filled by C into slots this module made first: `(&mut (List T))`
+; hands over the elements and their count and C may not resize the list
+; (`D-124`), so the length is decided here and the bytes are written into it
+; (`D-147`).
+
+(take core:result Result Ok Err)
+
+(export Error bytes number)
+
+(struct Error ((code i64)))
+
+(extern "sl_rt_random_bytes" (bytes-raw (into (&mut (List u8)))) -> i64)
+
+(extern "sl_rt_last_error" (last-error) -> i64)
+
+; `count` bytes, or the reason there are none. A negative count is refused by
+; the runtime rather than clamped, because asking for -1 bytes is a mistake and
+; an empty list would hide it.
+(fn bytes ((count i64)) -> (Result (List u8) Error)
+  (let mut buffer (list) : (List u8))
+  (let mut index 0)
+  (while (< index count)
+    (push (&mut buffer) (as u8 0))
+    (set index (+ index 1)))
+  (let filled (bytes-raw (&mut buffer)))
+  (let code (last-error))
+  (if (and (= code 0) (= filled count))
+    (Result:Ok buffer)
+    (Result:Err (Error :code code))))
+
+; Eight bytes shifted together. A `u64` and not an `i64`, because every bit
+; pattern here is a value and half of them are not a positive number — and it
+; is `shl` and `bit-or` rather than a multiply, because arithmetic traps on
+; overflow (`D-031`) and the top byte of a random word overflows every time.
+(fn number () -> (Result u64 Error)
+  (match (bytes 8)
+    ((Result:Ok drawn)
+      (let mut value (as u64 0))
+      (let mut index 8)
+      (while (> index 0)
+        (set index (- index 1))
+        (set value (bit-or (shl value 8) (as u64 (get (& drawn) index)))))
+      (Result:Ok value))
+    ((Result:Err reason) (Result:Err reason))))

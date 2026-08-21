@@ -1,0 +1,57 @@
+; A clock and entropy come from the operating system, so both are `std` and
+; neither aborts: a call that fails is an `Err` carrying the `errno` the status
+; slot held (`D-085`, `D-087`, `D-147`).
+(take std:io println println-i64)
+(take std:result Result Ok Err unwrap-or)
+(take std:time monotonic realtime)
+(take std:random bytes number)
+(take std:test equal-i64)
+
+(fn reading ((value (Result i64 std:time:Error))) -> i64
+  (unwrap-or value (- 0 1)))
+
+(fn drawn ((count i64)) -> i64
+  (match (bytes count)
+    ((Result:Ok values) (len (& values)))
+    ((Result:Err _) (- 0 1))))
+
+(fn main () -> i32
+  ; Nothing here prints a reading: a clock is different on every run, so what a
+  ; fixture can assert about one is its shape and its direction.
+  (let first (reading (monotonic)))
+  (let second (reading (monotonic)))
+  (println-i64 (if (>= second first) 1 0))
+  (println-i64 (if (> (reading (realtime)) 0) 1 0))
+  (println-i64 (drawn 32))
+  (println-i64 (drawn 0))
+  0)
+
+; The monotonic clock only ever goes forward, which is the whole reason it is a
+; separate reading from the wall clock.
+(test "the monotonic clock does not go backwards"
+  (let first (reading (monotonic)))
+  (let second (reading (monotonic)))
+  (and (> first 0) (>= second first)))
+
+; A wall-clock reading is nanoseconds since 1970, so it is past the moment this
+; was written and short of the year 2262 that an `i64` of them runs out at.
+(test "the wall clock reads a plausible instant"
+  (let now (reading (realtime)))
+  (and (> now 1700000000000000000) (< now 9000000000000000000)))
+
+(test "entropy comes back in the amount that was asked for"
+  (and (= 32 (drawn 32)) (= 1 (drawn 1)) (= 0 (drawn 0))))
+
+; Two draws of eight bytes each. Equal is possible and has a probability of
+; 2^-64, which is a smaller number than this suite has runs.
+(test "two draws differ"
+  (let left (unwrap-or (number) 0))
+  (let right (unwrap-or (number) 0))
+  (!= left right))
+
+; A negative count is a mistake rather than an empty answer, so it comes back
+; as an `Err` and not as a list of no bytes.
+(test "a negative count is refused"
+  (match (bytes (- 0 1))
+    ((Result:Ok _) false)
+    ((Result:Err _) true)))

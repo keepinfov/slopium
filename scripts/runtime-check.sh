@@ -70,6 +70,8 @@ cat >"$check_dir/runtime.slp" <<'SLOPIUM'
 (take std:string (hash :as string-hash) (equals :as string-equals))
 (take std:map Map map-new map-insert map-lookup map-delete map-size map-fold)
 (take std:set Set set-of set-add set-discard set-count)
+(take std:time monotonic)
+(take std:random bytes)
 
 (struct Pair ((left String) (right String)))
 (enum Message Empty (Text ((value String))))
@@ -375,6 +377,18 @@ cat >"$check_dir/runtime.slp" <<'SLOPIUM'
   (let mut doubled 0)
   (println-i64 (+ (probe-out 20 (&mut doubled)) doubled))
   (println-i64 (probe-apply stepped 41))
+  ; A clock reading and a drawn buffer, so that the two entry points that
+  ; allocate nothing and fill something are seen by valgrind and ASan (`D-147`).
+  ; What is asserted is the shape: a reading is positive and a draw comes back
+  ; the length it was asked for.
+  (println-i64
+    (match (monotonic)
+      ((Result:Ok reading) (if (> reading 0) 1 0))
+      ((Result:Err _) 0)))
+  (println-i64
+    (match (bytes 48)
+      ((Result:Ok drawn) (len (& drawn)))
+      ((Result:Err _) (- 0 1))))
   (match message
     ((Message:Empty) 1)
     ((Message:Text value) (do (println (& value)) 0))))
