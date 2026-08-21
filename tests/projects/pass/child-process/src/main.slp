@@ -1,0 +1,79 @@
+; A child process, and the `defer` that closes what capturing one opens
+; (`D-148`). A descriptor owns nothing and has no destructor (`D-084`), so
+; `close-output` is written beside the call that opened it and runs however the
+; scope ends — which is what makes capturing expressible at all.
+(take std:io println println-i64)
+(take std:process Child Error spawn capture wait read-output close-output pid-of)
+(take std:result Result Ok Err)
+(take std:string equals trim)
+(take std:test equal-i64 equal-text)
+
+(fn no-arguments () -> (List String)
+  (list))
+
+(fn status-of ((program (& String)) (arguments (List String))) -> i64
+  (match (spawn program (& arguments))
+    ((Result:Ok child)
+      (let mut held child)
+      (defer (close-output (&mut held)))
+      (match (wait (& held))
+        ((Result:Ok status) status)
+        ((Result:Err _) (- 0 1))))
+    ((Result:Err _) (- 0 2))))
+
+(fn said ((program (& String)) (arguments (List String))) -> String
+  (match (capture program (& arguments))
+    ((Result:Ok child)
+      (let mut held child)
+      (defer (close-output (&mut held)))
+      ; Read before waiting: a child writing more than a pipe holds blocks
+      ; until somebody drains it.
+      (let spoken
+        (match (read-output (& held))
+          ((Result:Ok text) text)
+          ((Result:Err _) "")))
+      (match (wait (& held))
+        ((Result:Ok _) spoken)
+        ((Result:Err _) "")))
+    ((Result:Err _) "")))
+
+(fn main () -> i32
+  (println-i64 (status-of (& "/bin/true") (no-arguments)))
+  (println-i64 (status-of (& "/bin/false") (no-arguments)))
+  (let spoken (said (& "/bin/echo") (list "hello" "child")))
+  (println (& (trim (& spoken))))
+  0)
+
+(test "a child that succeeds and one that fails"
+  (and (= 0 (status-of (& "/bin/true") (no-arguments)))
+       (= 1 (status-of (& "/bin/false") (no-arguments)))))
+
+; The arguments cross as one buffer of NUL-separated pieces, so a child that
+; echoes them back is what says the buffer was taken apart the way it was put
+; together.
+(test "a child's standard output comes back"
+  (let spoken (said (& "/bin/echo") (list "hello" "child")))
+  (equal-text (& (trim (& spoken))) (& "hello child")))
+
+(test "an argument with a space in it stays one argument"
+  (let spoken (said (& "/bin/echo") (list "one two")))
+  (equal-text (& (trim (& spoken))) (& "one two")))
+
+(test "no arguments at all is not an empty one"
+  (let spoken (said (& "/bin/echo") (no-arguments)))
+  (equal-i64 (len (& (trim (& spoken)))) 0))
+
+; A program that does not exist is a child that starts and cannot `exec`, so
+; the failure arrives as the status a shell reports rather than as an `Err`.
+(test "a program that is not there exits 127"
+  (equal-i64 (status-of (& "/nonexistent/program") (no-arguments)) 127))
+
+(test "a child has a process id"
+  (match (spawn (& "/bin/true") (& (no-arguments)))
+    ((Result:Ok child)
+      (let mut held child)
+      (defer (close-output (&mut held)))
+      (let identifier (pid-of (& held)))
+      (let waited (wait (& held)))
+      (> identifier 0))
+    ((Result:Err _) false)))

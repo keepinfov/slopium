@@ -16,7 +16,9 @@
 #include <string.h>
 #include <sys/random.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <time.h>
+#include <unistd.h>
 
 typedef struct SlString SlString;
 
@@ -363,4 +365,209 @@ int64_t sl_rt_random_bytes(int64_t *elements, int64_t count) {
         filled += (int64_t)got;
     }
     return filled;
+}
+
+/* Starting a child process (`D-148`).
+ *
+ * The argument vector crosses as one buffer of NUL-separated pieces with its
+ * length beside it, which is the shape `D-079` established for every string
+ * the runtime is handed and the only one an embedded NUL does not truncate. A
+ * list of strings is not in the `extern` vocabulary and adding a row for one
+ * would open the boundary to collections of owned values for the sake of this
+ * call; joining them is three lines of Slopium over `core:builder`.
+ *
+ * `capture` decides what the child's standard output is. Zero leaves it the
+ * parent's, which is what a build tool wants. Anything else gives the child the
+ * write end of a pipe and hands the read end back through `output`, which is
+ * what everything else wants and is the half that cannot be worked around from
+ * outside. A descriptor owns nothing and has no destructor (`D-084`), so
+ * closing it is the caller's `defer`. */
+static char *sl_terminated(const char *bytes, int64_t len) {
+    char *copy = malloc((size_t)len + 1);
+    if (copy == NULL) {
+        return NULL;
+    }
+    if (len > 0) {
+        memcpy(copy, bytes, (size_t)len);
+    }
+    copy[len] = '\0';
+    return copy;
+}
+
+int64_t sl_rt_process_spawn(const char *program, int64_t program_len,
+                            const char *arguments, int64_t arguments_len,
+                            int64_t capture, int64_t *output) {
+    sl_last_error = 0;
+    *output = -1;
+    if (program_len <= 0 || arguments_len < 0 ||
+        !sl_path_is_usable(program, program_len)) {
+        sl_last_error = EINVAL;
+        return 0;
+    }
+
+    /* `argv[0]` is the program's own name, which is convention rather than
+     * something `execvp` needs, and then one entry per NUL-separated piece. */
+    int64_t pieces = arguments_len > 0 ? 1 : 0;
+    for (int64_t index = 0; index < arguments_len; index += 1) {
+        if (arguments[index] == '\0') {
+            pieces += 1;
+        }
+    }
+    char *name = sl_terminated(program, program_len);
+    char *blob = sl_terminated(arguments, arguments_len);
+    char **argv = calloc((size_t)pieces + 2, sizeof *argv);
+    if (name == NULL || blob == NULL || argv == NULL) {
+        free(name);
+        free(blob);
+        free(argv);
+        RT_FAIL("allocation failed");
+    }
+    argv[0] = name;
+    int64_t at = 1;
+    int64_t start = 0;
+    for (int64_t index = 0; index <= arguments_len && arguments_len > 0; index += 1) {
+        if (index == arguments_len || blob[index] == '\0') {
+            argv[at] = blob + start;
+            at += 1;
+            start = index + 1;
+        }
+    }
+    argv[at] = NULL;
+
+    int channel[2] = {-1, -1};
+    if (capture != 0 && pipe(channel) != 0) {
+        sl_last_error = errno;
+        free(name);
+        free(blob);
+        free(argv);
+        return 0;
+    }
+
+    pid_t child = fork();
+    if (child < 0) {
+        sl_last_error = errno;
+        if (capture != 0) {
+            close(channel[0]);
+            close(channel[1]);
+        }
+        free(name);
+        free(blob);
+        free(argv);
+        return 0;
+    }
+    if (child == 0) {
+        if (capture != 0) {
+            close(channel[0]);
+            if (dup2(channel[1], 1) < 0) {
+                _exit(127);
+            }
+            close(channel[1]);
+        }
+        execvp(name, argv);
+        /* What a shell reports for a command it could not run. The parent sees
+         * it as an ordinary exit status, because a failed `exec` after a
+         * successful `fork` is the child's news to deliver. */
+        _exit(127);
+    }
+
+    if (capture != 0) {
+        close(channel[1]);
+        *output = (int64_t)channel[0];
+    }
+    free(name);
+    free(blob);
+    free(argv);
+    return (int64_t)child;
+}
+
+/* The exit status, or `128 + signal` for a child something killed, which is
+ * what a shell reports and what a caller comparing against 0 already handles.
+ * `-1` is never a status: it means the wait itself failed and the slot says
+ * why. */
+int64_t sl_rt_process_wait(int64_t pid) {
+    sl_last_error = 0;
+    if (pid <= 0) {
+        sl_last_error = ESRCH;
+        return -1;
+    }
+    int status = 0;
+    pid_t done;
+    do {
+        done = waitpid((pid_t)pid, &status, 0);
+    } while (done < 0 && errno == EINTR);
+    if (done < 0) {
+        sl_last_error = errno;
+        return -1;
+    }
+    if (WIFEXITED(status)) {
+        return (int64_t)WEXITSTATUS(status);
+    }
+    if (WIFSIGNALED(status)) {
+        return (int64_t)(128 + WTERMSIG(status));
+    }
+    sl_last_error = EINVAL;
+    return -1;
+}
+
+/* Everything left on a descriptor, to end of input. A child that writes more
+ * than a pipe holds blocks until this drains it, so a caller that captures
+ * reads before it waits. */
+SlString *sl_rt_process_read(int64_t descriptor) {
+    sl_last_error = 0;
+    if (descriptor < 0) {
+        sl_last_error = EBADF;
+        return sl_rt_string_new("", 0);
+    }
+    uint64_t length = 0;
+    uint64_t capacity = 1024;
+    char *buffer = malloc((size_t)capacity);
+    if (buffer == NULL) {
+        RT_FAIL("allocation failed");
+    }
+    for (;;) {
+        if (length == capacity) {
+            if (capacity > (uint64_t)SIZE_MAX / 2) {
+                free(buffer);
+                RT_FAIL("child output is too large");
+            }
+            capacity *= 2;
+            char *next = realloc(buffer, (size_t)capacity);
+            if (next == NULL) {
+                free(buffer);
+                RT_FAIL("allocation failed");
+            }
+            buffer = next;
+        }
+        ssize_t got = read((int)descriptor, buffer + length, (size_t)(capacity - length));
+        if (got < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            sl_last_error = errno;
+            free(buffer);
+            return sl_rt_string_new("", 0);
+        }
+        if (got == 0) {
+            break;
+        }
+        length += (uint64_t)got;
+    }
+    SlString *text = sl_rt_string_new(buffer, length);
+    free(buffer);
+    return text;
+}
+
+/* Closing a descriptor that was never opened is not a failure: a `Child` that
+ * inherited the parent's output carries `-1`, and a `defer` written the same
+ * way for both is the point. */
+int64_t sl_rt_process_close(int64_t descriptor) {
+    sl_last_error = 0;
+    if (descriptor < 0) {
+        return 0;
+    }
+    if (close((int)descriptor) != 0) {
+        sl_last_error = errno;
+        return -1;
+    }
+    return 0;
 }
