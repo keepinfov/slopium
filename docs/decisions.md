@@ -167,6 +167,7 @@ of what was believed at the time is the part worth keeping.
 - [D-152 — `deprecated` applies to a struct field, and warns wherever the field is named](#d-152--deprecated-applies-to-a-struct-field-and-warns-wherever-the-field-is-named)
 - [D-153 — a borrow of a borrow is refused where it is written and where it is instantiated](#d-153--a-borrow-of-a-borrow-is-refused-where-it-is-written-and-where-it-is-instantiated)
 - [D-154 — the manager reads the compiler's exit code, and stops naming a module it cannot blame](#d-154--the-manager-reads-the-compilers-exit-code-and-stops-naming-a-module-it-cannot-blame)
+- [D-155 — a function longer than a conditional branch reaches is refused, and the limit is written down](#d-155--a-function-longer-than-a-conditional-branch-reaches-is-refused-and-the-limit-is-written-down)
 
 ## D-001 — a native compiler, without LLVM
 
@@ -3618,3 +3619,41 @@ nothing the diagnostics do not already say: every one of them carries a file and
 a span. The question this decision answers is not "which module failed" but
 "does the manager have anything to add", and for a program that does not
 compile the answer is no.
+
+## D-155 — a function longer than a conditional branch reaches is refused, and the limit is written down
+
+Status: approved · 2026-08-22
+
+AArch64's `b.cond`, `cbz` and `cbnz` carry a signed 19-bit word displacement, so
+one reaches a megabyte of code. Every checked operation branches forward to a
+trampoline at the end of its own function and every `while` and `if` branches
+within one, so **a single function's code may not reach 1 MiB on this target**.
+Nothing a person reads said so, and what they met instead was `SL0700` — an
+internal compiler error whose help advises assembling the program by hand,
+which fails the same way for the same reason — or, on the assembly path, a
+message from `as` about a branch out of range in code they did not write.
+
+**The limit is per function, and it used to be per module.** `D-116` moved the
+panic trampolines inside the section that branches to them, and said in passing
+that this "closes a cliff that was already there and never reached: the old
+distance was to the end of the module's whole text section, which grows with
+the library". So the ceiling worth writing down is not the one the tracker
+described. A module and a program are unbounded; one function is not, and a
+function of a megabyte is not a thing anybody has written.
+
+**The refusal bounds the function rather than any one branch.** The exact worst
+case is the distance from a particular branch to a particular label after the
+layout is final, and computing it would mean a second pass to say something
+more precise about a number nobody is near. A bound that can be stated in one
+sentence — a function's code stays under 1 MiB — is worth more than one that is
+exact, and it errs toward refusing a program that would have squeezed through,
+which is the safe direction for a limit whose other outcome is an object nobody
+can link.
+
+**The fix is not this.** Branch islands, or inverting each condition to branch
+over an unconditional jump, would remove the ceiling; `D-116` already holds the
+second in reserve and says why it was not taken then — it changes the
+instruction sequence of every checked operation in the language. Neither races
+the freeze, and a limit that is written down and diagnosed is not a limit that
+hurts anybody. x86-64 needs none of this: its conditional branches carry 32
+bits.
