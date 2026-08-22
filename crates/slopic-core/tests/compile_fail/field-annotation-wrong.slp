@@ -1,0 +1,6 @@
+; The slot a field carries is the same slot every declaration with a keyword
+; carries, and the table that decides what may sit in one is the same table
+; (`D-122`). `inline` is meaningless on a field (`D-152`).
+(struct Holder (((inline) tally i64) (count i64)))
+
+(fn main () -> i32 0)

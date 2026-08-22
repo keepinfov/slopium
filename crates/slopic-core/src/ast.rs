@@ -419,6 +419,10 @@ enum AnnotationTarget {
     Enum,
     Const,
     Test,
+    /// A `struct`'s field. Not a parameter and not a variant's payload: a
+    /// parameter is the caller's business and a bare variant is an atom with
+    /// nowhere to put a slot (`D-152`).
+    Field,
 }
 
 impl AnnotationTarget {
@@ -432,6 +436,7 @@ impl AnnotationTarget {
             AnnotationTarget::Enum => "an `enum`",
             AnnotationTarget::Const => "a `const`",
             AnnotationTarget::Test => "a `test`",
+            AnnotationTarget::Field => "a field",
         }
     }
 }
@@ -479,6 +484,7 @@ const ANNOTATIONS: &[AnnotationSpec] = &[
             AnnotationTarget::Function,
             AnnotationTarget::Extern,
             AnnotationTarget::Const,
+            AnnotationTarget::Field,
         ],
         // The caller is what warns, so a dependent that does not rebuild is a
         // warning nobody ever sees.
@@ -666,6 +672,10 @@ pub struct ExternDecl {
 pub struct Param {
     pub name: String,
     pub ty: Type,
+    /// What a field carries. A parameter never has one, because the annotation
+    /// slot is offered where `param_pairs` is reading a `struct`'s fields and
+    /// nowhere else (`D-152`).
+    pub annotations: Vec<Annotation>,
     pub span: Span,
 }
 
@@ -1076,10 +1086,11 @@ impl AstBuilder<'_> {
     fn annotations(
         &mut self,
         items: &[SExpr],
+        start: usize,
         target: AnnotationTarget,
     ) -> (Vec<Annotation>, usize) {
         let mut annotations: Vec<Annotation> = Vec::new();
-        let mut index = 1;
+        let mut index = start;
         while let Some(item) = items.get(index) {
             let SExprKind::List(parts) = &item.kind else {
                 break;
@@ -1196,7 +1207,7 @@ impl AstBuilder<'_> {
     }
 
     fn function(&mut self, span: Span, items: &[SExpr]) -> Option<Function> {
-        let (annotations, start) = self.annotations(items, AnnotationTarget::Function);
+        let (annotations, start) = self.annotations(items, 1, AnnotationTarget::Function);
         let items = &items[start..];
         if items.len() < 5 {
             self.error(
@@ -1237,7 +1248,7 @@ impl AstBuilder<'_> {
 
     fn extern_decl(&mut self, span: Span, items: &[SExpr]) -> Option<ExternDecl> {
         const SYNTAX: &str = "extern syntax is `(extern \"symbol\" (name (arg type) ...) -> type)`";
-        let (annotations, start) = self.annotations(items, AnnotationTarget::Extern);
+        let (annotations, start) = self.annotations(items, 1, AnnotationTarget::Extern);
         let items = &items[start..];
         if items.len() != 4 {
             self.error(span, SYNTAX);
@@ -1272,7 +1283,7 @@ impl AstBuilder<'_> {
                 return None;
             }
         }
-        let params = self.param_pairs(rest)?;
+        let params = self.param_pairs(rest, false)?;
         if atom(&items[2]) != Some("->") {
             self.error(items[2].span, "expected `->` before the return type");
             return None;
@@ -1291,7 +1302,7 @@ impl AstBuilder<'_> {
     }
 
     fn test(&mut self, span: Span, items: &[SExpr]) -> Option<Test> {
-        let (annotations, start) = self.annotations(items, AnnotationTarget::Test);
+        let (annotations, start) = self.annotations(items, 1, AnnotationTarget::Test);
         let items = &items[start..];
         if items.len() < 2 {
             self.error(span, "test syntax is `(test \"name\" expression...)`");
@@ -1311,7 +1322,7 @@ impl AstBuilder<'_> {
     }
 
     fn struct_decl(&mut self, span: Span, items: &[SExpr]) -> Option<StructDecl> {
-        let (annotations, start) = self.annotations(items, AnnotationTarget::Struct);
+        let (annotations, start) = self.annotations(items, 1, AnnotationTarget::Struct);
         let items = &items[start..];
         if !matches!(items.len(), 2 | 3) {
             self.error(
@@ -1329,13 +1340,13 @@ impl AstBuilder<'_> {
             } else {
                 Vec::new()
             },
-            fields: self.params(&items[if has_generics { 2 } else { 1 }])?,
+            fields: self.fields(&items[if has_generics { 2 } else { 1 }])?,
             span,
         })
     }
 
     fn enum_decl(&mut self, span: Span, items: &[SExpr]) -> Option<EnumDecl> {
-        let (annotations, start) = self.annotations(items, AnnotationTarget::Enum);
+        let (annotations, start) = self.annotations(items, 1, AnnotationTarget::Enum);
         let items = &items[start..];
         if items.len() < 2 {
             self.error(
@@ -1409,19 +1420,35 @@ impl AstBuilder<'_> {
 
     fn params(&mut self, form: &SExpr) -> Option<Vec<Param>> {
         let items = self.list(form, "parameter or field list")?;
-        self.param_pairs(items)
+        self.param_pairs(items, false)
+    }
+
+    /// A `struct`'s fields, which are `(name type)` pairs that may carry an
+    /// annotation before the name (`D-152`).
+    fn fields(&mut self, form: &SExpr) -> Option<Vec<Param>> {
+        let items = self.list(form, "parameter or field list")?;
+        self.param_pairs(items, true)
     }
 
     /// The `(name type)` pairs themselves, without the list that holds them.
     ///
     /// An `extern` keeps its name and its parameters in one list, so it has the
     /// pairs but no list of its own to hand to `params`.
-    fn param_pairs(&mut self, items: &[SExpr]) -> Option<Vec<Param>> {
+    fn param_pairs(&mut self, items: &[SExpr], annotated: bool) -> Option<Vec<Param>> {
         let mut params = Vec::new();
         for item in items {
             let Some(pair) = self.list(item, "name/type pair") else {
                 continue;
             };
+            // The slot is where `D-122` puts one on every declaration with a
+            // keyword: before the name. A field has no keyword, so the list
+            // itself is where it begins.
+            let (annotations, start) = if annotated {
+                self.annotations(pair, 0, AnnotationTarget::Field)
+            } else {
+                (Vec::new(), 0)
+            };
+            let pair = &pair[start..];
             if pair.len() != 2 {
                 self.error(item.span, "expected `(name type)`");
                 continue;
@@ -1435,6 +1462,7 @@ impl AstBuilder<'_> {
             params.push(Param {
                 name: name.to_owned(),
                 ty,
+                annotations,
                 span: item.span,
             });
         }
@@ -2020,7 +2048,7 @@ impl AstBuilder<'_> {
     }
 
     fn const_decl(&mut self, span: Span, items: &[SExpr]) -> Option<ConstDecl> {
-        let (annotations, start) = self.annotations(items, AnnotationTarget::Const);
+        let (annotations, start) = self.annotations(items, 1, AnnotationTarget::Const);
         let items = &items[start..];
         if items.len() < 2 {
             self.error(

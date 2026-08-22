@@ -1,0 +1,4 @@
+field-annotation-wrong.slp:4:19: error[SL0100]: `inline` does not apply to a field; it applies to a `fn`
+  |
+ 4 | (struct Holder (((inline) tally i64) (count i64)))
+  |                   ^^^^^^

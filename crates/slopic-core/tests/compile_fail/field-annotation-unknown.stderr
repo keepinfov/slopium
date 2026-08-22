@@ -1,0 +1,5 @@
+field-annotation-unknown.slp:4:19: error[SL0100]: unknown annotation `depracated`
+  |
+ 4 | (struct Holder (((depracated "use `count`") tally i64) (count i64)))
+  |                   ^^^^^^^^^^
+  = help: the annotations are `inline`, `deprecated` and `target`

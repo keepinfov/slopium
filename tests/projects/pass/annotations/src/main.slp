@@ -4,7 +4,7 @@
 ; — `repr` on a foreign record, `interrupt` on a handler — costs no grammar.
 (take std:io println println-i64)
 (take std:string from-i64 concat)
-(take legacy widen retry-limit)
+(take legacy widen retry-limit Reading)
 
 ; `inline` is a hint to the optimizer and nothing more: a body worth copying
 ; into its callers. Everything that decides whether inlining is *sound* — the
@@ -51,6 +51,16 @@
   (let deprecated 5)
   (+ inline deprecated))
 
+; A field name appears at exactly three places and each of them warns: a read,
+; a construction, and a pattern — through which a write goes, so there is no
+; fourth (`D-152`). The healthy field beside it says nothing.
+(fn warmer ((reading Reading)) -> i64
+  (let built (Reading :degrees 20 :celsius 20 :label "outside"))
+  (let read-back (. built degrees))
+  (match reading
+    ((Reading :degrees degrees :celsius celsius :label label)
+      (+ (+ read-back degrees) celsius|)
+
 ; Two uses of one deprecated function, so the warning is per use rather than
 ; per declaration, and one use of a deprecated `const`.
 (fn main () -> unit
@@ -59,4 +69,5 @@
   (println-i64 (+ (widen 20) (widen 22)))
   (println-i64 retry-limit)
   (let name (label 8))
-  (println &name))
+  (println &name)
+  (println-i64 (warmer (Reading :degrees 1 :celsius 2 :label "inside"|)

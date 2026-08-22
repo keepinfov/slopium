@@ -242,6 +242,23 @@ standard cost of conditional compilation everywhere it exists, and it is the
 argument for keeping a whole-file difference in separate modules, where every
 file is compiled as an ordinary module for the target it belongs to.
 
+**A `struct`'s field carries the slot too**, written before the name, which is
+where every declaration with a keyword puts one:
+
+```lisp
+(struct Reading
+  (((deprecated "read `celsius`") degrees i64) (celsius i64)))
+```
+
+Every read, construction and pattern that names the field warns with `SL0800`,
+exactly as a deprecated `fn` does — and a write goes through a pattern, so
+those three are all the places a field name appears. It is the migration that
+actually happens: a record is fine and one field of it is going away, where
+deprecating the whole type would warn at every mention of something mostly
+healthy and the warning would stop being read. A parameter has no slot, a
+variant has nowhere to put one, and `inline` is meaningless on a field; all
+three are refused by name.
+
 A use of a `deprecated` declaration is a warning rather than an error, so the
 program still compiles; `SL0800` is the code, and `docs/diagnostics.md`
 describes the family. The name of an annotation is reserved nowhere else: a

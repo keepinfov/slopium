@@ -1206,6 +1206,11 @@ fn module_interface(file: &str, source: &str) -> Result<(String, bool), String> 
         for field in &structure.fields {
             interface.push('|');
             interface.push_str(&field.name);
+            // A field's `deprecated` is interface for the reason every
+            // `deprecated` is: what warns is the module that names the field,
+            // so a dependent that does not rebuild is a warning nobody sees
+            // (`D-152`).
+            interface.push_str(&interface_annotations(&field.annotations));
             interface.push(':');
             interface.push_str(&field.ty.to_string());
         }
