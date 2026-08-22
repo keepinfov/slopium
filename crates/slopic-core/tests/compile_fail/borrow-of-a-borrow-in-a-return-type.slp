@@ -1,0 +1,8 @@
+; The same shape where a result is declared. Nothing could ever have been
+; returned from here, because no expression in the language builds a value of
+; this type.
+(fn gives ((value &String)) -> &&String
+  value)
+
+(fn main () -> i32
+  0)

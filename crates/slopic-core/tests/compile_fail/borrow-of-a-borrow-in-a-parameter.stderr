@@ -1,0 +1,5 @@
+borrow-of-a-borrow-in-a-parameter.slp:5:19: error[SL0200]: `&String` cannot be borrowed
+  |
+ 5 | (fn holds ((value &&String)) -> i64
+  |                   ^^^^^^^^
+  = help: a borrow of a borrow says nothing the borrow did not say already

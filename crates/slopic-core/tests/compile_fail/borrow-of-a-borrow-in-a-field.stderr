@@ -1,0 +1,5 @@
+borrow-of-a-borrow-in-a-field.slp:3:23: error[SL0200]: `&String` cannot be borrowed
+  |
+ 3 | (struct Holder ((slot &&String)))
+  |                       ^^^^^^^^
+  = help: a borrow of a borrow says nothing the borrow did not say already

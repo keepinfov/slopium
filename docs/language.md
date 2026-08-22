@@ -606,6 +606,14 @@ An exclusive borrow is accepted wherever a shared one is asked for, and never
 the other way round: `&mut T` is a `&T` that may also be written through,
 so giving the permission up costs nothing and taking it is not offered.
 
+A borrow of a borrow is refused as a value and as a type alike. `(& (& x))`
+says nothing `(& x)` did not, and `&&T` is a type no value can have, so it is
+refused where it is written rather than at every call to the declaration it
+would otherwise be part of. A generic reaching the same shape is refused where
+the instance is decided: a parameter `&T` whose `T` was bound to `&String` by
+an earlier argument asks for `&&String`, and that is `SL0200` at the argument
+rather than a mismatch naming a type nobody could have meant.
+
 ## Control flow
 
 ```lisp

@@ -1,0 +1,12 @@
+; The shape nobody wrote: `T` is bound to `&String` by the first argument, so
+; the second parameter's `&T` is `&&String` and no value has that type. The
+; refusal is the one a spelled `&&String` gets, at the argument that asked for
+; it, rather than a mismatch naming a type the reader cannot have meant.
+(fn pair (T) ((first T) (second &T)) -> i64
+  0)
+
+(fn main () -> i32
+  (let text "hello")
+  (let other "there")
+  (pair &text &other)
+  0)
