@@ -12,7 +12,7 @@
 
 (fn drawn ((count i64)) -> i64
   (match (bytes count)
-    ((Result:Ok values) (len (& values)))
+    ((Result:Ok values) (len &values))
     ((Result:Err _) (- 0 1))))
 
 (fn main () -> i32

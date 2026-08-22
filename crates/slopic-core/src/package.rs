@@ -1,7 +1,7 @@
 use crate::ast::{self, Expr, ExprKind, ImportItem, MatchArm, Pattern, Program, TakeDecl, Type};
 use crate::diagnostic::{codes, CompileResult, Diagnostic, SourceMap, Span};
 use crate::sema::{self, TypedProgram};
-use crate::{lexer, parser, CompileOptions};
+use crate::{lexer, parser, reader, CompileOptions};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 
@@ -140,6 +140,13 @@ pub fn analyze_package(input: &PackageInput, options: &CompileOptions) -> Packag
             continue;
         }
         let tokens = match lexer::lex(&source.path, &source.source) {
+            Ok(tokens) => tokens,
+            Err(mut errors) => {
+                diagnostics.append(&mut errors);
+                continue;
+            }
+        };
+        let tokens = match reader::expand(&source.path, &tokens) {
             Ok(tokens) => tokens,
             Err(mut errors) => {
                 diagnostics.append(&mut errors);

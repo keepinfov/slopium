@@ -2,6 +2,6 @@
 
 (fn main () -> i32
   (let value "borrowed")
-  (let values (list (& value)))
-  (println-i64 (len (& values)))
+  (let values (list &value))
+  (println-i64 (len &values))
   0)

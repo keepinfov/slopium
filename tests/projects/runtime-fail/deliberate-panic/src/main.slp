@@ -9,7 +9,7 @@
 ; `Result` here would be a lie: there is nothing the caller could do with an
 ; `Err` that it could not have done by not calling.
 (fn width ((count i64)) -> i64
-  (assert (>= count 0) (& "a width cannot be negative"))
+  (assert (>= count 0) &"a width cannot be negative")
   (* count 8))
 
 (fn main () -> i32

@@ -16,10 +16,9 @@
   (let mut table (map-new hash equals) : (Map String i64))
   (let ann "ann")
   (let bo "bo")
-  (map-insert (&mut table) (clone (& ann)) 30)
-  (map-insert (&mut table) (clone (& bo)) 12)
-  (+ (unwrap-or (map-lookup (& table) (& ann)) 0)
-     (unwrap-or (map-lookup (& table) (& bo)) 0)))
+  (map-insert &mut table (clone &ann) 30)
+  (map-insert &mut table (clone &bo) 12)
+  (+ (unwrap-or (map-lookup &table &ann) 0) (unwrap-or (map-lookup &table &bo) 0)))
 
 ; A `loop` is an expression: the value leaves through the `break` rather than
 ; through a `let mut` written above the loop. The condition is one-sided, so it
@@ -50,12 +49,12 @@
     ((Reading:Retry attempt)
       (let prefix "attempt ")
       (let count (from-i64 attempt))
-      (concat (& prefix) (& count)))
+      (concat &prefix &count))
     ((Reading:Silent) "nothing")))
 
 ; A guard reads and never moves, which is why `name` is still there for the
 ; second arm to bind.
-(fn label ((reading (& Reading))) -> i64
+(fn label ((reading &Reading)) -> i64
   (match reading
     ((Reading:Retry attempt) when (> (clone attempt) 0) (clone attempt))
     ((Reading:Retry _) 0)
@@ -70,20 +69,20 @@
     "none"
     (let digits (from-i64 count))
     (let suffix " left")
-    (concat (& digits) (& suffix))))
+    (concat &digits &suffix)))
 
 ; Shadowing: the second `let` is a new name, not a mutation, and the string the
 ; first one held is still dropped when the scope ends.
 (fn tidy () -> String
   (let pad "  ")
   (let tail greeting)
-  (let text (concat (& pad) (& tail)))
-  (let text (concat (& text) (& pad)))
-  (let text (trim (& text)))
+  (let text (concat &pad &tail))
+  (let text (concat &text &pad))
+  (let text (trim &text))
   text)
 
 (fn say ((text String)) -> unit
-  (println (& text)))
+  (println &text))
 
 (fn main () -> i32
   (println-u64 (as u64 com1-data))
@@ -95,7 +94,7 @@
   (say (describe (Reading:Retry 2)))
   (say (describe (Reading:Silent)))
   (let retried (Reading:Retry 7))
-  (println-i64 (label (& retried)))
+  (println-i64 (label &retried))
   (say (tidy))
   (say (remaining 0))
   (say (remaining 4))
@@ -114,15 +113,15 @@
   (do
     (let positive (Reading:Retry 7))
     (let zero (Reading:Retry 0))
-    (and (= (label (& positive)) 7) (= (label (& zero)) 0))))
+    (and (= (label &positive) 7) (= (label &zero) 0))))
 
 (test "an else branch runs several expressions and answers the last"
   (do
     (let none (remaining 0))
     (let some (remaining 4))
-    (and (equals (& none) (& "none")) (equals (& some) (& "4 left")))))
+    (and (equals &none &"none") (equals &some &"4 left"))))
 
 (test "a name can be bound twice in one scope"
   (do
     (let tidied (tidy))
-    (= (len (& tidied)) 8)))
+    (= (len &tidied) 8)))

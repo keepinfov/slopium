@@ -2,7 +2,7 @@
 
 (fn main () -> i32
   (let values (list 1))
-  (println-i64 (get (& values) 2))
+  (println-i64 (get &values 2))
   0)
 
 (test "fixture compiles" true)

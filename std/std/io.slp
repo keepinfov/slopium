@@ -19,11 +19,9 @@
 ; A `(& String)` crosses the boundary as a pointer with no length, and a
 ; Slopium string may contain a NUL byte, so the length travels beside it
 ; (`D-079`).
-(extern "sl_rt_print_bytes" (write-bytes (bytes (& String)) (length i64)) -> unit)
+(extern "sl_rt_print_bytes" (write-bytes (bytes &String) (length i64)) -> unit)
 
-(extern "sl_rt_println_bytes"
-  (write-line-bytes (bytes (& String)) (length i64))
-  -> unit)
+(extern "sl_rt_println_bytes" (write-line-bytes (bytes &String) (length i64)) -> unit)
 
 (extern "sl_rt_read_line" (read-line-raw) -> String)
 
@@ -31,23 +29,23 @@
 ; (`D-085`).
 (extern "sl_rt_last_error" (last-error) -> i64)
 
-(fn print ((text (& String))) -> unit
+(fn print ((text &String)) -> unit
   (write-bytes text (len text)))
 
-(fn println ((text (& String))) -> unit
+(fn println ((text &String)) -> unit
   (write-line-bytes text (len text)))
 
 (fn print-i64 ((value i64)) -> unit
-  (print (& (from-i64 value))))
+  (print &(from-i64 value)))
 
 (fn println-i64 ((value i64)) -> unit
-  (println (& (from-i64 value))))
+  (println &(from-i64 value)))
 
 (fn print-u64 ((value u64)) -> unit
-  (print (& (from-u64 value))))
+  (print &(from-u64 value)))
 
 (fn println-u64 ((value u64)) -> unit
-  (println (& (from-u64 value))))
+  (println &(from-u64 value)))
 
 (fn print-bool ((flag bool)) -> unit
   (print-i64 (if flag 1 0)))
@@ -66,6 +64,6 @@
 (fn read-i64 () -> (Option i64)
   (match (read-line)
     ((Option:Some line)
-      (let text (trim (& line)))
-      (to-i64 (& text)))
+      (let text (trim &line))
+      (to-i64 &text))
     ((Option:None) (Option:None))))

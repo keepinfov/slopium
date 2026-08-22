@@ -80,10 +80,10 @@
 (fn main () -> i64
   (serial-init)
   (let message "slopium boots")
-  (let size (len (& message)))
+  (let size (len &message))
   (let mut index 0)
   (while (< index size)
-    (vga-write (as u64 index) (as u8 (byte-at (& message) index)))
+    (vga-write (as u64 index) (as u8 (byte-at &message index)))
     (set index (+ index 1)))
   (set index 0)
   (while (< index size)

@@ -8,28 +8,28 @@
 (fn apply ((step (Fn () i64))) -> i64
   (step))
 
-(fn label ((id i64) (title (& String))) -> String
-  (concat (& (concat (& (concat (& "task #") (& (from-i64 id)))) (& ": "))) title))
+(fn label ((id i64) (title &String)) -> String
+  (concat &(concat &(concat &"task #" &(from-i64 id)) &": ") title))
 
 (fn main () -> i32
   ; A literal, a call result, and a call result inside another one.
-  (println (& "a literal is borrowed where it is written"))
-  (println (& (from-i64 42)))
-  (println (& (concat (& "two ") (& "halves"))))
+  (println &"a literal is borrowed where it is written")
+  (println &(from-i64 42))
+  (println &(concat &"two " &"halves"))
   ; Three calls deep, which is three drops in three different places.
   (let title "write it down")
-  (println (& (label 7 (& title))))
+  (println &(label 7 &title))
   ; A borrowed temporary is a borrow like any other, so it reaches anything
   ; that takes one.
-  (println-i64 (len (& (concat (& "ab") (& "cd")))))
-  (println-bool (= (len (& (from-i64 1000))) 4))
+  (println-i64 (len &(concat &"ab" &"cd")))
+  (println-bool (= (len &(from-i64 1000)) 4))
   ; And a scalar, which owns nothing and therefore drops nothing.
-  (println-i64 (clone (& 41)))
+  (println-i64 (clone &41))
   ; A `lambda` is a function that happens to be written inside an argument, so
   ; a borrow in its body is an argument of the call *it* makes, and the
   ; temporary dies inside the lifted body rather than out here.
-  (println-i64 (apply (lambda () () -> i64 (len (& (from-i64 12345))))))
+  (println-i64 (apply (lambda () () -> i64 (len &(from-i64 12345)))))
   0)
 
 (test "a borrowed temporary carries the value the call asked for"
-  (= (len (& (concat (& "ab") (& "cd")))) 4))
+  (= (len &(concat &"ab" &"cd")) 4))

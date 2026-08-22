@@ -3,14 +3,14 @@
 (fn main () -> i32
   (let mut values (list 10 20 30))
   (do
-    (push (&mut values) 40))
-  (println-i64 (len (& values)))
-  (println-i64 (get (& values) 2))
+    (push &mut values 40))
+  (println-i64 (len &values))
+  (println-i64 (get &values 2))
   0)
 
 (test "list operations"
   (do
     (let mut values (list 10 20))
     (do
-      (push (&mut values) 12))
-    (= (remove (&mut values) 2) 12)))
+      (push &mut values 12))
+    (= (remove &mut values 2) 12)))

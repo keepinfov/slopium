@@ -161,6 +161,7 @@ of what was believed at the time is the part worth keeping.
 - [D-146 — a list can be written into, and the sort is a merge sort over indices](#d-146--a-list-can-be-written-into-and-the-sort-is-a-merge-sort-over-indices)
 - [D-147 — the clock and the entropy are the operating system's, in nanoseconds and bytes](#d-147--the-clock-and-the-entropy-are-the-operating-systems-in-nanoseconds-and-bytes)
 - [D-148 — a child process is started with its arguments joined by NUL, and its output is a descriptor a `defer` closes](#d-148--a-child-process-is-started-with-its-arguments-joined-by-nul-and-its-output-is-a-descriptor-a-defer-closes)
+- [D-149 — a sigil stands before the form it applies to, and the reader expands it](#d-149--a-sigil-stands-before-the-form-it-applies-to-and-the-reader-expands-it)
 
 ## D-001 — a native compiler, without LLVM
 
@@ -3344,3 +3345,45 @@ Capturing means reading before waiting: a child writing more than a pipe holds
 blocks until somebody drains it. That is a property of pipes and not of this
 design, and it is written down here and in the module because the deadlock it
 causes is the first thing anybody meets.
+
+## D-149 — a sigil stands before the form it applies to, and the reader expands it
+
+Status: approved · 2026-08-21
+
+Uniform syntax is paid for in parentheses and a one-argument form pays every
+time it is written. The borrow was the extreme case: 752 `(& …)` and `(&mut …)`
+frames across the 132 tracked `.slp` files, each costing a paren pair that told
+a reader nothing the `&` did not. A borrow is now written `&x` and `&mut x`,
+and the mechanism is a rule rather than a carve-out — the reader has a table of
+**abbreviations**, a token standing for structure nobody typed. `&` and `&mut`
+are the rows that expand; `'`, `` ` `` and `,` are rows that are refused by
+name, so the macros `D-109` deferred inherit a mechanism instead of finding
+their characters taken. Expansion happens in `reader::expand`, between the
+lexer and the parser, so `ast.rs` and everything under it never learn a
+spelling was used — the same place `D-139` put applied composition, and the
+reason `respelling_a_borrow_emits_the_same_object` can assert that the object
+file is byte-identical.
+
+**The unabbreviated form stays legal, and one rule buys that.** A sigil that
+opens a list whose end is its own operand is the head of that list rather than
+a prefix inside it, so `(& x)` is the borrow it has always been and no existing
+source moved. With anything after that operand the sigil abbreviates like any
+other, which is what makes `(&T &T)` — the parameter list of a `Fn` — the two
+elements it looks like. The price is one place where the short spelling says
+something else: a list holding a single borrowed type keeps its parentheses,
+`(Fn ((& String)) i64)`, because `(&String)` there is the borrow. Writing it
+short is refused where the `&` lands in type position on its own, with a help
+naming the spelling that was meant. Requiring the sigil to be adjacent to its
+operand would have freed the head instead, and was rejected: `&mut` and its
+operand are necessarily apart, so adjacency would put a carve-out inside the
+mechanism built to avoid carve-outs.
+
+Two things fell out that the issue did not predict. A text literal did not end
+an atom, so `&"literal"` lexed as the atom `&"literal` and the rest of the line
+came apart; `"` ends an atom now, which nothing could depend on before, because
+nothing could be written immediately before a quote. And the layout measured a
+form against the preferred width without the run of closing parens that hugs
+its last line, which no corpus file had ever reached — until the abbreviation
+made a form short enough to be kept on a line whose tail then carried five of
+them. `render_item` is handed that count now, and a form that fits only when
+the parens are not counted breaks instead.

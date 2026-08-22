@@ -9,9 +9,9 @@
   (let point (Point :x 20 :y 22))
   (println-i64 (identity (length point)))
   (let mut messages (list "modules" "ownership"))
-  (match (pop (&mut messages))
+  (match (pop &mut messages)
     ((Option:Some message)
-      (println (& message))
+      (println &message)
       0)
     ((Option:None) 1)))
 

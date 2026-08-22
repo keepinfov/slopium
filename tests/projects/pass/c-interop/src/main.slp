@@ -18,9 +18,9 @@
 
 (extern "hal_is_positive" (hal-is-positive (value i64)) -> bool)
 
-(extern "hal_strlen" (hal-strlen (text (& String))) -> i64)
+(extern "hal_strlen" (hal-strlen (text &String)) -> i64)
 
-(extern "hal_slice_sum" (hal-slice-sum (values (& (Slice i64)))) -> i64)
+(extern "hal_slice_sum" (hal-slice-sum (values &(Slice i64))) -> i64)
 
 (extern "hal_greeting" (hal-greeting) -> String)
 
@@ -31,13 +31,13 @@
 ; What `D-124` opened. C fills a collection the caller owns, writes through an
 ; out-parameter whose slot is a machine word, and calls a function this program
 ; defines.
-(extern "hal_fill" (hal-fill (into (&mut (List i64)))) -> unit)
+(extern "hal_fill" (hal-fill (into &mut (List i64))) -> unit)
 
-(extern "hal_fill" (hal-fill-array (into (&mut (Array i64 4)))) -> unit)
+(extern "hal_fill" (hal-fill-array (into &mut (Array i64 4))) -> unit)
 
-(extern "hal_divmod" (hal-divmod (value i64) (by i64) (rest (&mut i64))) -> i64)
+(extern "hal_divmod" (hal-divmod (value i64) (by i64) (rest &mut i64)) -> i64)
 
-(extern "hal_fraction" (hal-fraction (value f64) (whole (&mut f64))) -> f64)
+(extern "hal_fraction" (hal-fraction (value f64) (whole &mut f64)) -> f64)
 
 (extern "hal_apply_twice" (hal-apply-twice (step (Fn (i64) i64)) (value i64)) -> i64)
 
@@ -54,12 +54,12 @@
   (println-bool (hal-is-positive 7))
   (println-bool (hal-is-positive -7))
   (let text "borrowed")
-  (println-i64 (hal-strlen (& text)))
+  (println-i64 (hal-strlen &text))
   (let values (array 10 20 30 40))
-  (let view (slice (& values) 1 4))
-  (println-i64 (hal-slice-sum (& view)))
+  (let view (slice &values 1 4))
+  (println-i64 (hal-slice-sum &view))
   (let greeting (hal-greeting))
-  (println (& greeting))
+  (println &greeting)
   (println-bool (= (doubled 21) 42))
   ; A pointer crosses out of C and back into it, and what Slopium wrote
   ; through it is what C reads there. Receiving the address needs no
@@ -70,18 +70,18 @@
   ; C fills what the caller owns. The borrow ends when the call returns, and
   ; what is in the list afterwards is what C put there.
   (let mut buffer (list 0 0 0))
-  (hal-fill (&mut buffer))
-  (println-i64 (+ (+ (get (& buffer) 0) (get (& buffer) 1)) (get (& buffer) 2)))
+  (hal-fill &mut buffer)
+  (println-i64 (+ (+ (get &buffer 0) (get &buffer 1)) (get &buffer 2)))
   (let mut fixed-buffer (array 0 0 0 0))
-  (hal-fill-array (&mut fixed-buffer))
-  (println-i64 (get (& fixed-buffer) 3))
+  (hal-fill-array &mut fixed-buffer)
+  (println-i64 (get &fixed-buffer 3))
   ; An out-parameter writes into a slot the caller still owns.
   (let mut rest 0)
-  (let whole (hal-divmod 17 5 (&mut rest)))
+  (let whole (hal-divmod 17 5 &mut rest))
   (println-i64 whole)
   (println-i64 rest)
   (let mut units 0.0)
-  (let fraction (hal-fraction 2.5 (&mut units)))
+  (let fraction (hal-fraction 2.5 &mut units))
   (println-bool (= units 2.0))
   (println-bool (= fraction 0.5))
   ; And C calls back into a function this program defines.
@@ -93,4 +93,4 @@
 
 (test "a borrowed string reaches C as a NUL-terminated pointer"
   (let text "twelve chars")
-  (= (hal-strlen (& text)) 12))
+  (= (hal-strlen &text) 12))

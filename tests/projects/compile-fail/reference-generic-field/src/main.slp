@@ -2,5 +2,5 @@
 
 (fn main () -> i32
   (let value "borrowed")
-  (let holder (Holder :value (& value)))
+  (let holder (Holder :value &value))
   0)

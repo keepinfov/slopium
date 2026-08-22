@@ -32,13 +32,13 @@
 ; when there is nothing to map (`D-096`).
 (fn map (T U) ((items (List T)) (f (Fn (T) U))) -> (List U)
   (let mut input items)
-  (if (= (len (& input)) 0)
+  (if (= (len &input) 0)
     (list)
-    (let head (remove (&mut input) 0))
+    (let head (remove &mut input 0))
     (let mut output (list (f head)))
-    (while (> (len (& input)) 0)
-      (let next (remove (&mut input) 0))
-      (push (&mut output) (f next)))
+    (while (> (len &input) 0)
+      (let next (remove &mut input 0))
+      (push &mut output (f next)))
     output))
 
 ; `keep` is asked about each element of the list as it arrived, before anything
@@ -46,39 +46,39 @@
 ; happen afterwards and from the back.
 (fn filter (T) ((items (List T)) (keep (Fn ((& T)) bool))) -> (List T)
   (let mut result items)
-  (let size (len (& result)))
+  (let size (len &result))
   (if (= size 0)
     result
-    (let mut flags (list (keep (get-ref (& result) 0))))
+    (let mut flags (list (keep (get-ref &result 0))))
     (let mut index 1)
     (while (< index size)
-      (push (&mut flags) (keep (get-ref (& result) index)))
+      (push &mut flags (keep (get-ref &result index)))
       (set index (+ index 1)))
     (let mut back size)
     (while (> back 0)
       (set back (- back 1))
-      (when (not (get (& flags) back))
-        (drop-at (&mut result) back)))
+      (when (not (get &flags back))
+        (drop-at &mut result back)))
     result))
 
 ; Removing and discarding, as its own function because the discarded binding
 ; has to go out of scope for the loan to close.
-(fn drop-at (T) ((items (&mut (List T))) (index i64)) -> unit
+(fn drop-at (T) ((items &mut (List T)) (index i64)) -> unit
   (let dropped (remove items index))
   ())
 
 (fn fold (T A) ((items (List T)) (initial A) (f (Fn (A T) A))) -> A
   (let mut input items)
   (let mut total initial)
-  (while (> (len (& input)) 0)
-    (let head (remove (&mut input) 0))
+  (while (> (len &input) 0)
+    (let head (remove &mut input 0))
     (set total (f total head)))
   total)
 
 ; The index of the first element `holds` accepts, like `core:string:find`
 ; returns the index of a match rather than the thing found. Returning the
 ; element would have to move it out of a list the caller still owns.
-(fn find (T) ((items (& (List T))) (holds (Fn ((& T)) bool))) -> (Option i64)
+(fn find (T) ((items &(List T)) (holds (Fn ((& T)) bool))) -> (Option i64)
   (let size (len items))
   (let mut index 0)
   (let mut found -1)
@@ -100,9 +100,9 @@
 ; Puts `value` at `index` and moves everything from there up one place. The
 ; displaced element is carried forward into the next slot, so each element is
 ; written once and the list grows by exactly one at the end.
-(fn insert (T) ((items (&mut (List T))) (index i64) (value T)) -> unit
+(fn insert (T) ((items &mut (List T)) (index i64) (value T)) -> unit
   (let size (len items))
-  (assert (and (>= index 0) (<= index size)) (& "insert index out of bounds"))
+  (assert (and (>= index 0) (<= index size)) &"insert index out of bounds")
   (if (= index size)
     (push items value)
     (do
@@ -121,10 +121,10 @@
 ; takes one out in the same breath, so a swap needs one element held outside
 ; the list to start the rotation with — and the last one is the only one that
 ; can leave without moving the rest.
-(fn swap (T) ((items (&mut (List T))) (left i64) (right i64)) -> unit
+(fn swap (T) ((items &mut (List T)) (left i64) (right i64)) -> unit
   (let size (len items))
-  (assert (and (>= left 0) (< left size)) (& "swap index out of bounds"))
-  (assert (and (>= right 0) (< right size)) (& "swap index out of bounds"))
+  (assert (and (>= left 0) (< left size)) &"swap index out of bounds")
+  (assert (and (>= right 0) (< right size)) &"swap index out of bounds")
   (when (!= left right)
     (let last (- size 1))
     ; `remove` at the last index and not `pop`, which answers an `Option` and
@@ -147,10 +147,10 @@
 
 ; Drops every element from the back, so each one is released rather than
 ; forgotten. A list of owned values is the case that makes the difference.
-(fn clear (T) ((items (&mut (List T)))) -> unit
+(fn clear (T) ((items &mut (List T))) -> unit
   (truncate items 0))
 
-(fn truncate (T) ((items (&mut (List T))) (length i64)) -> unit
+(fn truncate (T) ((items &mut (List T)) (length i64)) -> unit
   (let mut remaining (len items))
   (while (> remaining length)
     (set remaining (- remaining 1))
@@ -176,29 +176,28 @@
 ;
 ; `before` is strict and a tie takes from the left run, so equal elements keep
 ; the order they arrived in and the sort is stable.
-(fn sort-by (T) ((items (List T)) (before (Fn ((& T) (& T)) bool))) -> (List T)
+(fn sort-by (T) ((items (List T)) (before (Fn (&T &T) bool))) -> (List T)
   (let mut sorted items)
-  (let size (len (& sorted)))
+  (let size (len &sorted))
   (if (< size 2)
     sorted
     (do
-      (let order (sorted-order (& sorted) (& before) size))
-      (apply-order (&mut sorted) (& order))
+      (let order (sorted-order &sorted &before size))
+      (apply-order &mut sorted &order)
       sorted)))
 
 ; The indices of the list in sorted order, merged bottom-up. Two index lists of
 ; the same length trade places on every pass, which is why one of them is a
 ; clone rather than something built empty: a `(List i64)` merged into has to
 ; have the slots already.
-(fn sorted-order (T)
-  ((items (& (List T))) (before (& (Fn ((& T) (& T)) bool))) (size i64))
+(fn sorted-order (T) ((items &(List T)) (before &(Fn (&T &T) bool)) (size i64))
   -> (List i64)
   (let mut current (list 0))
   (let mut index 1)
   (while (< index size)
-    (push (&mut current) index)
+    (push &mut current index)
     (set index (+ index 1)))
-  (let mut scratch (clone (& current)))
+  (let mut scratch (clone &current))
   (let mut width 1)
   (while (< width size)
     (let span (* width 2))
@@ -206,7 +205,7 @@
     (while (< start size)
       (let middle (least (+ start width) size))
       (let end (least (+ start span) size))
-      (merge-run items before (& current) (&mut scratch) start middle end)
+      (merge-run items before &current &mut scratch start middle end)
       (set start (+ start span)))
     (let held current)
     (set current scratch)
@@ -220,10 +219,10 @@
 ; One merge of two neighbouring runs, `[start, middle)` and `[middle, end)`,
 ; from `source` into the same range of `target`.
 (fn merge-run (T)
-  ((items (& (List T)))
-    (before (& (Fn ((& T) (& T)) bool)))
-    (source (& (List i64)))
-    (target (&mut (List i64)))
+  ((items &(List T))
+    (before &(Fn (&T &T) bool))
+    (source &(List i64))
+    (target &mut (List i64))
     (start i64)
     (middle i64)
     (end i64))
@@ -254,7 +253,7 @@
 ; `order` says which element belongs at each position, counted in the list as
 ; it arrived. Following each cycle forward puts one element home per `swap`, so
 ; the whole permutation costs at most one swap per element and no second list.
-(fn apply-order (T) ((items (&mut (List T))) (order (& (List i64)))) -> unit
+(fn apply-order (T) ((items &mut (List T)) (order &(List i64))) -> unit
   (let size (len order))
   (let mut at 0)
   (while (< at size)

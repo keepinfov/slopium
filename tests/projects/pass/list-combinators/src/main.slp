@@ -18,31 +18,31 @@
 
 (fn shout ((text String)) -> String
   (let mark "!")
-  (concat (& text) (& mark)))
+  (concat &text &mark))
 
 ; A borrowed scalar, which nothing could read before `D-100` and `clone` reads
 ; now. The predicate is where the difference shows: this is an ordinary `i64`
 ; from here on.
-(fn odd ((item (& i64))) -> bool
+(fn odd ((item &i64)) -> bool
   (let value (clone item))
   (= 1 (% value 2)))
 
-(fn over-three ((item (& i64))) -> bool
+(fn over-three ((item &i64)) -> bool
   (> (clone item) 3))
 
 (fn add ((total i64) (value i64)) -> i64
   (+ total value))
 
-(fn ascending ((left (& i64)) (right (& i64))) -> bool
+(fn ascending ((left &i64) (right &i64)) -> bool
   (< (clone left) (clone right)))
 
-(fn descending ((left (& i64)) (right (& i64))) -> bool
+(fn descending ((left &i64) (right &i64)) -> bool
   (> (clone left) (clone right)))
 
 ; A comparator over elements that own memory. Two borrows of the same list are
 ; alive at once here, which is what a comparator has always needed and what the
 ; old shape hid inside `core:list`.
-(fn shorter ((left (& String)) (right (& String))) -> bool
+(fn shorter ((left &String) (right &String)) -> bool
   (< (len left) (len right)))
 
 (fn empty-numbers () -> (List i64)
@@ -51,31 +51,31 @@
 (fn join-numbers ((items (List i64))) -> String
   (let mut input items)
   (let mut text "")
-  (while (> (len (& input)) 0)
-    (let head (remove (&mut input) 0))
+  (while (> (len &input) 0)
+    (let head (remove &mut input 0))
     (let piece (from-i64 head))
     (let gap " ")
-    (let joined (concat (& text) (& piece)))
-    (set text (concat (& joined) (& gap))))
+    (let joined (concat &text &piece))
+    (set text (concat &joined &gap)))
   text)
 
 (fn join-text ((items (List String))) -> String
   (let mut input items)
   (let mut text "")
-  (while (> (len (& input)) 0)
-    (let head (remove (&mut input) 0))
+  (while (> (len &input) 0)
+    (let head (remove &mut input 0))
     (let gap " ")
-    (let joined (concat (& text) (& head)))
-    (set text (concat (& joined) (& gap))))
+    (let joined (concat &text &head))
+    (set text (concat &joined &gap)))
   text)
 
 (fn show ((items (List i64))) -> unit
   (let text (join-numbers items))
-  (println (& text)))
+  (println &text))
 
 (fn show-text ((items (List String))) -> unit
   (let text (join-text items))
-  (println (& text)))
+  (println &text))
 
 (fn main () -> i32
   (show (map (list 1 2 3) double))
@@ -88,9 +88,9 @@
   (println-i64 (fold (empty-numbers) 100 add))
 
   (let haystack (list 1 2 9 4))
-  (println-i64 (unwrap-or (find (& haystack) over-three) (- 0 1)))
+  (println-i64 (unwrap-or (find &haystack over-three) (- 0 1)))
   (let small (list 1 2))
-  (println-i64 (unwrap-or (find (& small) over-three) (- 0 1)))
+  (println-i64 (unwrap-or (find &small over-three) (- 0 1)))
 
   (show (sort-by (list 5 3 9 1 3) ascending))
   (show (sort-by (list 5 3 9 1 3) descending))
@@ -104,25 +104,25 @@
   ; Writing into a list, which is what `replace` made possible and nothing had
   ; asked for until now (`D-146`).
   (let mut numbers (list 1 2 4))
-  (insert (&mut numbers) 2 3)
-  (insert (&mut numbers) 0 0)
-  (let end (len (& numbers)))
-  (insert (&mut numbers) end 5)
+  (insert &mut numbers 2 3)
+  (insert &mut numbers 0 0)
+  (let end (len &numbers))
+  (insert &mut numbers end 5)
   (show numbers)
   (let mut letters (list "a" "b" "c" "d"))
-  (swap (&mut letters) 0 3)
-  (swap (&mut letters) 1 2)
+  (swap &mut letters 0 3)
+  (swap &mut letters 1 2)
   (show-text letters)
   0)
 
 (test "map keeps the order and handles the empty list"
   (let mapped (map (list 1 2 3) double))
   (let none (map (empty-numbers) double))
-  (and (= 3 (len (& mapped))) (= 6 (get (& mapped) 2)) (= 0 (len (& none)))))
+  (and (= 3 (len &mapped)) (= 6 (get &mapped 2)) (= 0 (len &none))))
 
 (test "filter keeps what the predicate accepts"
   (let kept (filter (list 1 2 3 4 5) odd))
-  (and (= 3 (len (& kept))) (= 1 (get (& kept) 0)) (= 5 (get (& kept) 2))))
+  (and (= 3 (len &kept)) (= 1 (get &kept 0)) (= 5 (get &kept 2))))
 
 (test "fold sees every element once"
   (and (= 10 (fold (list 1 2 3 4) 0 add)) (= 100 (fold (empty-numbers) 100 add))))
@@ -130,52 +130,52 @@
 (test "find answers with an index, or with nothing"
   (let haystack (list 1 2 9 4))
   (let small (list 1 2))
-  (and (= 2 (unwrap-or (find (& haystack) over-three) (- 0 1)))
-       (= (- 0 1) (unwrap-or (find (& small) over-three) (- 0 1)))))
+  (and (= 2 (unwrap-or (find &haystack over-three) (- 0 1)))
+       (= (- 0 1) (unwrap-or (find &small over-three) (- 0 1)))))
 
 (test "sort-by orders by the comparator it is given"
   (let up (sort-by (list 5 3 9 1 3) ascending))
   (let down (sort-by (list 5 3 9 1 3) descending))
-  (and (= 1 (get (& up) 0)) (= 9 (get (& up) 4)) (= 9 (get (& down) 0))))
+  (and (= 1 (get &up 0)) (= 9 (get &up 4)) (= 9 (get &down 0))))
 
 (test "insert puts an element where it is asked to"
   (let mut numbers (list 1 2 4))
-  (insert (&mut numbers) 2 3)
-  (insert (&mut numbers) 0 0)
-  (let end (len (& numbers)))
-  (insert (&mut numbers) end 5)
-  (and (= 6 (len (& numbers)))
-       (= 0 (get (& numbers) 0))
-       (= 3 (get (& numbers) 3))
-       (= 5 (get (& numbers) 5))))
+  (insert &mut numbers 2 3)
+  (insert &mut numbers 0 0)
+  (let end (len &numbers))
+  (insert &mut numbers end 5)
+  (and (= 6 (len &numbers))
+       (= 0 (get &numbers 0))
+       (= 3 (get &numbers 3))
+       (= 5 (get &numbers 5))))
 
 ; The last index is the one `swap` reaches through `pop` rather than through
 ; the rotation, so both paths are exercised here.
 (test "swap exchanges two elements and moves nothing else"
   (let mut letters (list "a" "b" "c" "d"))
-  (swap (&mut letters) 0 3)
-  (swap (&mut letters) 1 2)
-  (swap (&mut letters) 2 2)
-  (and (= 4 (len (& letters)))
-       (equal-text (get-ref (& letters) 0) (& "d"))
-       (equal-text (get-ref (& letters) 1) (& "c"))
-       (equal-text (get-ref (& letters) 2) (& "b"))
-       (equal-text (get-ref (& letters) 3) (& "a"))))
+  (swap &mut letters 0 3)
+  (swap &mut letters 1 2)
+  (swap &mut letters 2 2)
+  (and (= 4 (len &letters))
+       (equal-text (get-ref &letters 0) &"d")
+       (equal-text (get-ref &letters 1) &"c")
+       (equal-text (get-ref &letters 2) &"b")
+       (equal-text (get-ref &letters 3) &"a")))
 
 ; Owned elements, so a `truncate` that forgot rather than dropped would show up
 ; under valgrind rather than in the length.
 (test "truncate and clear release what they remove"
   (let mut words (list "one" "two" "three" "four"))
-  (truncate (&mut words) 2)
-  (let kept (len (& words)))
-  (clear (&mut words))
-  (and (= 2 kept) (= 0 (len (& words)))))
+  (truncate &mut words 2)
+  (let kept (len &words))
+  (clear &mut words)
+  (and (= 2 kept) (= 0 (len &words))))
 
 ; Ties keep the order they arrived in, which is the property a selection sort
 ; had and an insertion sort has to be written for.
 (test "sort-by is stable"
   (let sorted (sort-by (list "bb" "aa" "cc" "dd") shorter))
-  (and (equal-text (get-ref (& sorted) 0) (& "bb"))
-       (equal-text (get-ref (& sorted) 1) (& "aa"))
-       (equal-text (get-ref (& sorted) 2) (& "cc"))
-       (equal-text (get-ref (& sorted) 3) (& "dd"))))
+  (and (equal-text (get-ref &sorted 0) &"bb")
+       (equal-text (get-ref &sorted 1) &"aa")
+       (equal-text (get-ref &sorted 2) &"cc")
+       (equal-text (get-ref &sorted 3) &"dd")))

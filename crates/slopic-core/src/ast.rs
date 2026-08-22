@@ -1473,6 +1473,27 @@ impl AstBuilder<'_> {
 
     fn ty(&mut self, form: &SExpr) -> Option<Type> {
         match &form.kind {
+            // A sigil that reached a type on its own lost its operand to the
+            // list around it: `(Fn (&T) i64)` reads as the borrow `(& T)`,
+            // because a head sigil whose form ends the list is that list
+            // (`D-149`). The parameter list of one keeps its parentheses.
+            SExprKind::Atom(name)
+                if crate::reader::sigil_of(name).is_some_and(|sigil| sigil.expansion.is_some()) =>
+            {
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        codes::INVALID_SYNTAX,
+                        self.file,
+                        form.span,
+                        format!("`{name}` is a sigil and not a type"),
+                    )
+                    .with_help(format!(
+                        "a borrow of `T` is `{name}T`, and a list holding one borrowed type \
+                         keeps its parentheses, as in `(({name} T))`"
+                    )),
+                );
+                None
+            }
             SExprKind::Atom(name) => Some(match name.as_str() {
                 "unit" => Type::Unit,
                 "bool" => Type::Bool,
@@ -2297,12 +2318,13 @@ fn strip_separators(body: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{lexer, parser};
+    use crate::{lexer, parser, reader};
 
     #[test]
     fn builds_function_and_test() {
         let source = "(fn add ((a i64) (b i64)) -> i64 (+ a b))\n(test \"add\" (= (add 1 2) 3))";
         let tokens = lexer::lex("test.slp", source).unwrap();
+        let tokens = reader::expand("test.slp", &tokens).unwrap();
         let forms = parser::parse("test.slp", &tokens).unwrap();
         let program = build_program("test.slp", &forms).unwrap();
         assert_eq!(program.functions.len(), 1);

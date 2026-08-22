@@ -1,0 +1,62 @@
+; A sigil abbreviates applying the form it stands before, and `&x` is a borrow
+; (`D-149`). It expands in the reader, so nothing under it knows which spelling
+; arrived: every borrow below could be written `(& x)` and the object would be
+; the same file.
+
+(take std:io println println-i64)
+(take std:string concat from-i64)
+
+(struct Counter ((value i64) (label String)))
+
+; Type position, expression position, and a type under a type.
+(fn read ((counter &Counter)) -> i64
+  (match counter
+    ((Counter :value value :label label) (clone value))))
+
+(fn bump ((counter &mut Counter)) -> unit
+  (match counter
+    ((Counter :value value :label label) (set value (+ (clone value) 1)))))
+
+(fn total ((values &(List i64))) -> i64
+  (fold-borrowed values 0 0))
+
+(fn fold-borrowed ((values &(List i64)) (at i64) (carried i64)) -> i64
+  (if (= at (len values))
+    carried
+    (fold-borrowed values (+ at 1) (+ carried (clone (get-ref values at))))))
+
+; A borrowed function, taking a borrow: `(Fn (&T &T) bool)` is a list of two
+; borrowed types, and a list holding one keeps its parentheses — `((& T))` —
+; because a sigil that opens a list and ends it is the borrow itself.
+(fn longer ((left &String) (right &String)) -> bool
+  (> (len left) (len right)))
+
+(fn choose ((decide (Fn (&String &String) bool)) (left &String) (right &String))
+  -> String
+  (if (decide left right) (clone left) (clone right)))
+
+(fn shout ((text (Fn ((& String)) String)) (word &String)) -> String
+  (text word))
+
+(fn louder ((word &String)) -> String
+  (concat word &"!"))
+
+(fn main () -> i32
+  (let mut counter (Counter :value 41 :label "answers"))
+  (bump &mut counter)
+  (println-i64 (read &counter))
+
+  ; A text literal is a form like any other, so a sigil stands before one the
+  ; same way. `fmt` closes the space a sigil is written with, whichever
+  ; spelling arrived.
+  (println &(concat &"borrowed " &"text"))
+
+  (let numbers (list 1 2 3))
+  (println-i64 (total &numbers))
+  (println-i64 (len &numbers))
+
+  (let first "alpha")
+  (let second "beta!")
+  (println &(choose longer &first &second))
+  (println &(shout louder &first))
+  0)

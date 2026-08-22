@@ -23,34 +23,34 @@
 ; The note crosses as the pointer alone, NUL-terminated (`D-065`). The runtime
 ; copies it, because the `String` it points at is dropped on the way out of the
 ; call that made it.
-(extern "sl_rt_test_note" (note-raw (message (& String))) -> unit)
+(extern "sl_rt_test_note" (note-raw (message &String)) -> unit)
 
-(fn note ((message (& String))) -> unit
+(fn note ((message &String)) -> unit
   (note-raw message))
 
-(fn disagreement ((want (& String)) (got (& String))) -> String
-  (let opening (concat (& "expected ") want))
-  (let middle (concat (& opening) (& ", got ")))
-  (concat (& middle) got))
+(fn disagreement ((want &String) (got &String)) -> String
+  (let opening (concat &"expected " want))
+  (let middle (concat &opening &", got "))
+  (concat &middle got))
 
-(fn quoted ((text (& String))) -> String
-  (let opening (concat (& "\"") text))
-  (concat (& opening) (& "\"")))
+(fn quoted ((text &String)) -> String
+  (let opening (concat &"\"" text))
+  (concat &opening &"\""))
 
 (fn equal-i64 ((got i64) (want i64)) -> bool
   (if (= got want)
     true
-    (note (& (disagreement (& (from-i64 want)) (& (from-i64 got)))))
+    (note &(disagreement &(from-i64 want) &(from-i64 got)))
     false))
 
 (fn equal-u64 ((got u64) (want u64)) -> bool
   (if (= got want)
     true
-    (note (& (disagreement (& (from-u64 want)) (& (from-u64 got)))))
+    (note &(disagreement &(from-u64 want) &(from-u64 got)))
     false))
 
-(fn equal-text ((got (& String)) (want (& String))) -> bool
+(fn equal-text ((got &String) (want &String)) -> bool
   (if (equals got want)
     true
-    (note (& (disagreement (& (quoted want)) (& (quoted got)))))
+    (note &(disagreement &(quoted want) &(quoted got)))
     false))

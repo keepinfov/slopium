@@ -34,12 +34,12 @@
 (fn (inline) decorated ((n i64)) -> String
   (let mark "#")
   (let digits (from-i64 n))
-  (let one (concat (& mark) (& digits)))
-  (let two (concat (& one) (& mark)))
-  (let three (concat (& two) (& digits)))
-  (let four (concat (& three) (& mark)))
-  (let five (concat (& four) (& digits)))
-  (concat (& five) (& mark)))
+  (let one (concat &mark &digits))
+  (let two (concat &one &mark))
+  (let three (concat &two &digits))
+  (let four (concat &three &mark))
+  (let five (concat &four &digits))
+  (concat &five &mark))
 
 (fn label ((n i64)) -> String
   (decorated n))
@@ -59,4 +59,4 @@
   (println-i64 (+ (widen 20) (widen 22)))
   (println-i64 retry-limit)
   (let name (label 8))
-  (println (& name)))
+  (println &name))

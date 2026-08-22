@@ -20,12 +20,12 @@
 ; Asking without taking. The `_` matters: a payload bound through a borrow is a
 ; `(& T)` and binding one here would say this function cares what is inside,
 ; which it does not.
-(fn is-some (T) ((value (& (Option T)))) -> bool
+(fn is-some (T) ((value &(Option T))) -> bool
   (match value
     ((Option:Some _) true)
     ((Option:None) false)))
 
-(fn is-none (T) ((value (& (Option T)))) -> bool
+(fn is-none (T) ((value &(Option T))) -> bool
   (match value
     ((Option:Some _) false)
     ((Option:None) true)))

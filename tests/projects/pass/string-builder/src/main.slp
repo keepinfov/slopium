@@ -11,9 +11,9 @@
   (let mut out (new))
   (let mut index 0)
   (while (< index count)
-    (write-str (&mut out) (& "item "))
-    (write-i64 (&mut out) index)
-    (write-byte (&mut out) 10)
+    (write-str &mut out &"item ")
+    (write-i64 &mut out index)
+    (write-byte &mut out 10)
     (set index (+ index 1)))
   (build out))
 
@@ -24,9 +24,9 @@
   (let mut index 0)
   (while (< index count)
     (let number (from-i64 index))
-    (let piece (concat (& "item ") (& number)))
-    (let line (concat (& piece) (& "\n")))
-    (let next (concat (& out) (& line)))
+    (let piece (concat &"item " &number))
+    (let line (concat &piece &"\n"))
+    (let next (concat &out &line))
     (set out next)
     (set index (+ index 1)))
   out)
@@ -34,37 +34,37 @@
 (fn main () -> i32
   (let built (joined 3))
   (print built)
-  (println-i64 (len (& (joined 100))))
+  (println-i64 (len &(joined 100)))
   0)
 
 (fn print ((text String)) -> unit
-  (println (& text)))
+  (println &text))
 
 (test "a builder and a stack of concats agree"
   (let built (joined 40))
   (let copied (concatenated 40))
-  (equal-text (& built) (& copied)))
+  (equal-text &built &copied))
 
 (test "an empty builder builds an empty string"
   (let out (new))
-  (equal-i64 (len (& (build out))) 0))
+  (equal-i64 (len &(build out)) 0))
 
 (test "the size is the bytes written so far"
   (let mut out (new))
-  (write-str (&mut out) (& "abc"))
-  (write-byte (&mut out) 33)
-  (equal-i64 (size (& out)) 4))
+  (write-str &mut out &"abc")
+  (write-byte &mut out 33)
+  (equal-i64 (size &out) 4))
 
 (test "an integer is written without a string per digit"
   (let mut out (new))
-  (write-i64 (&mut out) 0)
-  (write-byte (&mut out) 32)
-  (write-i64 (&mut out) -9223372036854775808)
-  (write-byte (&mut out) 32)
-  (write-u64 (&mut out) 18446744073709551615)
-  (equal-text (& (build out)) (& "0 -9223372036854775808 18446744073709551615")))
+  (write-i64 &mut out 0)
+  (write-byte &mut out 32)
+  (write-i64 &mut out -9223372036854775808)
+  (write-byte &mut out 32)
+  (write-u64 &mut out 18446744073709551615)
+  (equal-text &(build out) &"0 -9223372036854775808 18446744073709551615"))
 
 (test "a float goes in through the module that formats one"
   (let mut out (new))
-  (write-f64 (&mut out) 0.1)
-  (equal-text (& (build out)) (& "0.10000000000000001")))
+  (write-f64 &mut out 0.1)
+  (equal-text &(build out) &"0.10000000000000001"))

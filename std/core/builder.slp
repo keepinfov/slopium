@@ -19,28 +19,26 @@
 
 ; The length travels beside the pointer, because a Slopium string may contain a
 ; NUL byte and C would stop at it (`D-079`).
-(extern "sl_rt_string_byte"
-  (byte-raw (text (& String)) (length i64) (index i64))
-  -> i64)
+(extern "sl_rt_string_byte" (byte-raw (text &String) (length i64) (index i64)) -> i64)
 
-(extern "sl_rt_string_from_bytes" (bytes-raw (bytes (& (Slice u8)))) -> String)
+(extern "sl_rt_string_from_bytes" (bytes-raw (bytes &(Slice u8))) -> String)
 
 ; The empty `(list)` takes its element type from the field being built, which
 ; is the same reason `core:map` builds its bucket array in the struct literal.
 (fn new () -> Builder
   (Builder :bytes (list)))
 
-(fn size ((builder (& Builder))) -> i64
+(fn size ((builder &Builder)) -> i64
   (match builder
     ((Builder :bytes bytes) (len bytes))))
 
-(fn write-byte ((into (&mut Builder)) (byte u8)) -> unit
+(fn write-byte ((into &mut Builder) (byte u8)) -> unit
   (match into
     ((Builder :bytes bytes) (push bytes byte))))
 
 ; One pass over the piece, appending. Nothing is allocated: the buffer grows
 ; where it already is, which is the whole of the difference from `concat`.
-(fn write-str ((into (&mut Builder)) (text (& String))) -> unit
+(fn write-str ((into &mut Builder) (text &String)) -> unit
   (let width (len text))
   (let mut index 0)
   (while (< index width)
@@ -50,25 +48,25 @@
 ; The digits go in least significant first and come back out reversed, so a
 ; number costs one small list rather than one `String` per digit — which is
 ; what `core:string`'s `digits-of` costs, and why this is not written over it.
-(fn write-u64 ((into (&mut Builder)) (value u64)) -> unit
+(fn write-u64 ((into &mut Builder) (value u64)) -> unit
   (if (= value 0)
     (write-byte into 48)
     (do
       (let mut digits (list (as u8 0)))
-      (let discarded (remove (&mut digits) 0))
+      (let discarded (remove &mut digits 0))
       (let mut remaining value)
       (while (> remaining 0)
-        (push (&mut digits) (as u8 (+ 48 (as i64 (% remaining 10)))))
+        (push &mut digits (as u8 (+ 48 (as i64 (% remaining 10)))))
         (set remaining (/ remaining 10)))
-      (let mut index (len (& digits)))
+      (let mut index (len &digits))
       (while (> index 0)
         (set index (- index 1))
-        (write-byte into (get (& digits) index))))))
+        (write-byte into (get &digits index))))))
 
 ; A sign and a magnitude. The magnitude of the smallest `i64` has no `i64` to
 ; hold it, so it is taken one below and put back as a `u64`, exactly as
 ; `core:string`'s `from-i64` does.
-(fn write-i64 ((into (&mut Builder)) (value i64)) -> unit
+(fn write-i64 ((into &mut Builder) (value i64)) -> unit
   (if (< value 0)
     (do
       (write-byte into 45)
@@ -80,5 +78,5 @@
 (fn build ((builder Builder)) -> String
   (match builder
     ((Builder :bytes bytes)
-      (let view (slice (& bytes) 0 (len (& bytes))))
-      (bytes-raw (& view)))))
+      (let view (slice &bytes 0 (len &bytes)))
+      (bytes-raw &view))))

@@ -1,4 +1,4 @@
-(fn view ((values (& (List i64)))) -> (Slice i64)
+(fn view ((values &(List i64))) -> (Slice i64)
   (slice values 0 1))
 
 (fn main () -> i32 0)

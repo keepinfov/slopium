@@ -15,37 +15,37 @@
 
 (struct Error ((code i64)))
 
-(extern "sl_rt_fs_read" (read-raw (path (& String)) (length i64)) -> String)
+(extern "sl_rt_fs_read" (read-raw (path &String) (length i64)) -> String)
 
 (extern "sl_rt_fs_write"
-  (write-raw (path (& String)) (path-length i64) (data (& String)) (data-length i64))
+  (write-raw (path &String) (path-length i64) (data &String) (data-length i64))
   -> i64)
 
-(extern "sl_rt_fs_exists" (exists-raw (path (& String)) (length i64)) -> i64)
+(extern "sl_rt_fs_exists" (exists-raw (path &String) (length i64)) -> i64)
 
-(extern "sl_rt_fs_remove" (delete-raw (path (& String)) (length i64)) -> i64)
+(extern "sl_rt_fs_remove" (delete-raw (path &String) (length i64)) -> i64)
 
 (extern "sl_rt_last_error" (last-error) -> i64)
 
 ; An empty file and a missing one both come back as an empty string, so the
 ; slot is the only thing that tells them apart.
-(fn read ((path (& String))) -> (Result String Error)
+(fn read ((path &String)) -> (Result String Error)
   (let contents (read-raw path (len path)))
   (let code (last-error))
   (if (= code 0) (Result:Ok contents) (Result:Err (Error :code code))))
 
-(fn write ((path (& String)) (contents (& String))) -> (Result i64 Error)
+(fn write ((path &String) (contents &String)) -> (Result i64 Error)
   (let written (write-raw path (len path) contents (len contents)))
   (let code (last-error))
   (if (= code 0) (Result:Ok written) (Result:Err (Error :code code))))
 
 ; Not a `Result`: "there is no such file" is the answer, not a failure.
-(fn exists ((path (& String))) -> bool
+(fn exists ((path &String)) -> bool
   (= (exists-raw path (len path)) 1))
 
 ; `delete` and not `remove`, because `remove` is the builtin that moves an
 ; element out of a list and a module-level name does not displace a builtin.
-(fn delete ((path (& String))) -> (Result i64 Error)
+(fn delete ((path &String)) -> (Result i64 Error)
   (let status (delete-raw path (len path)))
   (let code (last-error))
   (if (= code 0) (Result:Ok status) (Result:Err (Error :code code))))

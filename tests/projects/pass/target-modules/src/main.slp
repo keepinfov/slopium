@@ -9,10 +9,10 @@
 (take arch name pointer-bits)
 
 (fn main () -> i32
-  (println (& (name)))
+  (println &(name))
   (println-i64 (pointer-bits))
   (println-bool (>= (pointer-bits) 32))
   0)
 
 (test "the selected architecture module answered"
-  (and (> (len (& (name))) 0) (= (pointer-bits) 64)))
+  (and (> (len &(name)) 0) (= (pointer-bits) 64)))

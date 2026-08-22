@@ -8,6 +8,15 @@ pub mod codes {
     pub const UNEXPECTED_CLOSE: &str = "SL0003";
     pub const UNCLOSED_LIST: &str = "SL0004";
     pub const MAX_NESTING: &str = "SL0005";
+    /// A sigil the reader holds for something it has not built (`D-149`).
+    ///
+    /// Its own code rather than `INVALID_SYNTAX`'s, because the answer is not
+    /// that the program is malformed but that the character is spoken for: a
+    /// reader looking one up is asking what it was kept for, and the note
+    /// answers that.
+    pub const RESERVED_SIGIL: &str = "SL0006";
+    /// An abbreviation with nothing to expand (`D-149`).
+    pub const ABBREVIATION: &str = "SL0007";
     pub const INVALID_SYNTAX: &str = "SL0100";
     pub const NAME_OR_TYPE: &str = "SL0200";
     pub const OWNERSHIP: &str = "SL0300";
@@ -45,6 +54,8 @@ pub mod codes {
         (UNEXPECTED_CLOSE, "unexpected closing parenthesis"),
         (UNCLOSED_LIST, "unclosed list"),
         (MAX_NESTING, "expression nesting is too deep"),
+        (RESERVED_SIGIL, "reserved sigil"),
+        (ABBREVIATION, "abbreviation with nothing to expand"),
         (INVALID_SYNTAX, "invalid declaration or expression syntax"),
         (NAME_OR_TYPE, "name resolution or type error"),
         (OWNERSHIP, "ownership or borrowing error"),

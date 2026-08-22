@@ -20,6 +20,49 @@ A string literal is bytes, not characters. Besides `\n`, `\r`, `\t`, `\"` and
 `NN` from `00` to `ff`. A `String` is a length and a buffer, so a literal may
 hold a NUL or any other byte and `len` counts bytes.
 
+## Abbreviations
+
+A **sigil** is a token standing for structure nobody typed. It is written
+before the one form it applies to, and the reader expands it into that form
+before anything reads a tree, so nothing under the reader learns it was written
+(`D-149`).
+
+| Sigil | Expands to | |
+| --- | --- | --- |
+| `&` | `(& x)` | a shared borrow |
+| `&mut` | `(&mut x)` | an exclusive borrow |
+| `'` | — | reserved for quotation |
+| `` ` `` | — | reserved for quasiquotation |
+| `,` | — | reserved for unquotation |
+
+A reserved sigil is refused with `SL0006`, and the refusal says what the
+character is kept for. Writing one is the error; the row exists so that the
+macros this language has not built cannot be beaten to a character by something
+else.
+
+`&x` works wherever a form does, type position included, so `&String`, `&T`,
+`&(Slice T)` and `&"a literal"` all read as they look. The space is not
+significant — `& x` is the same borrow — and `slopium fmt` closes it. `&mut` is
+one word and keeps the space after it, because `&mutx` would be a shared borrow
+of `mutx`.
+
+**The unabbreviated form stays legal.** `&x` is a spelling of `(& x)` and not a
+replacement for it: a sigil that opens a list whose end is its own operand is
+the head of that list, which is what `(& x)` has always been. So the one place
+the short spelling says something else is a list holding a single borrowed
+type, which keeps its parentheses:
+
+```lisp
+(fn apply ((f (Fn ((& String)) i64))) -> i64
+  (f &"hello"))
+(fn pick ((f (Fn (&String &String) bool))) -> bool
+  (f &"a" &"b"))
+```
+
+The first parameter list holds one borrowed type; the second holds two.
+Writing the first `(Fn (&String) i64)` would be a borrow of `String` where a
+list of parameters belongs, and the compiler says so.
+
 ## Files, modules, and imports
 
 Every `.slp` file contains declarations. Its module name is derived from its
@@ -90,7 +133,7 @@ name.
 ```lisp
 (fn (inline) blend ((a i64) (b i64)) -> i64
   (* (+ a b) 2))
-(fn (deprecated "call `parse-line` instead") parse ((s (& String))) -> i64 0)
+(fn (deprecated "call `parse-line` instead") parse ((s &String)) -> i64 0)
 (const (deprecated) retry-limit 3)
 (fn (inline) (deprecated) legacy () -> i64 0)
 ```
@@ -167,7 +210,7 @@ future version nothing.
 
 Scalar types are `unit`, `bool`, `f64`, and the eight integers `i8`, `i16`,
 `i32`, `i64`, `u8`, `u16`, `u32` and `u64` (`D-107`). Other built-in types are
-`String`, `(List T)`, `(Array T N)`, `(Slice T)`, `(& T)`, `(&mut T)`, and
+`String`, `(List T)`, `(Array T N)`, `(Slice T)`, `&T`, `&mut T`, and
 `(Fn (T ...) R)`. Every integer is one machine word wide whatever its type
 says, so a `(List u8)` is a word per element; the type decides what the word
 means, not how much room it takes.
@@ -215,7 +258,7 @@ and an `i64` do not add — because `D-090` says a conversion is written down.
 
 `bit-and`, `bit-or`, `bit-xor` and `bit-not` are the bitwise operations and
 `shl` and `shr` the shifts, all on integers. They are spelled out because `&`
-is a borrow and a language where `(& a b)` is a bitwise and while `(& a)` is a
+is a borrow and a language where `(& a b)` is a bitwise and while `&a` is a
 borrow has a trap in it. `shr` is arithmetic on a signed type and logical on an
 unsigned one, which is what the two words mean and needs no second operator.
 **A shift by a negative amount, or by the width of the type or more, traps** — the two
@@ -240,7 +283,7 @@ hover, above the type:
 ```lisp
 ;; The distance between two points, in whatever units they were given in.
 ;; Negative coordinates are fine; the answer never is.
-(fn distance ((a (& Point)) (b (& Point))) -> f64
+(fn distance ((a &Point) (b &Point)) -> f64
   (sqrt (+ (square (- (. b x) (. a x))) (square (- (. b y) (. a y))))))
 ```
 
@@ -266,12 +309,12 @@ it on every save cannot change what a program means (`D-143`).
 Every form has two shapes — it fits on the line it starts on, or it does not:
 
 ```lisp
-(fn starts-with ((text (& String)) (prefix (& String))) -> bool
+(fn starts-with ((text &String) (prefix &String)) -> bool
   (let width (len prefix))
   (if (> width (len text))
     false
     (let head (substring text 0 width))
-    (equals (& head) prefix)))
+    (equals &head prefix)))
 ```
 
 A form that does not fit puts its arguments one per line. A declaration keeps
@@ -281,9 +324,9 @@ everything else aligns its arguments under the first one when they all fit
 there:
 
 ```lisp
-(fn describe ((id i64) (title (& String)) (owner (& String))) -> String
-  (concat (& (concat (& (from-i64 id)) (& ": ")))
-          (& (concat title (& (concat (& " — ") owner))))))
+(fn describe ((id i64) (title &String) (owner &String)) -> String
+  (concat &(concat &(from-i64 id) &": ")
+          &(concat title &(concat &" — " &(clone owner)))))
 ```
 
 A body begins on its own line however short it is, which is why
@@ -324,7 +367,7 @@ A function value is one machine word and it is **owned**, like a `String`: it is
 dropped when it goes out of scope, `clone` copies it, and handing it to
 something else is a move. A function that only wants to *call* one takes it by
 value or by borrow — calling never consumes — but a function that wants to pass
-it on twice must take a `(& (Fn ...))`, which is callable like the thing it
+it on twice must take a `&(Fn ...)`, which is callable like the thing it
 borrows. It can be returned and it can be a struct or enum field.
 
 An `extern` is not a value. Its arguments may cross the C boundary as more than
@@ -399,18 +442,18 @@ interchangeably, which is what lets `(filter items keep)` take either:
 
 ```lisp
 (let limit 4)
-(let kept (filter numbers (lambda (limit) ((n (& i64))) -> bool (> (clone n) limit))))
+(let kept (filter numbers (lambda (limit) ((n &i64)) -> bool (> (clone n) limit))))
 ```
 
 Because a closure owns its captures, it may outlive the function that built one:
 
 ```lisp
 (fn greeter ((who String)) -> (Fn ((& String)) String)
-  (lambda (who) ((mark (& String))) -> String (concat (& who) mark)))
+  (lambda (who) ((mark &String)) -> String (concat &who mark)))
 ```
 
 **A capture may not be a borrow.** Because a closure can outlive the frame it
-was written in, an environment holding a `(& T)` or a `Slice` is the same
+was written in, an environment holding a `&T` or a `Slice` is the same
 mistake as returning one, and it is refused by the same rule. Capture what the
 borrow points at, or `clone` it.
 
@@ -423,9 +466,9 @@ along with it.
 ```lisp
 (let message "hello")
 (let copy (clone message))
-(println (& message))
+(println &message)
 
-(fn owned ((text (& String))) -> String
+(fn owned ((text &String)) -> String
   (clone text))
 ```
 
@@ -447,22 +490,22 @@ binding holds.
 
 ```lisp
 (let text (read-line))
-(let text (trim (& text)))
+(let text (trim &text))
 ```
 
-Owned values move by default. `(& value)` and `(&mut value)` create shared and
+Owned values move by default. `&value` and `&mut value` create shared and
 exclusive borrows.
 
 **A borrow may name a temporary where a call takes it** (`D-126`):
 
 ```lisp
-(println (& "hello"))
-(println (& (concat (& "task #") (& (from-i64 id)))))
+(println &"hello")
+(println &(concat &"task #" &(from-i64 id)))
 ```
 
 The value the borrow names lives until that call returns, and is dropped there.
 That is why an argument is the only position it is allowed in: anywhere else
-there is no point at which the value could be released, so `(let text (& "x"))`
+there is no point at which the value could be released, so `(let text &"x")`
 is refused and the message says to name the value instead. Each call releases
 what was borrowed inside its own argument list, so the nesting above drops three
 strings at three different points, innermost first. A borrow ends after its last use where the control-flow
@@ -472,8 +515,8 @@ cannot be returned either. `clone` recursively copies strings, lists, arrays,
 structs, and enums. Generated drop glue recursively destroys them.
 
 `clone` crosses a borrow of either kind (`D-091`, `D-100`, `D-120`):
-`(clone text)` on a `(& String)` is a `String`, `(clone n)` on a `(& i64)` is an
-`i64`, and a `(&mut i64)` reads the same way. This is how a borrowed value is
+`(clone text)` on a `&String` is a `String`, `(clone n)` on a `&i64` is an
+`i64`, and a `&mut i64` reads the same way. This is how a borrowed value is
 read, and it is the only way — the language has no dereference operator and none
 is planned, because through a borrow this form already is one. It refuses an
 *owned* scalar: a `bool`, an `i32`, an `i64` or an `f64` is copied by being
@@ -481,7 +524,7 @@ used, so `(clone 42)` is an error rather than a call that does nothing. Reading
 one out of a borrow is never nothing, which is why the two cases differ.
 
 An exclusive borrow is accepted wherever a shared one is asked for, and never
-the other way round: `(&mut T)` is a `(& T)` that may also be written through,
+the other way round: `&mut T` is a `&T` that may also be written through,
 so giving the permission up costs nothing and taking it is not offered.
 
 ## Control flow
@@ -520,7 +563,7 @@ below — and it is why there is no second boundary to look for:
     "none"
     (let digits (from-i64 count))
     (let suffix " left")
-    (concat (& digits) (& suffix))))
+    (concat &digits &suffix)))
 ```
 
 A `loop` is an expression: `(break value)` is what it produces (`D-121`). Every
@@ -548,11 +591,11 @@ written, and all of them run *before* the scope releases what it owns, so a
 deferred expression still finds the values the scope was holding:
 
 ```lisp
-(fn read-through ((path (& String))) -> i64
+(fn read-through ((path &String)) -> i64
   (let handle (open path))
   (defer (close handle))
-  (let banner (concat (& "reading ") path))
-  (defer (println (& banner)))
+  (let banner (concat &"reading " path))
+  (defer (println &banner))
   (size handle))
 ```
 
@@ -579,7 +622,7 @@ body of the `when`, arm, branch or loop it is inside rather than the function:
 
 ```lisp
 (when retrying
-  (defer (println (& "the retry ended")))
+  (defer (println &"the retry ended"))
   (attempt))
 ```
 
@@ -597,7 +640,7 @@ none of them.
 
 (match (Message:Pointed (Point :x 42 :label "answer"))
   ((Message:Pointed (Point :x x :label label))
-    (println (& label))
+    (println &label)
     x)
   ((Message:Empty) 0))
 ```
@@ -640,7 +683,7 @@ the names its pattern bound: moving one out is refused, because the arm after
 it still matches against the same value.
 
 ```lisp
-(fn describe ((reading (& Reading))) -> i64
+(fn describe ((reading &Reading)) -> i64
   (match reading
     ((Reading:Retry attempt) when (> (clone attempt) 3) 0)
     ((Reading:Retry attempt) (clone attempt))
@@ -652,30 +695,30 @@ A `match` also looks through a **shared borrow** of an enum or a struct
 every name a pattern binds is a borrow of the field it names.
 
 ```lisp
-(fn is-pointed ((message (& Message))) -> bool
+(fn is-pointed ((message &Message)) -> bool
   (match message
     ((Message:Pointed _) true)
     ((Message:Empty) false)))
 
-(fn x-of ((point (& Point))) -> i64
+(fn x-of ((point &Point)) -> i64
   (match point
     ((Point :x x :label _) (clone x))))
 ```
 
-`x` there is a `(& i64)`, not an `i64`, and `clone` is what reads it. The
+`x` there is a `&i64`, not an `i64`, and `clone` is what reads it. The
 binding is a borrow for **every** field type, including a `Copy` one: inside a
 generic body, whether `T` is `Copy` is not known, and a binding's type has to
 be. A borrowed scalar has nothing to take apart — use `clone` and match the
 value.
 
-A `match` through a **`(&mut ...)`** binds each field as a `(&mut ...)` of
+A `match` through a **`&mut ...`** binds each field as a `&mut ...` of
 itself, and such a name is a **place**: `set` writes the field it stands for and
 drops the value that was there (`D-120`).
 
 ```lisp
 (struct Counter ((count i64) (label String)))
 
-(fn bump ((counter (&mut Counter))) -> unit
+(fn bump ((counter &mut Counter)) -> unit
   (match counter
     ((Counter :count count :label label)
       (do
@@ -684,7 +727,7 @@ drops the value that was there (`D-120`).
 ```
 
 Only a name bound that way is a place. A name a *shared* pattern bound cannot be
-assigned, and neither can a `(&mut T)` **parameter**, which is a borrow of a
+assigned, and neither can a `&mut T` **parameter**, which is a borrow of a
 value this function never took apart. Match the aggregate, and assign one of the
 fields it gives you. A field a pattern binds through a `&mut` is still a borrow
 and not an owner, so it cannot be moved out either — `clone` reads it, `set`
@@ -718,20 +761,20 @@ before that question is asked.
 ```lisp
 (let mut values (list "one" "two"))
 (do
-  (push (&mut values) "three"))
-(let first (get-ref (& values) 0))
+  (push &mut values "three"))
+(let first (get-ref &values 0))
 (println first)
-(let removed (remove (&mut values) 1))
+(let removed (remove &mut values 1))
 ```
 
 `get` copies only `Copy` elements. Use `get-ref` to borrow an element or
 `remove` to move one out. With the standard `Option` language item,
-`(pop (&mut values))` returns `Option<T>` and never panics for an empty list.
+`(pop &mut values)` returns `Option<T>` and never panics for an empty list.
 Out-of-range `get`, `get-ref`, `remove`, `replace`, and `slice` remain
 deterministic runtime errors with exit status 101.
 
 ```lisp
-(let displaced (replace (&mut values) 0 "ONE"))
+(let displaced (replace &mut values 0 "ONE"))
 ```
 
 `replace` is the only write to an element there is, and it is a swap rather
@@ -744,13 +787,13 @@ to a field and none to an element.
 
 ```lisp
 (let fixed (array "zero" "one" "two"))
-(let view (slice (& fixed) 1 3))
-(println-i64 (len (& view)))
+(let view (slice &fixed 1 3))
+(println-i64 (len &view))
 ```
 
 `array` creates an owned fixed-length `Array<T, N>`. `slice` creates a
 non-owning range descriptor tied to the lifetime of a borrowed list or array.
-`len` also accepts `(& String)`, where it is the length in bytes.
+`len` also accepts `&String`, where it is the length in bytes.
 
 An empty `(list)` or `(array)` is legal wherever the expected type says what it
 holds — a return position, an argument, an arm of an `if` or a `match` — and an
@@ -800,8 +843,8 @@ on `std` alone reaches everything by that name. The combinators live in modules 
 (take std:prelude Option)
 
 (let name "FLAG")
-(match (env (& name))
-  ((Option:Some flag) (println (& flag)))
+(match (env &name)
+  ((Option:Some flag) (println &flag))
   ((Option:None) ()))
 ```
 
@@ -828,7 +871,7 @@ function appear here, and the difference is ownership rather than style. A
 function that consumes each element takes the element: `map` is `(Fn (T) U)` and
 `fold` is `(Fn (A T) A)`. A function that only looks at one takes a borrow of
 it: `filter` and `find` are `(Fn ((& T)) bool)` and `sort-by` is
-`(Fn ((& T) (& T)) bool)`, answering whether the first element belongs ahead of
+`(Fn (&T &T) bool)`, answering whether the first element belongs ahead of
 the second. `find` answers with an index, like `core:string:find`, because
 answering with the element would have to move it out of a list the caller still
 owns.
@@ -836,11 +879,11 @@ owns.
 ```lisp
 (take std:list filter sort-by)
 
-(fn odd ((item (& i64))) -> bool
+(fn odd ((item &i64)) -> bool
   (let value (clone item))
   (= 1 (- value (* (/ value 2) 2))))
 
-(fn ascending ((left (& i64)) (right (& i64))) -> bool
+(fn ascending ((left &i64) (right &i64)) -> bool
   (< (clone left) (clone right)))
 
 (let kept (sort-by (filter (list 5 2 3 9) odd) ascending))
@@ -852,7 +895,7 @@ one swap per element. `map`, `filter` and `fold` consume their list from the
 front and are still quadratic in the moves that costs; their signatures say
 nothing about it either way.
 
-`insert`, `swap`, `clear` and `truncate` take `(&mut (List T))` and answer
+`insert`, `swap`, `clear` and `truncate` take `&mut (List T)` and answer
 `unit`, because what they change is the list they were handed. `insert` accepts
 an index from `0` up to and including the length, where it appends; `swap`
 takes two indices into the list. An index outside that range ends the program
@@ -864,11 +907,11 @@ they remove is dropped rather than forgotten:
 (take std:list insert swap clear truncate)
 
 (let mut queue (list "b" "d"))
-(insert (&mut queue) 1 "c")
-(insert (&mut queue) 0 "a")
-(swap (&mut queue) 0 3)
-(truncate (&mut queue) 2)
-(clear (&mut queue))
+(insert &mut queue 1 "c")
+(insert &mut queue 0 "a")
+(swap &mut queue 0 3)
+(truncate &mut queue 2)
+(clear &mut queue)
 ```
 
 `std:string` is bytes: `byte-at`, `substring`, `concat`, `from-bytes`,
@@ -900,7 +943,7 @@ language where overflow wraps.
 
 `std:builder` — `core:builder` for a freestanding program — is how a string is
 built out of many pieces. `concat` allocates a fresh `String` and copies both
-sides, so accumulating with `(set out (concat (& out) (& piece)))` copies
+sides, so accumulating with `(set out (concat &out &piece))` copies
 everything written so far on every piece, and a document of ten thousand
 entries costs the sum of its own prefixes. A builder writes each piece into one
 buffer that grows and allocates once, at the end (`D-145`):
@@ -912,15 +955,15 @@ buffer that grows and allocates once, at the end (`D-145`):
   (let mut out (new))
   (let mut index 0)
   (while (< index count)
-    (write-str (&mut out) (& "item "))
-    (write-i64 (&mut out) index)
-    (write-byte (&mut out) 10)
+    (write-str &mut out &"item ")
+    (write-i64 &mut out index)
+    (write-byte &mut out 10)
     (set index (+ index 1)))
   (build out))
 ```
 
 `new`, `write-str`, `write-byte`, `write-i64`, `write-u64`, `size` and `build`.
-Everything that writes takes `(&mut Builder)` and returns `unit`; `build` takes
+Everything that writes takes `&mut Builder` and returns `unit`; `build` takes
 the builder by value, because the bytes leave with the string. `write-i64` and
 `write-u64` put the digits straight into the buffer rather than formatting to a
 `String` first. A float goes in through `write-f64` in `std:float`, which is
@@ -938,28 +981,28 @@ key is. Both take the two functions that make a key a key:
 ; An empty container's element types appear in no argument, so they are written
 ; down: after the value on the `let`, or as the result of a function.
 (let mut scores (map-new hash equals) : (Map String i64))
-(map-insert (&mut scores) "ann" 3)
+(map-insert &mut scores "ann" 3)
 (let key "ann")
-(let held (unwrap-or (map-lookup (& scores) (& key)) 0))
+(let held (unwrap-or (map-lookup &scores &key) 0))
 ```
 
-`map-new` takes a `(Fn ((& K)) i64)` and a `(Fn ((& K) (& K)) bool)`; a key
+`map-new` takes a `(Fn ((& K)) i64)` and a `(Fn (&K &K) bool)`; a key
 type that does not have them yet gets them written for it, in Slopium, at the
-call. **Everything that writes takes `(&mut (Map K V))` and returns `unit`** —
+call. **Everything that writes takes `&mut (Map K V)` and returns `unit`** —
 `map-insert` and `map-delete` change the map they are handed, because a field
-can be assigned (`D-120`). Reading takes `(& (Map K V))`: `map-lookup`,
+can be assigned (`D-120`). Reading takes `&(Map K V)`: `map-lookup`,
 `map-contains`, `map-size` and `map-fold`. `map-lookup` answers `(Option V)`
 with the value cloned out, since a reference cannot leave the function that made
 it.
 
 `map-fold` is the only way to walk a map, and its accumulator comes from the
-caller — `(map-fold m start step)` with `step` a `(Fn (A (& K) (& V)) A)`.
+caller — `(map-fold m start step)` with `step` a `(Fn (A &K &V) A)`.
 There is no `keys` and no iterator: an iterator is a lazy sequence, which is a
 closure plus a protocol, and the protocol is a trait (`D-088`).
 
 `std:set` is the same machine with the value left out: `set-of`, `set-add`,
 `set-holds`, `set-discard`, `set-count` and `set-each`, with `set-add` and
-`set-discard` writing through a `(&mut (Set T))` as the map's do. A `Set` **is**
+`set-discard` writing through a `&mut (Set T)` as the map's do. A `Set` **is**
 a `(Map T bool)`, written in Slopium over the map like anything else.
 
 None of this needed traits, which is the whole point of it (`D-104`): `D-062`
@@ -1003,7 +1046,7 @@ exact rather than approximate: a double is `significand * 2^exponent`, and that
 product is a finite decimal, reached by multiplying an integer by two or by
 five and never by scaling the float itself.
 
-`std:io` has `print` and `println` over `(& String)`, `print-i64`,
+`std:io` has `print` and `println` over `&String`, `print-i64`,
 `println-i64`, `print-bool` and `println-bool`, `read-line` returning
 `(Option String)` without LF/CRLF, and `read-i64` returning `(Option i64)`.
 There are no traits and none are planned (`D-088`), so one name cannot print
@@ -1036,24 +1079,24 @@ is a no-op, so the same line is written either way.
 (take std:process Child capture wait read-output close-output)
 (take std:result Result)
 
-(fn said ((program (& String)) (arguments (& (List String)))) -> String
+(fn said ((program &String) (arguments &(List String))) -> String
   (match (capture program arguments)
     ((Result:Ok child)
       (let mut held child)
-      (defer (close-output (&mut held)))
+      (defer (close-output &mut held))
       ; Read before waiting: a child writing more than a pipe holds blocks
       ; until somebody drains it.
       (let spoken
-        (match (read-output (& held))
+        (match (read-output &held)
           ((Result:Ok text) text)
           ((Result:Err _) "")))
-      (match (wait (& held))
+      (match (wait &held)
         ((Result:Ok _) spoken)
         ((Result:Err _) "")))
     ((Result:Err _) "")))
 ```
 
-The arguments are a `(& (List String))` and `argv[0]` is added by the runtime,
+The arguments are a `&(List String)` and `argv[0]` is added by the runtime,
 so what a caller passes is the arguments and not the convention.
 
 `std:time` is `monotonic` and `realtime`, each `(Result i64 Error)` and each
@@ -1176,12 +1219,12 @@ Slopium calls, and it is an ordinary module-level item — private by default,
 `export`able, `take`able, and canonicalized to `module:name`.
 
 ```lisp
-(extern "strlen" (c-strlen (text (& String))) -> i64)
+(extern "strlen" (c-strlen (text &String)) -> i64)
 (extern "hal_scale" (hal-scale (value f64) (factor f64)) -> f64)
 
 (fn main () -> i32
   (let text "borrowed")
-  (println-i64 (c-strlen (& text)))
+  (println-i64 (c-strlen &text))
   0)
 ```
 
@@ -1191,10 +1234,10 @@ The type vocabulary is closed, and this is the whole of it (`D-065`, `D-124`):
 | --- | --- | --- |
 | any integer type, `f64`, `bool` | the same scalar | in |
 | `(Ptr T)` | `T *` | in and out |
-| `(& String)` | `const char *`, NUL-terminated | in |
-| `(& (Slice T))` | `const T *` and an `int64_t` count, two arguments | in |
-| `(&mut (List T))`, `(&mut (Array T N))` | `T *` and an `int64_t` count, two arguments | in, and C may write |
-| `(&mut i64)`, `(&mut u64)`, `(&mut f64)`, `(&mut (Ptr T))` | `int64_t *`, `uint64_t *`, `double *`, `T **` | out |
+| `&String` | `const char *`, NUL-terminated | in |
+| `&(Slice T)` | `const T *` and an `int64_t` count, two arguments | in |
+| `&mut (List T)`, `&mut (Array T N)` | `T *` and an `int64_t` count, two arguments | in, and C may write |
+| `&mut i64`, `&mut u64`, `&mut f64`, `&mut (Ptr T)` | `int64_t *`, `uint64_t *`, `double *`, `T **` | out |
 | `(Fn (…) …)` over scalars | a function pointer | in |
 
 A return is `unit`, a scalar, `(Ptr T)`, or an owned `String`. Anything else is
@@ -1209,15 +1252,15 @@ C must copy anything it intends to keep. To return a `String`, C allocates one
 with the runtime's `sl_rt_string_new(const char *, uint64_t)`; the caller owns
 it and drops it as it would any other.
 
-**C writes into what you own, borrowed exclusively.** A `(&mut (List T))` or a
-`(&mut (Array T N))` arrives as the element pointer and the element count, and C
+**C writes into what you own, borrowed exclusively.** A `&mut (List T)` or a
+`&mut (Array T N)` arrives as the element pointer and the element count, and C
 may fill the elements it was given; it may not resize the collection, and it may
 not keep the pointer. A `(Slice T)` is not offered here: it does not record
 whether it was made from a shared or an exclusive borrow, so writing through one
 could write through a loan somebody else is reading.
 
 **An out-parameter is a whole machine word.** Every integer is held canonical in
-one (`D-113`), so `(&mut i32)` would hand C an `int32_t *` pointing at a slot
+one (`D-113`), so `&mut i32` would hand C an `int32_t *` pointing at a slot
 whose upper half the language still owns; the narrow widths and `bool` are
 refused by name, and the answer for one is a `(Ptr i32)` and an `unsafe` read.
 

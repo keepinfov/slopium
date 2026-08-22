@@ -1,0 +1,8 @@
+; A head sigil whose form ends the list *is* that list, which is what keeps
+; `(& x)` the borrow it has always been (`D-149`). So a parameter list holding
+; one borrowed type keeps its parentheses, and writing it short says something
+; else — the borrow, whose `&` then reaches type position on its own.
+(fn apply ((f (Fn (&String) i64))) -> i64
+  (f "hello"))
+
+(fn main () -> i32 0)

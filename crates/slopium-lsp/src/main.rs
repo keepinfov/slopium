@@ -870,7 +870,13 @@ fn build_workspace(
         let Ok(tokens) = slopic_core::lexer::lex(&source.path, &source.source) else {
             continue;
         };
-        let Ok(forms) = slopic_core::parser::parse(&source.path, &tokens) else {
+        // The raw tokens are what `atom_span` searches, so the expansion is
+        // handed to the parser and not kept: an abbreviation stands for a form
+        // nobody wrote, and no position in the file belongs to it.
+        let Ok(expanded) = slopic_core::reader::expand(&source.path, &tokens) else {
+            continue;
+        };
+        let Ok(forms) = slopic_core::parser::parse(&source.path, &expanded) else {
             continue;
         };
         let Ok(program) = slopic_core::ast::build_program(&source.path, &forms) else {

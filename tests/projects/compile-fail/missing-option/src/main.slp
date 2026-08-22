@@ -1,5 +1,5 @@
 (fn main () -> i32
   (let mut values (list 1))
   (do
-    (pop (&mut values)))
+    (pop &mut values))
   0)

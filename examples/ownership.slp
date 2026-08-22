@@ -1,13 +1,13 @@
 (take std:io println)
 
 (fn consume ((message String)) -> unit
-  (println (& message)))
+  (println &message))
 
 (fn main () -> i32
   (let original "owned string")
   (let copy (clone original))
   (consume copy)
-  (println (& original))
+  (println &original)
   0)
 
 (test "integer values are Copy"

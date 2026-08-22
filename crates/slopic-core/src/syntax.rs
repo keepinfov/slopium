@@ -1,5 +1,5 @@
 use crate::diagnostic::{CompileResult, Span};
-use crate::{lexer, parser};
+use crate::{lexer, parser, reader};
 use serde::Serialize;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -153,7 +153,7 @@ pub fn lex_lossless(source: &str) -> Vec<SyntaxToken> {
                         .chars()
                         .next()
                         .expect("cursor is at a character boundary");
-                    if next.is_whitespace() || matches!(next, '(' | ')' | ';') {
+                    if next.is_whitespace() || matches!(next, '(' | ')' | ';' | '"') {
                         break;
                     }
                     cursor += next.len_utf8();
@@ -162,6 +162,35 @@ pub fn lex_lossless(source: &str) -> Vec<SyntaxToken> {
                 SyntaxKind::Atom
             }
         };
+        // An atom divides into the sigils it begins with and the name they
+        // stand before, exactly as `reader::expand` divides it, so the layout
+        // sees the same pieces the parser will (`D-149`).
+        if kind == SyntaxKind::Atom {
+            let mut piece_start = start;
+            let mut piece_column = token_column;
+            let pieces = reader::pieces(&source[start..cursor]);
+            for (index, piece) in pieces.iter().enumerate() {
+                let last = index + 1 == pieces.len();
+                let piece_end = if last {
+                    cursor
+                } else {
+                    piece_start + piece.len()
+                };
+                tokens.push(SyntaxToken {
+                    kind,
+                    text: (*piece).to_owned(),
+                    span: Span {
+                        start: piece_start,
+                        end: piece_end,
+                        line: token_line,
+                        column: piece_column,
+                    },
+                });
+                piece_start += piece.len();
+                piece_column += piece.chars().count();
+            }
+            continue;
+        }
         tokens.push(SyntaxToken {
             kind,
             text: source[start..cursor].to_owned(),
@@ -273,6 +302,10 @@ struct Entry {
     item: Item,
     blank_before: bool,
     trailing: Vec<String>,
+    /// A sigil that may not be written short, because the list it heads holds
+    /// nothing else: `(&T)` is the borrow `(& T)` and always was, so a lone
+    /// borrowed type inside a parameter list keeps its parentheses (`D-149`).
+    spelled_out: bool,
     /// An arm of a `match`: a pattern, and then a body. Nothing about the arm
     /// itself says so — its head is a list, exactly as a field list's is — so
     /// the form above it is what marks it.
@@ -286,7 +319,87 @@ fn is_glue(item: &Item) -> bool {
     matches!(item, Item::Atom(text) if text == "->" || text.starts_with(':'))
 }
 
-fn entries_of(children: &[SyntaxElement]) -> Vec<Entry> {
+/// The list an abbreviation stands for: its sigil, and the one form it applies
+/// to.
+///
+/// `(& x)`, `& x` and `&x` all reach the layout as this shape, and all three
+/// leave it written `&x` — which is how the 752 sites that were written the
+/// long way migrate (`D-149`).
+fn abbreviated(entries: &[Entry]) -> Option<(String, &Entry)> {
+    let [head, operand] = entries else {
+        return None;
+    };
+    let Item::Atom(text) = &head.item else {
+        return None;
+    };
+    let sigil = reader::sigil_for_head(text)?;
+    let ordinary = !head.spelled_out
+        && head.trailing.is_empty()
+        && operand.trailing.is_empty()
+        && !matches!(operand.item, Item::Comment(_));
+    ordinary.then(|| (sigil.prefix(), operand))
+}
+
+/// Folds each sigil into the form it stands before, so that the layout has one
+/// shape to lay out however the source spelled it.
+///
+/// A sigil that opens a list with nothing after its operand is left alone:
+/// there it is the head of the form itself, and `(& x)` is the borrow it has
+/// always been. This is `reader::head_opens_the_list` read off the entries
+/// rather than off the tokens, and the two have to agree or `fmt` writes a
+/// program back as a different one.
+fn glue_sigils(entries: Vec<Entry>, in_list: bool) -> Vec<Entry> {
+    let mut folded: Vec<Entry> = Vec::with_capacity(entries.len());
+    for (index, entry) in entries.into_iter().enumerate().rev() {
+        let opens = in_list
+            && index == 0
+            && folded
+                .iter()
+                .filter(|entry| !matches!(entry.item, Item::Comment(_)))
+                .count()
+                <= 1;
+        let sigil = match &entry.item {
+            Item::Atom(text) if !opens => reader::sigil_of(text)
+                .and_then(|sigil| sigil.expansion)
+                .filter(|_| entry.trailing.is_empty()),
+            _ => None,
+        };
+        let Some(head) = sigil else {
+            folded.push(entry);
+            continue;
+        };
+        let takes = folded
+            .last()
+            .is_some_and(|next| !matches!(next.item, Item::Comment(_)));
+        if !takes {
+            folded.push(entry);
+            continue;
+        }
+        let mut operand = folded.pop().expect("the operand was just measured");
+        let trailing = std::mem::take(&mut operand.trailing);
+        operand.blank_before = false;
+        folded.push(Entry {
+            item: Item::List(vec![
+                Entry {
+                    item: Item::Atom(head.to_owned()),
+                    blank_before: false,
+                    trailing: Vec::new(),
+                    spelled_out: false,
+                    arm: false,
+                },
+                operand,
+            ]),
+            blank_before: entry.blank_before,
+            trailing,
+            spelled_out: false,
+            arm: false,
+        });
+    }
+    folded.reverse();
+    folded
+}
+
+fn entries_of(children: &[SyntaxElement], in_list: bool) -> Vec<Entry> {
     let mut entries: Vec<Entry> = Vec::new();
     let mut newlines = 0usize;
     let mut started = false;
@@ -295,6 +408,7 @@ fn entries_of(children: &[SyntaxElement]) -> Vec<Entry> {
             item,
             blank_before: started && newlines >= 2,
             trailing: Vec::new(),
+            spelled_out: false,
             arm: false,
         });
     };
@@ -323,15 +437,42 @@ fn entries_of(children: &[SyntaxElement]) -> Vec<Entry> {
                 }
             },
             SyntaxElement::List(node) => {
-                let inner = entries_of(&node.children);
+                let inner = entries_of(&node.children, true);
                 push(&mut entries, Item::List(inner), newlines, started);
             }
         }
         newlines = 0;
         started = true;
     }
+    let mut entries = glue_sigils(entries, in_list);
+    if in_list {
+        spell_out_a_lone_borrow(&mut entries);
+    }
     mark_arms(&mut entries);
     entries
+}
+
+/// Keeps the parentheses on a borrow that is all its list holds.
+///
+/// `((& T))` is a parameter list of one borrowed type and `(&T)` is a borrow of
+/// `T`: the reader reads a head sigil whose operand ends the list as the list
+/// itself, so this is the one place the short spelling says something else.
+fn spell_out_a_lone_borrow(entries: &mut [Entry]) {
+    let mut written = entries
+        .iter_mut()
+        .filter(|entry| !matches!(entry.item, Item::Comment(_)));
+    let Some(only) = written.next() else {
+        return;
+    };
+    if written.next().is_some() {
+        return;
+    }
+    let Item::List(inner) = &mut only.item else {
+        return;
+    };
+    if abbreviated(inner).is_some() {
+        inner[0].spelled_out = true;
+    }
 }
 
 /// How many of an arm's entries are its head: the pattern, and the `when` and
@@ -364,6 +505,9 @@ fn flat(item: &Item) -> Option<String> {
         Item::List(entries) => {
             if must_break(entries) {
                 return None;
+            }
+            if let Some((sigil, operand)) = abbreviated(entries) {
+                return Some(format!("{sigil}{}", flat(&operand.item)?));
             }
             let mut parts = Vec::with_capacity(entries.len());
             for entry in entries {
@@ -460,18 +604,24 @@ impl Group<'_> {
         Some(parts.join(" "))
     }
 
-    fn render(&self, indent: usize, options: &FormatOptions) -> String {
+    fn render(&self, indent: usize, options: &FormatOptions, closers: usize) -> String {
         let mut out = String::new();
+        let last = self.entries.len() - 1;
         for (index, entry) in self.entries.iter().enumerate() {
             if index > 0 {
                 out.push(' ');
             }
             let column = indent + width_of(&out);
+            let closers = if index == last && entry.trailing.is_empty() {
+                closers
+            } else {
+                0
+            };
             match &entry.item {
                 Item::List(inner) if entry.arm && inner.len() > arm_head(inner) + 1 => {
-                    out.push_str(&render_broken(inner, column, options, true));
+                    out.push_str(&render_broken(inner, column, options, true, closers));
                 }
-                item => out.push_str(&render_item(item, column, options)),
+                item => out.push_str(&render_item(item, column, options, closers)),
             }
             for comment in &entry.trailing {
                 out.push(' ');
@@ -545,7 +695,14 @@ fn must_break(entries: &[Entry]) -> bool {
     }
 }
 
-fn render_item(item: &Item, indent: usize, options: &FormatOptions) -> String {
+/// Lays one form out at `indent`, knowing how many closing parens will follow
+/// it on the same line.
+///
+/// A form's last line ends with its own `)` and every ancestor's that closes
+/// with it, so the width it has to fit in is the preferred width less that run.
+/// Measuring without it is what let a line reach 92 columns while every
+/// decision on the way down believed it had room (`D-149`).
+fn render_item(item: &Item, indent: usize, options: &FormatOptions, closers: usize) -> String {
     match item {
         Item::Atom(text) => text.clone(),
         Item::Comment(text) => text.clone(),
@@ -554,22 +711,35 @@ fn render_item(item: &Item, indent: usize, options: &FormatOptions) -> String {
                 return "()".to_owned();
             }
             if let Some(one_line) = flat(item) {
-                if indent + width_of(&one_line) <= options.preferred_width {
+                if indent + width_of(&one_line) + closers <= options.preferred_width {
                     return one_line;
                 }
             }
-            render_broken(entries, indent, options, false)
+            if let Some((sigil, operand)) = abbreviated(entries) {
+                return format!(
+                    "{sigil}{}",
+                    render_item(&operand.item, indent + width_of(&sigil), options, closers)
+                );
+            }
+            render_broken(entries, indent, options, false, closers)
         }
     }
 }
 
 /// A form that does not fit, in the four shapes it can take.
-fn render_broken(entries: &[Entry], indent: usize, options: &FormatOptions, arm: bool) -> String {
+fn render_broken(
+    entries: &[Entry],
+    indent: usize,
+    options: &FormatOptions,
+    arm: bool,
+    closers: usize,
+) -> String {
     let head = &entries[0];
     let guard = arm && arm_head(entries) == 3;
     let groups = group(&entries[1..]);
     let mut out = String::from("(");
-    out.push_str(&render_item(&head.item, indent + 1, options));
+    let head_closers = if groups.is_empty() { closers + 1 } else { 0 };
+    out.push_str(&render_item(&head.item, indent + 1, options, head_closers));
     for comment in &head.trailing {
         out.push(' ');
         out.push_str(comment);
@@ -599,9 +769,11 @@ fn render_broken(entries: &[Entry], indent: usize, options: &FormatOptions, arm:
 
     if packed {
         let mut column = indent + width_of(&out);
-        for group in &groups {
+        let last = groups.len() - 1;
+        for (index, group) in groups.iter().enumerate() {
             let text = group.flat().expect("a simple group is flat");
-            if column + 1 + width_of(&text) > options.preferred_width {
+            let tail = if index == last { closers + 1 } else { 0 };
+            if column + 1 + width_of(&text) + tail > options.preferred_width {
                 out.push('\n');
                 out.push_str(&" ".repeat(body));
                 column = body;
@@ -621,12 +793,15 @@ fn render_broken(entries: &[Entry], indent: usize, options: &FormatOptions, arm:
     // not as a staircase.
     let aligned = table.is_none().then(|| {
         let column = indent + 1 + width_of(head_name?) + 1;
+        let last = groups.len() - 1;
         groups
             .iter()
-            .all(|group| {
+            .enumerate()
+            .all(|(index, group)| {
+                let tail = if index == last { closers + 1 } else { 0 };
                 group
                     .flat()
-                    .is_some_and(|text| column + width_of(&text) <= options.preferred_width)
+                    .is_some_and(|text| column + width_of(&text) + tail <= options.preferred_width)
             })
             .then_some(column)
     });
@@ -640,9 +815,10 @@ fn render_broken(entries: &[Entry], indent: usize, options: &FormatOptions, arm:
         // call, so an argument that fits beside the head stays beside it and
         // only what does not fit goes below.
         (None, None) => {
+            let tail = if groups.len() == 1 { closers + 1 } else { 0 };
             let first = head_name.is_some_and(|_| !arm)
                 && groups[0].flat().is_some_and(|text| {
-                    indent + 1 + head_name.map_or(0, width_of) + 1 + width_of(&text)
+                    indent + 1 + head_name.map_or(0, width_of) + 1 + width_of(&text) + tail
                         <= options.preferred_width
                 });
             (usize::from(first), body)
@@ -657,6 +833,9 @@ fn render_broken(entries: &[Entry], indent: usize, options: &FormatOptions, arm:
     if matches!(head_name, Some("fn" | "lambda" | "extern")) {
         while kept > 1 {
             let mut width = indent + 1 + head_name.map_or(0, width_of);
+            if kept == groups.len() {
+                width += closers + 1;
+            }
             let mut measured = true;
             for group in &groups[..kept] {
                 match group.flat() {
@@ -672,18 +851,24 @@ fn render_broken(entries: &[Entry], indent: usize, options: &FormatOptions, arm:
     }
 
     let mut open = head_open;
+    let last = groups.len() - 1;
     for (index, group) in groups.iter().enumerate() {
+        let tail = if index == last && !group.ends_open() {
+            closers + 1
+        } else {
+            0
+        };
         if index < kept && !open {
             out.push(' ');
             let column = indent + width_of(out.rsplit('\n').next().unwrap_or(""));
-            out.push_str(&group.render(column, options));
+            out.push_str(&group.render(column, options, tail));
         } else {
             out.push('\n');
             if group.blank_before() && index >= kept {
                 out.push('\n');
             }
             out.push_str(&" ".repeat(continuation));
-            out.push_str(&group.render(continuation, options));
+            out.push_str(&group.render(continuation, options, tail));
         }
         open = group.ends_open();
     }
@@ -702,7 +887,7 @@ fn close(out: &mut String, indent: usize, open: bool, _options: &FormatOptions) 
 }
 
 fn render_entry(entry: &Entry, indent: usize, options: &FormatOptions) -> String {
-    let mut out = render_item(&entry.item, indent, options);
+    let mut out = render_item(&entry.item, indent, options, 0);
     for comment in &entry.trailing {
         out.push(' ');
         out.push_str(comment);
@@ -716,10 +901,10 @@ fn render_entry(entry: &Entry, indent: usize, options: &FormatOptions) -> String
 /// file that does not lex and parse is refused rather than rewritten, so the
 /// output always describes the same program as the input.
 pub fn format_source(file: &str, source: &str, options: &FormatOptions) -> CompileResult<String> {
-    let semantic_tokens = lexer::lex(file, source)?;
+    let semantic_tokens = reader::expand(file, &lexer::lex(file, source)?)?;
     parser::parse(file, &semantic_tokens)?;
     let syntax = parse_lossless(source);
-    let entries = entries_of(&syntax.root.children);
+    let entries = entries_of(&syntax.root.children, false);
     let mut output = String::new();
     for (index, entry) in entries.iter().enumerate() {
         if index > 0 {
@@ -839,15 +1024,48 @@ mod tests {
         sources
     }
 
-    /// What a layout may not change: the parens, the atoms, the strings and
-    /// the comments, in the order they were written. Whitespace is the only
-    /// thing `fmt` is allowed to have an opinion about.
-    fn shape(source: &str) -> Vec<String> {
-        lex_lossless(source)
+    /// What a layout may not change: the program the reader hands the parser,
+    /// and the comments, in the order they were written.
+    ///
+    /// The tokens are compared *after* the reader expands them, because `fmt`
+    /// writes `(& x)` as `&x` and those are one program spelled two ways
+    /// (`D-149`). Comparing what was typed would refuse the rewrite; comparing
+    /// what the reader makes of it is the assertion that was always meant, and
+    /// `a_shape_tells_two_programs_apart` is what keeps it from being blind to
+    /// everything else as well.
+    fn shape(source: &str) -> (Vec<String>, Vec<String>) {
+        let tokens = lexer::lex("shape.slp", source).expect("a corpus source lexes");
+        let expanded = reader::expand("shape.slp", &tokens).expect("a corpus source expands");
+        let program = expanded
+            .iter()
+            .map(|token| match &token.kind {
+                lexer::TokenKind::LeftParen => "(".to_owned(),
+                lexer::TokenKind::RightParen => ")".to_owned(),
+                lexer::TokenKind::Atom(text) => text.clone(),
+                lexer::TokenKind::String(bytes) => format!("{bytes:?}"),
+            })
+            .collect();
+        let comments = lex_lossless(source)
             .into_iter()
-            .filter(|token| token.kind != SyntaxKind::Whitespace)
+            .filter(|token| token.kind == SyntaxKind::Comment)
             .map(|token| token.text.trim_end().to_owned())
-            .collect()
+            .collect();
+        (program, comments)
+    }
+
+    #[test]
+    fn a_shape_tells_two_programs_apart() {
+        let source = "(fn main () -> i32 (f x))\n";
+        assert_ne!(shape(source), shape("(fn main () -> i32 (f y))\n"));
+        assert_ne!(shape(source), shape("(fn main () -> i32 (f (g x)))\n"));
+        assert_ne!(shape(source), shape("(fn main () -> i32 (f x)) ; note\n"));
+        assert_ne!(shape(source), shape("(fn main () -> i32 (f \"x\"))\n"));
+        // The one difference it is deliberately blind to, and the whole reason
+        // it reads the expansion rather than the text.
+        assert_eq!(
+            shape("(fn main () -> i32 (f (& x)))\n"),
+            shape("(fn main () -> i32 (f &x))\n")
+        );
     }
 
     /// Left-trim every line: a different source, the same program, and no

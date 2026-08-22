@@ -2,7 +2,7 @@ use crate::ast::{self, Program};
 use crate::diagnostic::{Diagnostic, Span};
 use crate::sema::{self, BindingId, TExpr, TExprKind, TPattern, TypedFunction, TypedProgram};
 use crate::syntax::{parse_lossless, LosslessSyntax, SyntaxKind, SyntaxToken};
-use crate::{lexer, parser, CompileOptions};
+use crate::{lexer, parser, reader, CompileOptions};
 use serde::Serialize;
 use std::collections::HashMap;
 
@@ -94,6 +94,18 @@ impl Analysis {
 pub fn analyze_source(file: &str, source: &str, options: &CompileOptions) -> Analysis {
     let syntax = parse_lossless(source);
     let tokens = match lexer::lex(file, source) {
+        Ok(tokens) => tokens,
+        Err(diagnostics) => {
+            return Analysis {
+                diagnostics,
+                syntax,
+                program: None,
+                symbols: Vec::new(),
+                occurrences: Vec::new(),
+            };
+        }
+    };
+    let tokens = match reader::expand(file, &tokens) {
         Ok(tokens) => tokens,
         Err(diagnostics) => {
             return Analysis {

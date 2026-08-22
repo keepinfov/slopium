@@ -201,7 +201,12 @@ pub fn lex(file: &str, source: &str) -> CompileResult<Vec<Token>> {
             _ => {
                 let mut end = start + ch.len_utf8();
                 while let Some((idx, next)) = chars.peek().copied() {
-                    if next.is_whitespace() || matches!(next, '(' | ')' | ';') {
+                    // A text literal opens a token wherever it appears, which
+                    // is what makes `&"literal"` the borrow it looks like
+                    // (`D-149`). Before the sigils nothing could be written
+                    // immediately before a `"`, so nothing depended on an atom
+                    // swallowing one.
+                    if next.is_whitespace() || matches!(next, '(' | ')' | ';' | '"') {
                         break;
                     }
                     chars.next();
