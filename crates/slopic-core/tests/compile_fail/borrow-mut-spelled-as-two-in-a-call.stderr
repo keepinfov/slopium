@@ -1,0 +1,5 @@
+borrow-mut-spelled-as-two-in-a-call.slp:10:12: error[SL0100]: `&mut` is one token, and `& mut` is two
+  |
+10 |   (take-it (& mut text))
+  |            ^^^^^^^^^^^^
+  = help: an exclusive borrow of `T` is `&mut T`, written without a space; with one, `&` stands before `mut` and borrows it

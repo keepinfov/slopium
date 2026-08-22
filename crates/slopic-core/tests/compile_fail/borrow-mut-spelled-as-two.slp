@@ -1,0 +1,9 @@
+; `&mut` is a sigil only as a whole atom (`D-149`), so the space a reader
+; arriving from Rust writes makes two tokens out of one: `(& mut String)` is
+; the borrow `(& mut)` with a `String` standing after it, and the type that
+; reaches the builder is a list whose head is a list.
+(fn take-it ((value (& mut String))) -> unit
+  ())
+
+(fn main () -> i32
+  0)
