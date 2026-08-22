@@ -35,6 +35,9 @@ pub mod codes {
     pub const STANDARD_LIBRARY: &str = "SL0453";
     pub const UNSUPPORTED_TARGET: &str = "SL0500";
     pub const UNSUPPORTED_ABI: &str = "SL0501";
+    /// A function whose code is longer than a conditional branch on the target
+    /// can reach (`D-155`).
+    pub const FUNCTION_TOO_LARGE: &str = "SL0502";
     pub const INPUT_IO: &str = "SL0600";
     pub const OUTPUT_IO: &str = "SL0601";
     pub const TOOLCHAIN: &str = "SL0602";
@@ -71,6 +74,7 @@ pub mod codes {
         (STANDARD_LIBRARY, "standard library contract error"),
         (UNSUPPORTED_TARGET, "unsupported compilation target"),
         (UNSUPPORTED_ABI, "unsupported target ABI operation"),
+        (FUNCTION_TOO_LARGE, "function too large for the target"),
         (INPUT_IO, "compiler input error"),
         (OUTPUT_IO, "compiler output error"),
         (TOOLCHAIN, "external toolchain error"),

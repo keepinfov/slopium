@@ -576,6 +576,7 @@ impl<'a> Generator<'a> {
     // ----- functions ------------------------------------------------------
 
     fn function(&mut self, function: &MirFunction, is_test: bool) {
+        let start = self.asm.items().len();
         let symbol = function_symbol(&function.name, is_test);
         self.symbol = symbol.clone();
         let epilogue = format!(".L{symbol}_epilogue");
@@ -659,6 +660,15 @@ impl<'a> Generator<'a> {
         // a trampoline still names the function whose check reached it.
         self.runtime_panic_trampolines(trap_usage(std::iter::once(function)));
         self.asm.push(Item::Size(symbol.clone()));
+        let words = self.asm.items()[start..]
+            .iter()
+            .filter(|item| matches!(item, Item::Instruction(_)))
+            .count();
+        if let Some(refusal) =
+            too_large_for_a_branch(self.file, &function.name, function.span, words)
+        {
+            self.diagnostics.push(refusal);
+        }
     }
 
     fn store_parameters(&mut self, function: &MirFunction) {
@@ -1999,6 +2009,42 @@ fn outgoing_bytes(module: &MirModule, function: &MirFunction) -> usize {
         .unwrap_or(0)
 }
 
+/// How far a conditional branch reaches, in instruction words.
+///
+/// `b.cond`, `cbz` and `cbnz` all carry a signed 19-bit word displacement, so
+/// one reaches 2^18 words — a megabyte of code — in either direction. Every
+/// checked operation branches forward to a trampoline at the end of its own
+/// function (`D-116`), and a `while` or an `if` branches within one, so this is
+/// the length of a *function* and says nothing about how large a module or a
+/// program may be.
+const CONDITIONAL_BRANCH_REACH: usize = 1 << 18;
+
+/// The refusal a function longer than that gets (`D-155`).
+///
+/// A bound on the function rather than on the distance of any one branch: the
+/// exact worst case depends on where each label lands after the layout is
+/// final, and at a megabyte of one function the difference between the two
+/// answers is not worth a second rule. Without this the encoder would report
+/// `SL0700` — an internal error, advising a person to assemble the program
+/// themselves, which fails the same way for the same reason.
+fn too_large_for_a_branch(file: &str, name: &str, span: Span, words: usize) -> Option<Diagnostic> {
+    if words < CONDITIONAL_BRANCH_REACH {
+        return None;
+    }
+    Some(
+        Diagnostic::error(
+            codes::FUNCTION_TOO_LARGE,
+            file,
+            span,
+            format!("`{name}` is longer than a branch on AArch64 can reach"),
+        )
+        .with_help(
+            "a conditional branch carries a 19-bit word displacement, so one function's code \
+             must stay under 1 MiB on this target; split it",
+        ),
+    )
+}
+
 /// The trampoline every arithmetic check branches to.
 fn overflow_trampoline(symbol: &str) -> Target {
     trampoline(symbol, "overflow")
@@ -2063,6 +2109,29 @@ mod tests {
     use super::*;
     use crate::codegen::{is_location, AARCH64_LINUX_GNU, DEFAULT_TARGET};
     use crate::{compile_to_assembly, CompileOptions};
+
+    /// Building a function of a megabyte to prove this would cost minutes and
+    /// a gigabyte of test memory; the bound is where the answer comes from,
+    /// which is how `asm::word_displacement` is checked too.
+    #[test]
+    fn a_function_longer_than_a_branch_can_reach_is_refused() {
+        let span = Span::default();
+        assert!(too_large_for_a_branch("a.slp", "f", span, CONDITIONAL_BRANCH_REACH - 1).is_none());
+        let refusal = too_large_for_a_branch("a.slp", "f", span, CONDITIONAL_BRANCH_REACH)
+            .expect("a function at the reach is refused");
+        assert_eq!(refusal.code, codes::FUNCTION_TOO_LARGE);
+        assert!(refusal.message.contains('f'), "{}", refusal.message);
+        assert!(
+            refusal
+                .help
+                .as_deref()
+                .is_some_and(|help| help.contains("1 MiB")),
+            "{:?}",
+            refusal.help
+        );
+        // A megabyte of code, said in the units the message uses.
+        assert_eq!(CONDITIONAL_BRANCH_REACH * 4, 1 << 20);
+    }
 
     fn options() -> CompileOptions {
         CompileOptions {

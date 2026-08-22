@@ -304,7 +304,22 @@ dropped along with the function it serves. The reason it is not shared is that
 AArch64 reaches one with a 19-bit conditional branch: within a section that is
 a displacement the compiler works out, and it can say so at compile time when
 it does not fit, whereas across sections it becomes an `R_AARCH64_CONDBR19`
-that no linker will supply a veneer for. Stripping the symbol table is a choice, because it removes
+that no linker will supply a veneer for.
+
+**That branch is also a ceiling, and it is per function.** A 19-bit word
+displacement reaches 2^18 words in either direction, so **one function's code
+must stay under 1 MiB on AArch64** — every checked operation branches forward
+to the trampoline at the end of its own section, and a `while` or an `if`
+branches within it. A module and a program are unbounded; only a single
+function is not. Before `D-116` moved the trampolines the distance was to the
+end of the module's whole text, which grew with the library and was a real
+cliff; a megabyte of one function is not one anybody has met. A function past
+it is refused with `SL0502` naming the function, because the alternative is
+`SL0700` from the object writer — an internal error advising a person to
+assemble the program by hand, which fails the same way for the same reason —
+or, on the assembly path, a message from `as` about a branch nobody wrote. The
+real fix is branch islands or condition inversion, and `D-155` records why
+neither is this release's work. Stripping the symbol table is a choice, because it removes
 the mangled `sl_fn_*` and runtime names a debugger needs — so it is a flag
 (`slopic --strip`), not something the compiler decides. A test body is code
 only the harness reaches, so a build without `--test` does not emit it at all,

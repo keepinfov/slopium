@@ -24,7 +24,8 @@ Code families are stable:
 - `SL03xx`: ownership and borrowing, and `SL0301` for a raw-pointer operation
   written outside an `unsafe` block;
 - `SL04xx`: pattern matching and entry/test rules;
-- `SL05xx`: target and ABI backend;
+- `SL05xx`: target and ABI backend, and `SL0502` for a function whose code
+  is longer than a conditional branch on the target can reach (`D-155`);
 - `SL06xx`: compiler I/O and external toolchain;
 - `SL07xx`: internal compiler errors;
 - `SL08xx`: **warnings** — a program that compiles, about which the compiler
