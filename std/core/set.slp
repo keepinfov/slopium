@@ -11,26 +11,26 @@
 
 (export Set of add holds discard count each)
 
-(struct Set (T) ((entries (Map T bool))))
+(struct Set (T) ((entries (Map T bool|)
 
 (fn of (T) ((hash (Fn ((& T)) i64)) (same (Fn (&T &T) bool))) -> (Set T)
   (Set :entries (new hash same)))
 
 (fn add (T) ((set &mut (Set T)) (key T)) -> unit
   (match set
-    ((Set :entries entries) (insert entries key true))))
+    ((Set :entries entries) (insert entries key true|)
 
 (fn holds (T) ((set &(Set T)) (key &T)) -> bool
   (match set
-    ((Set :entries entries) (contains entries key))))
+    ((Set :entries entries) (contains entries key|)
 
 (fn discard (T) ((set &mut (Set T)) (key &T)) -> unit
   (match set
-    ((Set :entries entries) (delete entries key))))
+    ((Set :entries entries) (delete entries key|)
 
 (fn count (T) ((set &(Set T))) -> i64
   (match set
-    ((Set :entries entries) (size entries))))
+    ((Set :entries entries) (size entries|)
 
 ; The set's `fold`, with the value the map carries left out of it: a caller
 ; folding over a set has no use for a `(& bool)` that is always true.
@@ -39,4 +39,4 @@
     ((Set :entries entries)
       (fold entries
         start
-        (lambda (step) ((carried A) (key &T) (value &bool)) -> A (step carried key))))))
+        (lambda (step) ((carried A) (key &T) (value &bool)) -> A (step carried key|)

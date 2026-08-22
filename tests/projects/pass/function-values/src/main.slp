@@ -40,7 +40,7 @@
 ; before the language could say it. The `String` beside it is deliberate: the
 ; struct gets real drop glue, and the function value has to survive being a
 ; plain word next to something that owns memory.
-(struct Step ((name String) (run (Fn (i64) i64))))
+(struct Step ((name String) (run (Fn (i64) i64|)
 
 ; Reading it back out is a match through a borrow, because since `D-101` a
 ; function value is owned and `(. step run)` would move it out of a struct the
@@ -48,7 +48,7 @@
 ; borrowed function value callable, so the two meet here.
 (fn run-step ((step &Step) (value i64)) -> i64
   (match step
-    ((Step :run action) (action value))))
+    ((Step :run action) (action value|)
 
 ; A function taking a borrow is a function value like any other.
 (fn decorate ((f (Fn ((& String)) String)) (text &String)) -> String

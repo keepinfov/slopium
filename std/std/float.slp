@@ -35,4 +35,4 @@
     ((Option:Some line)
       (let text (trim &line))
       (to-f64 &text))
-    ((Option:None) (Option:None))))
+    ((Option:None) (Option:None|)

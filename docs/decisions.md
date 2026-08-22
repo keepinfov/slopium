@@ -163,6 +163,7 @@ of what was believed at the time is the part worth keeping.
 - [D-148 — a child process is started with its arguments joined by NUL, and its output is a descriptor a `defer` closes](#d-148--a-child-process-is-started-with-its-arguments-joined-by-nul-and-its-output-is-a-descriptor-a-defer-closes)
 - [D-149 — a sigil stands before the form it applies to, and the reader expands it](#d-149--a-sigil-stands-before-the-form-it-applies-to-and-the-reader-expands-it)
 - [D-150 — `$` nests the rest of the form it is written in](#d-150---nests-the-rest-of-the-form-it-is-written-in)
+- [D-151 — one token closes every list a declaration left open](#d-151--one-token-closes-every-list-a-declaration-left-open)
 
 ## D-001 — a native compiler, without LLVM
 
@@ -3433,3 +3434,66 @@ collapse.
 `.` was rejected for the same reason `D-139` spelled composition `<<` and `>>`:
 it is field access, and `tests/projects/pass/function-values` has a struct whose
 field holds a function.
+
+## D-151 — one token closes every list a declaration left open
+
+Status: approved · 2026-08-22
+
+A declaration unwinds all at once at its end, and the parens that do it carry no
+information a reader can check without counting them. Across 833 declarations
+the terminal run was 389 of length 1, 171 of 2, 144 of 3, 100 of 4, and on up to
+a nine in `std/core/map.slp` — already the residue of two de-nesting passes, so
+what is left is structural. `|)` closes every list still open, back to the top
+level, written where the pile would be and needing no opener.
+
+**Top level only, deliberately.** A paired opener usable mid-body was designed
+and dropped: with one, a `|)` written a line early silently ends the whole
+`match`, the remaining arms become sibling expressions, they parse without
+complaint and fail somewhere else in type checking. Without one, the rest of
+the declaration lands at the top level, where `build_program` refuses it on the
+spot.
+
+**It improves the diagnostic it appears to weaken.** Parentheses are an
+error-detecting code and a close-everything token does delete redundancy — but
+a `)` lost inside a long module used to swallow every following declaration and
+surface as one `SL0004` at the end of the file, pointing hundreds of lines up.
+`|)` forces the depth to zero, so a lost paren cannot leave the declaration it
+was written in, and the parser gains a resynchronisation point it did not have.
+`SL0004`'s help names `|)` beside `)`, and a `|)` with nothing open is `SL0003`.
+
+**`|` ends a token wherever it appears**, which is what makes `(c d|)` a name
+and a closer. A closer built from a character a name may contain cannot work:
+`<` and `*` are ordinary names that can be passed as values, so `(>> f <)` is
+legal today and `<)` would force a meaningful space into it — the trap `D-106`
+refused when it declined `(& a b)`. `|` occurs nowhere in the tree, in code, in
+a comment or inside a literal, which is why it was free to take.
+
+**The formatter writes it wherever the run is longer than three.** Three is not
+taste: runs of one and two are the two most populous buckets, so a lower
+threshold would rewrite half the tree and flicker under ordinary editing,
+because every edit that changes nesting depth by one would cross it. The
+collapse is a rewrite of the rendered tail rather than a decision inside the
+layout, because a `|)` closes whatever is open at that point regardless of which
+forms those are.
+
+**The editor needed a real indenter, and that is the largest piece of this.**
+`editors/nvim/ftplugin/slopium.lua` set `lisp` and delegated to Vim's built-in
+Lisp indenter, which counts `(` and `)` in Vim's own C source and cannot be
+taught another closer: a file holding a `|)` indents as if that declaration
+never ended, and every declaration after it walks to the right. `lisp` is off
+now and `editors/nvim/indent/slopium.lua` installs an `indentexpr` over
+`lua/slopium/indent.lua`. It reads `lispwords` from the buffer rather than
+carrying a copy, so the editor keeps the one list the language server already
+checks against the words the language has — `head_line_groups` in `syntax.rs`
+remains a second copy of that fact, and this deliberately did not become a
+third.
+
+`scripts/nvim-check.sh` runs the indenter in Neovim over the bundled library and
+asserts what the closer threatens: every declaration stays at the margin, and
+the indentation is idempotent. It asserts the margin rather than byte-identity
+with `fmt`, because an editor indents a continuation line without measuring what
+a whole form would cost — the layout drops a call to the body indent when its
+arguments plus the parens closing every enclosing form would pass the preferred
+width, which an indenter reading one line cannot know. Two lines of the tree
+differ that way. Neovim joins valgrind, gdb, qemu and the cross toolchain in the
+dev shell, and the check skips itself without one like the thirteen before it.

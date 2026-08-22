@@ -104,7 +104,7 @@
 (test "a key found after three rehashes is the one that was put there"
   (let counts (counted 40))
   (let key (key-for 39))
-  (= 39 (unwrap-or (map-lookup &counts &key) (- 0 1))))
+  (= 39 (unwrap-or (map-lookup &counts &key) (- 0 1|)
 
 (test "inserting a key twice replaces the value and keeps the size"
   (let mut notes (empty-notes))
@@ -128,4 +128,4 @@
   (map-insert &mut marks (- smallest 1) 111)
   (map-insert &mut marks 7 70)
   (let key (- smallest 1))
-  (and (= 111 (unwrap-or (map-lookup &marks &key) 0)) (= 2 (map-size &marks))))
+  (and (= 111 (unwrap-or (map-lookup &marks &key) 0)) (= 2 (map-size &marks|)

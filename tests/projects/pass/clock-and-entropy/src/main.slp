@@ -13,7 +13,7 @@
 (fn drawn ((count i64)) -> i64
   (match (bytes count)
     ((Result:Ok values) (len &values))
-    ((Result:Err _) (- 0 1))))
+    ((Result:Err _) (- 0 1|)
 
 (fn main () -> i32
   ; Nothing here prints a reading: a clock is different on every run, so what a
@@ -40,7 +40,7 @@
   (and (> now 1700000000000000000) (< now 9000000000000000000)))
 
 (test "entropy comes back in the amount that was asked for"
-  (and (= 32 (drawn 32)) (= 1 (drawn 1)) (= 0 (drawn 0))))
+  (and (= 32 (drawn 32)) (= 1 (drawn 1)) (= 0 (drawn 0|)
 
 ; Two draws of eight bytes each. Equal is possible and has a probability of
 ; 2^-64, which is a smaller number than this suite has runs.

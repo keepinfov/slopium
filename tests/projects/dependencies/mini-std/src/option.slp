@@ -2,4 +2,4 @@
 
 (enum Option (T)
   None
-  (Some ((value T))))
+  (Some ((value T|)

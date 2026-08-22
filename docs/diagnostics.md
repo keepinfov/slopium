@@ -17,7 +17,8 @@ Code families are stable:
 - `SL00xx`: lexer and S-expression parser, and the reader's abbreviation table
   between them — `SL0006` for a sigil that is reserved rather than built, whose
   note says what the character is kept for, and `SL0007` for an abbreviation
-  with nothing to expand (`D-149`);
+  with nothing to expand (`D-149`). `SL0003` covers `|)` written where nothing
+  is open, and `SL0004`'s help names it beside `)` (`D-151`);
 - `SL01xx`: declaration and expression shape;
 - `SL02xx`: name resolution and types;
 - `SL03xx`: ownership and borrowing, and `SL0301` for a raw-pointer operation

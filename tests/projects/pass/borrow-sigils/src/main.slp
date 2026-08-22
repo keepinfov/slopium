@@ -11,11 +11,11 @@
 ; Type position, expression position, and a type under a type.
 (fn read ((counter &Counter)) -> i64
   (match counter
-    ((Counter :value value :label label) (clone value))))
+    ((Counter :value value :label label) (clone value|)
 
 (fn bump ((counter &mut Counter)) -> unit
   (match counter
-    ((Counter :value value :label label) (set value (+ (clone value) 1)))))
+    ((Counter :value value :label label) (set value (+ (clone value) 1|)
 
 (fn total ((values &(List i64))) -> i64
   (fold-borrowed values 0 0))
@@ -23,7 +23,7 @@
 (fn fold-borrowed ((values &(List i64)) (at i64) (carried i64)) -> i64
   (if (= at (len values))
     carried
-    (fold-borrowed values (+ at 1) (+ carried (clone (get-ref values at))))))
+    (fold-borrowed values (+ at 1) (+ carried (clone (get-ref values at|)
 
 ; A borrowed function, taking a borrow: `(Fn (&T &T) bool)` is a list of two
 ; borrowed types, and a list holding one keeps its parentheses — `((& T))` —

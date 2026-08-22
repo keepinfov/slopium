@@ -36,7 +36,7 @@
   ((slots (List (List (Entry K V))))
     (count i64)
     (hash (Fn ((& K)) i64))
-    (same (Fn (&K &K) bool))))
+    (same (Fn (&K &K) bool|)
 
 ; A new map has no buckets at all, and the first insert gives it four. That is
 ; not a saving, it is what lets this be written: an empty `(List (List (Entry K
@@ -47,7 +47,7 @@
 
 (fn size (K V) ((map &(Map K V))) -> i64
   (match map
-    ((Map :slots _ :count count :hash _ :same _) (clone count))))
+    ((Map :slots _ :count count :hash _ :same _) (clone count|)
 
 ; The key the map already holds is dropped with the entry that held it, so
 ; inserting twice keeps the second key and not the first — the same as every
@@ -66,7 +66,7 @@
           0))
       (push &mut bucket (Entry :key key :value value))
       (let empty (replace slots index bucket))
-      (set count (+ (clone count) added)))))
+      (set count (+ (clone count) added|)
 
 ; A value is cloned out, because a reference cannot leave the function that
 ; made it and the map keeps what it holds.
@@ -81,7 +81,7 @@
         (if (< at 0)
           (Option:None)
           (match (get-ref bucket at)
-            ((Entry :key _ :value value) (Option:Some (clone value)))))))))
+            ((Entry :key _ :value value) (Option:Some (clone value|)
 
 (fn contains (K V) ((map &(Map K V)) (key &K)) -> bool
   (match map
@@ -90,7 +90,7 @@
       (if (= capacity 0)
         false
         (let bucket (get-ref slots (bucket-of (hash key) capacity)))
-        (>= (index-of bucket same key) 0)))))
+        (>= (index-of bucket same key) 0|)
 
 ; Removing a key that is not there is not an error: the map is left as it was,
 ; and `contains` is how a caller asks first.
@@ -109,7 +109,7 @@
             (let old (remove &mut bucket at))
             1))
         (let empty (replace slots index bucket))
-        (set count (- (clone count) gone))))))
+        (set count (- (clone count) gone|)
 
 ; The way to walk a map, and the only one: `start` is what an empty map folds
 ; to, so nothing here has to invent an empty collection of a type it does not
@@ -177,13 +177,13 @@
               (push &mut carried (remove &mut bucket 0))))
           (add-buckets slots (* capacity 2))
           (while (> (len &carried) 0)
-            (place slots hash (remove &mut carried 0))))))))
+            (place slots hash (remove &mut carried 0|)
 
 (fn add-buckets (K V) ((slots &mut (List (List (Entry K V)))) (count i64)) -> unit
   (let mut index 0)
   (while (< index count)
     (push slots (list))
-    (set index (+ index 1))))
+    (set index (+ index 1|)
 
 ; Puts an entry in the bucket it hashes to, without asking whether the key is
 ; there already. Only a rehash calls this, and a rehash moves keys that were

@@ -112,7 +112,7 @@
         (let displaced (replace items position carried))
         (set carried displaced)
         (set position (+ position 1)))
-      (push items carried))))
+      (push items carried|)
 
 ; Exchanges two elements without moving anything else, which is what a sort
 ; needs and what the list could not do before.
@@ -143,7 +143,7 @@
         (let first (replace items left held))
         (let second (replace items right first))
         (let back (replace items left second))
-        (push items back)))))
+        (push items back|)
 
 ; Drops every element from the back, so each one is released rather than
 ; forgotten. A list of owned values is the case that makes the difference.
@@ -154,7 +154,7 @@
   (let mut remaining (len items))
   (while (> remaining length)
     (set remaining (- remaining 1))
-    (let dropped (remove items remaining))))
+    (let dropped (remove items remaining|)
 
 ; `before` answers whether the first element belongs ahead of the second. A sort
 ; parameterised by a function is what a language with traits gets from `Ord`,
@@ -248,7 +248,7 @@
       (do
         (let discarded (replace target at (get source right)))
         (set right (+ right 1))))
-    (set at (+ at 1))))
+    (set at (+ at 1|)
 
 ; `order` says which element belongs at each position, counted in the list as
 ; it arrived. Following each cycle forward puts one element home per `swap`, so
@@ -264,4 +264,4 @@
       (set from (get order from)))
     (when (!= from at)
       (swap items at from))
-    (set at (+ at 1))))
+    (set at (+ at 1|)

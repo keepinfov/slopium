@@ -198,6 +198,29 @@ pub fn lex(file: &str, source: &str) -> CompileResult<Vec<Token>> {
                     column += 1;
                 }
             }
+            // `|` ends a token wherever it appears, so `(c d|)` is a name and a
+            // closer. A closer built from a character a name may contain could
+            // not work at all — `<` and `*` are ordinary names, which is the
+            // trap `D-106` refused when it declined `(& a b)`.
+            //
+            // `|)` is one token: the closer that ends every list a declaration
+            // left open (`D-151`). It is lexed here rather than read as a `|`
+            // beside a `)` because the two are one character apart on purpose —
+            // `| )` is a name and a paren, and nothing else in the language
+            // depends on whitespace.
+            '|' if matches!(chars.peek(), Some((_, ')'))) => {
+                chars.next();
+                tokens.push(Token {
+                    kind: TokenKind::Atom("|)".to_owned()),
+                    span: Span {
+                        start,
+                        end: start + 2,
+                        line,
+                        column,
+                    },
+                });
+                column += 2;
+            }
             _ => {
                 let mut end = start + ch.len_utf8();
                 while let Some((idx, next)) = chars.peek().copied() {
@@ -206,7 +229,7 @@ pub fn lex(file: &str, source: &str) -> CompileResult<Vec<Token>> {
                     // (`D-149`). Before the sigils nothing could be written
                     // immediately before a `"`, so nothing depended on an atom
                     // swallowing one.
-                    if next.is_whitespace() || matches!(next, '(' | ')' | ';' | '"') {
+                    if next.is_whitespace() || matches!(next, '(' | ')' | ';' | '"' | '|') {
                         break;
                     }
                     chars.next();

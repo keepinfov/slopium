@@ -7,8 +7,8 @@ this is how to walk through them.
 ## Get it building
 
 Everything is reproducible through the Nix dev shell, and the check suite is
-only whole inside it: it carries valgrind, gdb, qemu and an
-`aarch64-unknown-linux-gnu-*` cross toolchain, and thirteen checks quietly skip
+only whole inside it: it carries valgrind, gdb, qemu, Neovim and an
+`aarch64-unknown-linux-gnu-*` cross toolchain, and fourteen checks quietly skip
 themselves without those.
 
 ```sh

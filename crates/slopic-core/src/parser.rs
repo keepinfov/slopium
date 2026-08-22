@@ -147,7 +147,10 @@ impl Parser<'_> {
                             token.span,
                             "unclosed `(`",
                         )
-                        .with_help("add a matching `)`")
+                        .with_help(
+                            "add a matching `)`, or `|)` to close every list this declaration \
+                             left open",
+                        )
                         .with_suggestion(
                             Span {
                                 start: token.span.end,

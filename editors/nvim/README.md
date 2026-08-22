@@ -4,7 +4,11 @@
 
 - filetype `slopium` для `*.slp`;
 - раздельная подсветка форм, функций, типов, параметров, bindings, полей и
-  enum constructors плюс Lisp-aware indentation;
+  enum constructors;
+- собственный `indentexpr` вместо встроенного Lisp-отступа: тот считает `(` и
+  `)` в сишных исходниках самого Vim и научить его закрывающему `|)` нельзя
+  (`D-151`), поэтому отступ считает `lua/slopium/indent.lua` — по тем же
+  `lispwords`, которые задаёт `ftplugin`;
 - snippets, builtins, функции, параметры и bindings текущего buffer для
   `nvim-cmp`;
 - `omnifunc` fallback без `nvim-cmp`;

@@ -119,6 +119,13 @@ pub fn lex_lossless(source: &str) -> Vec<SyntaxToken> {
                 }
                 SyntaxKind::String
             }
+            // `|)` is one token here too, or the layout would see a name and a
+            // paren where the reader sees the closer (`D-151`).
+            '|' if source[cursor + 1..].starts_with(')') => {
+                cursor += 2;
+                column += 2;
+                SyntaxKind::Atom
+            }
             value if value.is_whitespace() => {
                 cursor += value.len_utf8();
                 if value == '\n' {
@@ -153,7 +160,7 @@ pub fn lex_lossless(source: &str) -> Vec<SyntaxToken> {
                         .chars()
                         .next()
                         .expect("cursor is at a character boundary");
-                    if next.is_whitespace() || matches!(next, '(' | ')' | ';' | '"') {
+                    if next.is_whitespace() || matches!(next, '(' | ')' | ';' | '"' | '|') {
                         break;
                     }
                     cursor += next.len_utf8();
@@ -244,6 +251,21 @@ pub fn parse_lossless(source: &str) -> LosslessSyntax {
                     .expect("root node exists")
                     .children
                     .push(SyntaxElement::Token(token.clone()));
+            }
+            // `|)` closes the list it is written in and every one outside it,
+            // so the innermost node takes the token and the rest close behind
+            // it with nothing of their own (`D-151`).
+            SyntaxKind::Atom if token.text == "|)" && suppressed == 0 && stack.len() > 1 => {
+                let current = stack.last_mut().expect("root node exists");
+                current.children.push(SyntaxElement::Token(token.clone()));
+                current.span = current.span.join(token.span);
+                while stack.len() > 1 {
+                    let list = stack.pop().expect("list node exists");
+                    let end = list.span;
+                    let parent = stack.last_mut().expect("root node exists");
+                    parent.span = parent.span.join(end);
+                    parent.children.push(SyntaxElement::List(list));
+                }
             }
             SyntaxKind::RightParen if stack.len() > 1 => {
                 let current = stack.last_mut().expect("root node exists");
@@ -433,6 +455,9 @@ fn entries_of(children: &[SyntaxElement], in_list: bool) -> Vec<Entry> {
                     continue;
                 }
                 SyntaxKind::LeftParen | SyntaxKind::RightParen => continue,
+                // The closer is punctuation the layout writes itself, exactly
+                // as the parens it stands for are.
+                SyntaxKind::Atom if token.text == "|)" => continue,
                 SyntaxKind::Comment => {
                     let text = token.text.trim_end().to_owned();
                     match entries.last_mut() {
@@ -899,6 +924,22 @@ fn close(out: &mut String, indent: usize, open: bool, _options: &FormatOptions) 
     out.push(')');
 }
 
+/// Writes the run of parens a declaration ends with as the one token that
+/// stands for it, when there are more than three of them.
+///
+/// Three is not taste: runs of one and two are the two most populous buckets in
+/// the tree, so a lower threshold would rewrite half of it and flicker under
+/// ordinary editing, because every edit that changes nesting depth by one would
+/// cross it (`D-151`).
+fn collapse_the_tail(rendered: String) -> String {
+    let kept = rendered.trim_end_matches(')');
+    if rendered.len() - kept.len() > 3 {
+        format!("{kept}|)")
+    } else {
+        rendered
+    }
+}
+
 fn render_entry(entry: &Entry, indent: usize, options: &FormatOptions) -> String {
     let mut out = render_item(&entry.item, indent, options, 0);
     for comment in &entry.trailing {
@@ -926,7 +967,7 @@ pub fn format_source(file: &str, source: &str, options: &FormatOptions) -> Compi
                 output.push('\n');
             }
         }
-        output.push_str(&render_entry(entry, 0, options));
+        output.push_str(&collapse_the_tail(render_entry(entry, 0, options)));
     }
     while output.ends_with([' ', '\n', '\r', '\t']) {
         output.pop();

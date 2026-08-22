@@ -15,7 +15,7 @@
 
 (export Builder new write-str write-byte write-i64 write-u64 size build)
 
-(struct Builder ((bytes (List u8))))
+(struct Builder ((bytes (List u8|)
 
 ; The length travels beside the pointer, because a Slopium string may contain a
 ; NUL byte and C would stop at it (`D-079`).
@@ -30,11 +30,11 @@
 
 (fn size ((builder &Builder)) -> i64
   (match builder
-    ((Builder :bytes bytes) (len bytes))))
+    ((Builder :bytes bytes) (len bytes|)
 
 (fn write-byte ((into &mut Builder) (byte u8)) -> unit
   (match into
-    ((Builder :bytes bytes) (push bytes byte))))
+    ((Builder :bytes bytes) (push bytes byte|)
 
 ; One pass over the piece, appending. Nothing is allocated: the buffer grows
 ; where it already is, which is the whole of the difference from `concat`.
@@ -43,7 +43,7 @@
   (let mut index 0)
   (while (< index width)
     (write-byte into (as u8 (byte-raw text width index)))
-    (set index (+ index 1))))
+    (set index (+ index 1|)
 
 ; The digits go in least significant first and come back out reversed, so a
 ; number costs one small list rather than one `String` per digit — which is
@@ -61,7 +61,7 @@
       (let mut index (len &digits))
       (while (> index 0)
         (set index (- index 1))
-        (write-byte into (get &digits index))))))
+        (write-byte into (get &digits index|)
 
 ; A sign and a magnitude. The magnitude of the smallest `i64` has no `i64` to
 ; hold it, so it is taken one below and put back as a `u64`, exactly as
@@ -71,7 +71,7 @@
     (do
       (write-byte into 45)
       (write-u64 into (+ (as u64 (- (+ value 1))) 1)))
-    (write-u64 into (as u64 value))))
+    (write-u64 into (as u64 value|)
 
 ; The one allocation. The builder is consumed, because the bytes leave with the
 ; string and a buffer that has been handed over is not one to keep writing to.
@@ -79,4 +79,4 @@
   (match builder
     ((Builder :bytes bytes)
       (let view (slice &bytes 0 (len &bytes)))
-      (bytes-raw &view))))
+      (bytes-raw &view|)

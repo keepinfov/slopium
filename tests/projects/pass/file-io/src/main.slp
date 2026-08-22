@@ -34,7 +34,7 @@
       (println-i64 count))
     ((Result:Err (Error :code code))
       (print-label label)
-      (println-i64 code))))
+      (println-i64 code|)
 
 (fn print-label ((label &String)) -> unit
   (println label))
@@ -92,4 +92,4 @@ two
     (let rendered (from-i64 (- 0 4210)))
     (match (to-i64 &rendered)
       ((Option:Some value) (= value (- 0 4210)))
-      ((Option:None) false))))
+      ((Option:None) false|)

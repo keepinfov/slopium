@@ -378,6 +378,10 @@
               valgrind
               crossCc
               qemu
+              # The shipped plugin has an indent module now, because `|)`
+              # (`D-151`) is a closer Vim's built-in Lisp indenter cannot be
+              # taught. `scripts/nvim-check.sh` runs it, which needs an editor.
+              neovim
             ];
 
             shellHook = ''

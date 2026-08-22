@@ -28,7 +28,7 @@
 ; capture is a `T` here and an `i64` and a `String` in the program below.
 (fn keeping-all (T) ((items (List T))) -> (List T)
   (let sentinel 0)
-  (filter items (lambda (sentinel) ((element &T)) -> bool (= sentinel 0))))
+  (filter items (lambda (sentinel) ((element &T)) -> bool (= sentinel 0|)
 
 ; An empty `Option` of a type nothing else names: `or-else` has to know what it
 ; is falling back to, and a function's result says so at every call rather than

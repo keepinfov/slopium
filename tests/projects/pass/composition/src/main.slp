@@ -54,4 +54,4 @@
 
 (test "composition answers what the nesting answers"
   (and (= (leftward 20) (double (increment 20)))
-       (= (rightward 20) (double (increment 20)))))
+       (= (rightward 20) (double (increment 20|)

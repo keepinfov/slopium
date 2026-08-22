@@ -19,7 +19,7 @@
       (match (wait &held)
         ((Result:Ok status) status)
         ((Result:Err _) (- 0 1))))
-    ((Result:Err _) (- 0 2))))
+    ((Result:Err _) (- 0 2|)
 
 (fn said ((program &String) (arguments (List String))) -> String
   (match (capture program &arguments)
@@ -46,7 +46,7 @@
 
 (test "a child that succeeds and one that fails"
   (and (= 0 (status-of &"/bin/true" (no-arguments)))
-       (= 1 (status-of &"/bin/false" (no-arguments)))))
+       (= 1 (status-of &"/bin/false" (no-arguments|)
 
 ; The arguments cross as one buffer of NUL-separated pieces, so a child that
 ; echoes them back is what says the buffer was taken apart the way it was put

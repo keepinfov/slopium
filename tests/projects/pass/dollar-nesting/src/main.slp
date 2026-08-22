@@ -12,7 +12,7 @@
 (fn note ((reading &Reading)) -> String
   (match reading
     ((Reading :label label :value value)
-      (concat label $ & $ concat &": " $ & $ from-i64 $ clone value))))
+      (concat label $ & $ concat &": " $ & $ from-i64 $ clone value|)
 
 (fn main () -> i32
   ; Three deep, and each step reads before the one it feeds.

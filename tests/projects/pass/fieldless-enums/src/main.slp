@@ -31,7 +31,7 @@
     ((Direction:North) (Direction:South))
     ((Direction:South) (Direction:North))
     ((Direction:East) (Direction:West))
-    ((Direction:West) (Direction:East))))
+    ((Direction:West) (Direction:East|)
 
 ; A mixed enum keeps the representation it always had.
 (fn unwrap-or ((value (Option i64)) (fallback i64)) -> i64
@@ -56,4 +56,4 @@
 
 (test "a fieldless enum compares and survives the comparison"
   (let status (Status:Failed))
-  (and (= status (Status:Failed)) (and (!= status (Status:Done)) (= (rank status) 2))))
+  (and (= status (Status:Failed)) (and (!= status (Status:Done)) (= (rank status) 2|)

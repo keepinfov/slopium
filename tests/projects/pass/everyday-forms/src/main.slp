@@ -28,7 +28,7 @@
   (loop
     (set n (+ n 1))
     (when (= n stop)
-      (break (* n 2)))))
+      (break (* n 2|)
 
 (enum Reading
   (Port ((address u16)))
@@ -59,7 +59,7 @@
     ((Reading:Retry attempt) when (> (clone attempt) 0) (clone attempt))
     ((Reading:Retry _) 0)
     ((Reading:Port _) (- 0 1))
-    ((Reading:Silent) (- 0 2))))
+    ((Reading:Silent) (- 0 2|)
 
 ; An `if` answers on one line and leaves the rest to its tail: the `else`
 ; branch takes as many expressions as it needs, which is the shape a function
@@ -113,13 +113,13 @@
   (do
     (let positive (Reading:Retry 7))
     (let zero (Reading:Retry 0))
-    (and (= (label &positive) 7) (= (label &zero) 0))))
+    (and (= (label &positive) 7) (= (label &zero) 0|)
 
 (test "an else branch runs several expressions and answers the last"
   (do
     (let none (remaining 0))
     (let some (remaining 4))
-    (and (equals &none &"none") (equals &some &"4 left"))))
+    (and (equals &none &"none") (equals &some &"4 left"|)
 
 (test "a name can be bound twice in one scope"
   (do

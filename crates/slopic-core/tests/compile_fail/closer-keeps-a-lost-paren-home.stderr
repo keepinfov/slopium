@@ -1,0 +1,4 @@
+closer-keeps-a-lost-paren-home.slp:7:3: error[SL0100]: `if` expects condition, then, and else
+  |
+ 7 |   (if (> value 0 1 0|)
+  |   ^^^^^^^^^^^^^^^^^^^^

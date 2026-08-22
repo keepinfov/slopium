@@ -13,4 +13,4 @@
   (= (+ (answer) (perimeter)) 122))
 
 (test "the shared dependency is resolved once, under its own package name"
-  (= (perimeter) (+ (foundation:numbers:forty) (foundation:numbers:forty))))
+  (= (perimeter) (+ (foundation:numbers:forty) (foundation:numbers:forty|)

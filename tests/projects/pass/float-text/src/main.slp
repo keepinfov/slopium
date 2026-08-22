@@ -116,7 +116,7 @@
   (and (= (read &up) (infinity))
     (do
       (let value (read &down))
-      (= value (- 0.0 (infinity))))))
+      (= value (- 0.0 (infinity|)
 
 (test "text that is not a number is refused"
   (let doubled "1.2.3")

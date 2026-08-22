@@ -11,4 +11,4 @@
   (= (doubled) 80))
 
 (test "the workspace shares one copy of foundation"
-  (= (doubled) (+ (foundation:numbers:forty) (foundation:numbers:forty))))
+  (= (doubled) (+ (foundation:numbers:forty) (foundation:numbers:forty|)

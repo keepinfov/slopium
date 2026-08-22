@@ -32,6 +32,7 @@ before anything reads a tree, so nothing under the reader learns it was written
 | `&` | `(& x)` | a shared borrow |
 | `&mut` | `(&mut x)` | an exclusive borrow |
 | `$` | a list closing where the form holding it closes | the rest of a form, nested |
+| `|)` | the `)` of every list still open | the end of a declaration |
 | `'` | — | reserved for quotation |
 | `` ` `` | — | reserved for quasiquotation |
 | `,` | — | reserved for unquotation |
@@ -89,6 +90,40 @@ grammar rather than by a second one in the reader.
 meant by one is not recoverable from the tree, and guessing is where a
 formatter starts having opinions about structure rather than about layout. All
 it does is keep one off the end of a line.
+
+**`|)` closes every list still open, back to the top level.** It is written
+where the run of closing parens would be and needs no opener:
+
+```lisp
+(fn depth-of ((shape &Shape)) -> i64
+  (match shape
+    ((Shape:Nothing) 0)
+    ((Shape:Tag name) (len name|)
+```
+
+It is top level only, deliberately. A closer usable mid-body would end a
+`match` silently when it was written one line too early: the remaining arms
+would become sibling expressions, parse without complaint and fail somewhere
+else. Without one, whatever follows lands at the top level, where a declaration
+is expected and is refused on the spot.
+
+That is also why it *improves* the diagnostic it appears to weaken. Parentheses
+are an error-detecting code, and a token that closes everything does delete
+redundancy — but a `)` lost inside a long module used to swallow every
+declaration after it and surface as one `SL0004` at the end of the file. `|)`
+forces the depth to zero, so a lost paren cannot leave the declaration it was
+written in. A `|)` with nothing open is `SL0003`.
+
+`|` ends a token wherever it appears, so `(c d|)` is a name and a closer. A
+closer built from a character a name may contain could not work at all: `<` and
+`*` are ordinary names that can be passed as values, so `(>> f <)` would have to
+be respelled with a meaningful space.
+
+`slopium fmt` writes the closer wherever the run it ends a declaration with is
+longer than three. Three is not taste: runs of one and two are the two most
+populous buckets in the tree, so a lower threshold would rewrite half of it and
+flicker under ordinary editing, because every edit that changes nesting depth by
+one would cross it.
 
 ## Files, modules, and imports
 
