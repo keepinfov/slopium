@@ -350,6 +350,9 @@ fn codegen_options(
         });
     CodegenOptions {
         target: options.target.clone(),
+        // Every module of a `--test` build emits the tests it owns; only the
+        // one that emits the entrypoint emits the harness (`D-156`).
+        test_bodies: options.test_harness,
         // A lone file's harness does not depend on the entrypoint: there is no
         // module that could be the one to emit it.
         test_harness: options.test_harness && input.is_none_or(|_| emits_entrypoint),

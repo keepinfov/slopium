@@ -427,7 +427,9 @@ module of the same name.
 A package's test harness carries that package's tests only. A dependency's
 tests belong to the dependency: codegen emits a test body only in the object
 that owns it, so collecting a dependency's tests would leave the harness calling
-functions no object defines.
+functions no object defines. The same rule holds one level down: every
+module of a `--test` build emits the tests it owns, and the entry module's
+object holds the harness alone (`D-156`).
 
 A package with immutable bytes records a `checksum` in the lock — the digest of
 its archive, a ustar tar with timestamps, owners and entry order removed so that

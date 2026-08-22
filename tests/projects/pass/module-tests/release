@@ -1,0 +1,2 @@
+Build and run the tests of a package whose tests live outside the entry
+module under the release profile too.

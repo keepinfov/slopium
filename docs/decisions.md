@@ -168,6 +168,7 @@ of what was believed at the time is the part worth keeping.
 - [D-153 — a borrow of a borrow is refused where it is written and where it is instantiated](#d-153--a-borrow-of-a-borrow-is-refused-where-it-is-written-and-where-it-is-instantiated)
 - [D-154 — the manager reads the compiler's exit code, and stops naming a module it cannot blame](#d-154--the-manager-reads-the-compilers-exit-code-and-stops-naming-a-module-it-cannot-blame)
 - [D-155 — a function longer than a conditional branch reaches is refused, and the limit is written down](#d-155--a-function-longer-than-a-conditional-branch-reaches-is-refused-and-the-limit-is-written-down)
+- [D-156 — a test is emitted by the module that owns it, and the harness by the entry module](#d-156--a-test-is-emitted-by-the-module-that-owns-it-and-the-harness-by-the-entry-module)
 
 ## D-001 — a native compiler, without LLVM
 
@@ -3657,3 +3658,39 @@ instruction sequence of every checked operation in the language. Neither races
 the freeze, and a limit that is written down and diagnosed is not a limit that
 hurts anybody. x86-64 needs none of this: its conditional branches carry 32
 bits.
+
+## D-156 — a test is emitted by the module that owns it, and the harness by the entry module
+
+Status: approved · 2026-08-22
+
+A `--test` build asked one flag two questions. `codegen_options` set
+`test_harness` for the module that emits the entrypoint and nothing else, and
+both backends read it to decide whether to emit **test bodies** as well as
+whether to emit the harness. The two conditions could only ever hold together,
+so the entry module emitted the tests it owned and every other module emitted
+none, while the harness — which is generated from the whole package — counted
+and called all of them. What a person met was `undefined reference to
+sl_test_5f5f736c6f705f746573745f30`, a mangled symbol from `ld` in a program
+the compiler had said nothing about.
+
+**The flag is two flags.** `test_bodies` says this is a `--test` build, so the
+module emits the tests it owns; every module carries it. `test_harness` says
+this module emits the harness, and stays the entry module's alone. Ownership
+needed nothing: `partition_codegen` already marks a test for exactly the module
+whose name prefixes it, and a test body's `.rodata` strings and its panic
+trampolines follow the body, which is why the string collection and the trap
+survey read `test_bodies` too.
+
+**A test lives beside what it tests**, which is why the fallback the tracker
+offered — refuse a test outside the entry module — was not taken. `D-135`'s
+per-target module is the shape that suffers most: one module name resolving to
+a different file per target is the natural home for that target's tests, and
+there the functions worked and the tests did not. Refusing them would have made
+the one arrangement the language provides for target-specific code the one
+arrangement that cannot be tested.
+
+**Nothing links differently.** A test body was already emitted with global
+linkage like any other function, and the harness already referenced it by name,
+which is why the reference existed before anything defined it. The release path
+is unchanged: without `--test` neither flag is set, so no `sl_test_*` function
+reaches an ordinary binary.
