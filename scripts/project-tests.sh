@@ -704,6 +704,18 @@ while IFS= read -r -d '' project; do
   fi
   assert_patterns "$project/expected.stderr" "$prefix.check.stderr"
 
+  # A build asks `slopic` for one object per module and each invocation checks
+  # the whole program first, so a program that does not compile fails all of
+  # them. What the summary line says about that is a fixture's business too, and
+  # a project carrying `expected.build.stderr` asserts it (`D-154`).
+  if [ -f "$project/expected.build.stderr" ]; then
+    if run_manager "$manifest" build >"$prefix.build.stdout" 2>"$prefix.build.stderr"; then
+      echo "project-tests: compile-fail/$name unexpectedly built" >&2
+      exit 1
+    fi
+    assert_patterns "$project/expected.build.stderr" "$prefix.build.stderr"
+  fi
+
   echo "project-tests: compile-fail/$name ... ok"
   compile_fail_count=$((compile_fail_count + 1))
 done < <(

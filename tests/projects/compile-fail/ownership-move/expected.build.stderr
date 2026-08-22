@@ -1,0 +1,3 @@
+error[SL0300]
+use of moved value `value`
+slopium: build failed with exit status: 1

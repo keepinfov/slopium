@@ -343,6 +343,11 @@ fn main() {
         ),
         Err(diagnostics) => {
             report(&diagnostics, &input_name, &source, cli.diagnostic_format);
+            // `1` means the program does not compile and every diagnostic has
+            // been printed; everything else here exits `2`. The manager reads
+            // that difference to decide whether its own summary line has
+            // anything left to say (`D-154`), so the two codes are a contract
+            // between the programs rather than an accident of this line.
             std::process::exit(1);
         }
     }

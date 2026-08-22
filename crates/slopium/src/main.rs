@@ -930,7 +930,7 @@ fn build(
             let status = command
                 .status()
                 .map_err(|error| format!("cannot start slopic: {error}"))?;
-            status_result(status, &format!("codegen for module `{}`", module.name))?;
+            codegen_status_result(status, &module.name)?;
             fs::write(&object_stamp, module_key)
                 .map_err(|error| format!("cannot write module cache stamp: {error}"))?;
         }
@@ -2994,6 +2994,26 @@ impl Hasher for Fnv1a {
         }
         self.0 = hash;
     }
+}
+
+/// The summary line for a `slopic` invocation that emits one module's object.
+///
+/// The compiler exits `1` when the program does not compile, having printed
+/// every diagnostic itself, and `2` when anything else goes wrong. Naming a
+/// module in the first case is worse than saying nothing: a build asks for one
+/// object per invocation and each invocation checks the whole program first, so
+/// an error anywhere fails all of them and the loop would name whichever
+/// module's object it happened to be asking for — the first in the order on a
+/// cold build, the first stale one afterwards. A reader who trusts that line
+/// goes looking in the standard library for a bug in the file above it
+/// (`D-154`). A module name is kept for the other statuses, which is the case
+/// the message was written for and the only one where the name carries
+/// information.
+fn codegen_status_result(status: ExitStatus, module: &str) -> Result<(), String> {
+    if status.code() == Some(1) {
+        return status_result(status, "build");
+    }
+    status_result(status, &format!("codegen for module `{module}`"))
 }
 
 fn status_result(status: ExitStatus, action: &str) -> Result<(), String> {
