@@ -3,6 +3,12 @@
 ; Nothing here aborts. An index past the last argument and a variable that is
 ; not set are both `None`, because both are things a program can be asked to
 ; handle rather than things it got wrong (`D-087`).
+;
+; An argument is one the program was given. `args-len` does not count the name
+; the program was invoked under and `arg` does not index it, so `(arg 0)` is
+; the first argument rather than the program: one less than C's `argc`, and one
+; place along from its `argv`. That is what a program asking for its arguments
+; wants, and it is what every caller below already depends on.
 
 (take core:option Option)
 (take core:result Result Ok Err)

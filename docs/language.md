@@ -1145,6 +1145,14 @@ nothing and no drop glue runs for it (`D-084`).
 `std:process` has `args-len`, `arg` and `args`, `env` returning
 `(Option String)`, `exit`, and the six that start a child (`D-148`).
 
+An argument is one the program was given: `args-len` does not count the name
+the program was invoked under, `arg` does not index it, and `args` does not
+hold it, so `(arg 0)` is the first argument rather than the program. That is
+one less than C's `argc`, where `argv[0]` is the program, so "was I given an
+argument" is `(> (args-len) 0)` here and `(> argc 1)` there — a difference
+worth writing down, because both spellings compile and only one of them is
+right.
+
 `spawn` leaves the child's standard output where this program's is, which is
 what a build tool wants. `capture` gives the child a pipe and hands back the
 read end. `wait` answers the exit status — or `128` plus the signal for a child
