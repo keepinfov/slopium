@@ -1,0 +1,4 @@
+struct-pattern-field-repeated.slp:9:27: error[SL0200]: struct pattern field `count` appears more than once
+  |
+ 9 |     ((Holder :count first :count second) 0)))
+  |                           ^^^^^^

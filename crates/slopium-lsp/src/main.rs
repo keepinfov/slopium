@@ -1302,8 +1302,8 @@ fn scan_pattern_occurrences(
         }
         PatternKind::Struct { path, fields } => {
             add_workspace_reference(workspace, modules, summary, file, path, pattern.span);
-            for (_, field) in fields {
-                scan_pattern_occurrences(workspace, modules, summary, file, field);
+            for field in fields {
+                scan_pattern_occurrences(workspace, modules, summary, file, &field.pattern);
             }
         }
         _ => {}

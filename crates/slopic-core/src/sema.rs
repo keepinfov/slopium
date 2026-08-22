@@ -1,6 +1,6 @@
 use crate::ast::{
-    Annotation, Capture, Expr, ExprKind, Function, LogicalOp, Param, Pattern, PatternKind, Program,
-    Type,
+    Annotation, Capture, Expr, ExprKind, Function, LogicalOp, Param, Pattern, PatternField,
+    PatternKind, Program, Type,
 };
 use crate::diagnostic::{codes, CompileResult, Diagnostic, Span};
 use serde::Serialize;
@@ -3137,9 +3137,13 @@ impl<'a> Analyzer<'a> {
                     Type::Named(name) => name.clone(),
                     _ => path.clone(),
                 };
-                let mut provided = HashMap::<String, &Pattern>::new();
-                for (name, field) in fields {
-                    if provided.insert(name.clone(), field).is_some() {
+                // Both diagnostics below are about the *field*, so both point
+                // at the keyword rather than at the sub-pattern, which is a
+                // local the author is free to call anything.
+                let mut provided = HashMap::<String, &PatternField>::new();
+                for field in fields {
+                    if provided.insert(field.name.clone(), field).is_some() {
+                        let name = &field.name;
                         self.error(
                             field.span,
                             format!("struct pattern field `{name}` appears more than once"),
@@ -3157,9 +3161,9 @@ impl<'a> Analyzer<'a> {
                     .iter()
                     .map(|(name, ty)| TPatternField {
                         ty: ty.clone(),
-                        pattern: provided
-                            .get(name)
-                            .map_or(TPattern::Wildcard, |field| self.type_pattern(field, ty)),
+                        pattern: provided.get(name).map_or(TPattern::Wildcard, |field| {
+                            self.type_pattern(&field.pattern, ty)
+                        }),
                     })
                     .collect();
                 self.pattern_depth -= 1;

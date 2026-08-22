@@ -942,8 +942,21 @@ pub enum PatternKind {
     },
     Struct {
         path: String,
-        fields: Vec<(String, Pattern)>,
+        fields: Vec<PatternField>,
     },
+}
+
+/// One `:field pattern` pair of a struct pattern.
+///
+/// The keyword's own span is kept beside the sub-pattern's, because the two
+/// say different things: `:label` is the field, and what follows it is a local
+/// the author may call anything. A warning about the field belongs on the
+/// former, which is what a construction and a read already point at.
+#[derive(Clone, Debug, Serialize)]
+pub struct PatternField {
+    pub name: String,
+    pub span: Span,
+    pub pattern: Pattern,
 }
 
 pub fn build_program(file: &str, forms: &[SExpr]) -> CompileResult<Program> {
@@ -2226,7 +2239,11 @@ impl AstBuilder<'_> {
                             self.error(pair[0].span, "struct pattern field must start with `:`");
                             return None;
                         };
-                        fields.push((field.to_owned(), self.pattern(&pair[1])?));
+                        fields.push(PatternField {
+                            name: field.to_owned(),
+                            span: pair[0].span,
+                            pattern: self.pattern(&pair[1])?,
+                        });
                     }
                     return Some(Pattern {
                         kind: PatternKind::Struct {

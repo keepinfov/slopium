@@ -891,8 +891,8 @@ impl Resolver<'_> {
             }
             crate::ast::PatternKind::Struct { path, fields } => {
                 *path = self.resolve(path, pattern.span, diagnostics);
-                for (_, field) in fields {
-                    self.rewrite_pattern(field, diagnostics);
+                for field in fields {
+                    self.rewrite_pattern(&mut field.pattern, diagnostics);
                 }
             }
             _ => {}
@@ -1047,7 +1047,9 @@ fn collect_qualified_names<'a>(program: &'a Program, output: &mut Vec<&'a str>) 
                 }
                 crate::ast::PatternKind::Struct { path, fields } => {
                     output.push(path);
-                    fields.iter().for_each(|(_, field)| pattern(field, output));
+                    fields
+                        .iter()
+                        .for_each(|field| pattern(&field.pattern, output));
                 }
                 _ => {}
             }
@@ -1255,9 +1257,13 @@ fn shift_program(program: &mut Program, base: usize) {
                     .for_each(|field| shift_pattern(field, base));
             }
             crate::ast::PatternKind::Struct { fields, .. } => {
-                fields
-                    .iter_mut()
-                    .for_each(|(_, field)| shift_pattern(field, base));
+                // The keyword's span moves with the module the same way every
+                // other one does; a span that stayed behind would point a
+                // warning at whatever happened to sit at that offset.
+                fields.iter_mut().for_each(|field| {
+                    shift_span(&mut field.span, base);
+                    shift_pattern(&mut field.pattern, base);
+                });
             }
             _ => {}
         }
