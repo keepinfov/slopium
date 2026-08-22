@@ -5,37 +5,37 @@
 (fn main () -> i32
   (let mut numbers (list 1 2))
   (do
-    (push (&mut numbers) 3))
-  (println-i64 (get (& numbers) 2))
-  (println-i64 (remove (&mut numbers) 1))
-  (println-i64 (len (& numbers)))
+    (push &mut numbers 3))
+  (println-i64 (get &numbers 2))
+  (println-i64 (remove &mut numbers 1))
+  (println-i64 (len &numbers))
 
   (let mut words (list "one" "two"))
-  (let first (get-ref (& words) 0))
+  (let first (get-ref &words 0))
   (println first)
   (do
-    (push (&mut words) "three"))
-  (let removed (remove (&mut words) 1))
-  (println (& removed))
-  (match (pop (&mut words))
-    ((Option:Some value) (println (& value)))
+    (push &mut words "three"))
+  (let removed (remove &mut words 1))
+  (println &removed)
+  (match (pop &mut words)
+    ((Option:Some value) (println &value))
     ((Option:None) ()))
-  (match (pop (&mut words))
-    ((Option:Some value) (println (& value)))
+  (match (pop &mut words)
+    ((Option:Some value) (println &value))
     ((Option:None) ()))
-  (match (pop (&mut words))
-    ((Option:Some value) (println (& value)))
+  (match (pop &mut words)
+    ((Option:Some value) (println &value))
     ((Option:None)
       (let empty "empty")
-      (println (& empty))))
+      (println &empty)))
 
   (let fixed (array "a" "b" "c"))
-  (let view (slice (& fixed) 1 3))
-  (println-i64 (len (& view)))
-  (let last (get-ref (& view) 1))
+  (let view (slice &fixed 1 3))
+  (println-i64 (len &view))
+  (let last (get-ref &view 1))
   (println last)
   (let copied (clone fixed))
-  (let copied-first (get-ref (& copied) 0))
+  (let copied-first (get-ref &copied 0))
   (println copied-first)
   0)
 
@@ -43,22 +43,22 @@
   (do
     (let mut values (list 10 20))
     (do
-      (push (&mut values) 30))
-    (= (+ (remove (&mut values) 1) (len (& values))) 22)))
+      (push &mut values 30))
+    (= (+ (remove &mut values 1) (len &values)) 22)))
 
 (test "pop reports empty"
   (do
     (let mut values (list 1))
     (let first
-      (match (pop (&mut values))
+      (match (pop &mut values)
         ((Option:Some value) value)
         ((Option:None) 0)))
-    (match (pop (&mut values))
+    (match (pop &mut values)
       ((Option:Some value) false)
       ((Option:None) (= first 1)))))
 
 (test "array and slice lengths"
   (do
     (let values (array 1 2 3 4))
-    (let view (slice (& values) 1 3))
-    (= (+ (len (& values)) (len (& view))) 6)))
+    (let view (slice &values 1 3))
+    (= (+ (len &values) (len &view)) 6)))

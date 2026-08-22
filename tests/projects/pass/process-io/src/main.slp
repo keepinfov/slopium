@@ -11,7 +11,7 @@
     ((Option:Some value) value)
     ((Option:None) fallback)))
 
-(fn text-or ((value (Option String)) (fallback (& String))) -> String
+(fn text-or ((value (Option String)) (fallback &String)) -> String
   (match value
     ((Option:Some found) found)
     ((Option:None) (clone fallback))))
@@ -21,25 +21,25 @@
   (let first-line (read-line))
   (let parsed
     (match first-line
-      ((Option:Some line) (to-i64 (& line)))
+      ((Option:Some line) (to-i64 &line))
       ((Option:None) (Option:None))))
   (let number (read-i64))
   (println-i64 (+ (number-or parsed 0) (number-or number 0)))
   ; Past the end of stdin, and not a number: both are `None`, not an abort.
   (println-i64 (number-or (read-i64) (- 0 1)))
   (let environment-name "SLOPIUM_PROJECT_TEST_VALUE")
-  (let environment-value (text-or (env (& environment-name)) (& missing)))
-  (println (& environment-value))
+  (let environment-value (text-or (env &environment-name) &missing))
+  (println &environment-value)
   (let unset-name "SLOPIUM_PROJECT_TEST_UNSET")
-  (let unset-value (text-or (env (& unset-name)) (& missing)))
-  (println (& unset-value))
+  (let unset-value (text-or (env &unset-name) &missing))
+  (println &unset-value)
   (println-i64 (args-len))
-  (let first (text-or (arg 0) (& missing)))
-  (let second (text-or (arg 1) (& missing)))
-  (let third (text-or (arg 2) (& missing)))
-  (println (& first))
-  (println (& second))
-  (println (& third))
+  (let first (text-or (arg 0) &missing))
+  (let second (text-or (arg 1) &missing))
+  (let third (text-or (arg 2) &missing))
+  (println &first)
+  (println &second)
+  (println &third)
   0)
 
 (test "process fixture arithmetic"

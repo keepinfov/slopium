@@ -1,0 +1,5 @@
+reserved-sigil.slp:6:15: error[SL0006]: `'` is reserved
+  |
+ 6 |   (let quoted 'answer)
+  |               ^
+  = note: it is held for quotation, for the macros this language has not built yet

@@ -1,0 +1,5 @@
+borrow-sigil-as-a-type.slp:5:20: error[SL0100]: `&` is a sigil and not a type
+  |
+ 5 | (fn apply ((f (Fn (&String) i64))) -> i64
+  |                    ^
+  = help: a borrow of `T` is `&T`, and a list holding one borrowed type keeps its parentheses, as in `((& T))`

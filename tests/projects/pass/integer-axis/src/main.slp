@@ -41,9 +41,9 @@
   (println-i64 (round-trip-i8 255))
   (println-i64 (as i64 (add-bytes 200 55)))
   (let text (from-u64 (big)))
-  (println (& text))
-  (println (& (hex-prefixed-from-u64 (big) 0)))
-  (println (& (hex-prefixed-from-u64 0x2A 4)))
+  (println &text)
+  (println &(hex-prefixed-from-u64 (big) 0))
+  (println &(hex-prefixed-from-u64 0x2A 4))
   0)
 
 (test "unsigned division keeps the identity above 2^63"
@@ -84,8 +84,8 @@
 (test "text round-trips through the unsigned width"
   (let text (from-u64 (big)))
   (let expected "18446744073709551615")
-  (and (equals (& text) (& expected))
-    (match (to-u64 (& text))
+  (and (equals &text &expected)
+    (match (to-u64 &text)
       ((Option:Some value) (= value (big)))
       ((Option:None) false))))
 
@@ -93,10 +93,10 @@
 ; than against a table: every four bits are one glyph, and the width is a floor
 ; that pads and never truncates.
 (test "hexadecimal writes the pattern a literal would read back"
-  (and (equals (& (hex-from-u64 (big) 0)) (& "FFFFFFFFFFFFFFFF"))
-       (equals (& (hex-from-u64 0x2A 0)) (& "2A"))
-       (equals (& (hex-from-u64 0x2A 6)) (& "00002A"))
-       (equals (& (hex-from-u64 (as u64 0) 0)) (& "0"))
-       (equals (& (hex-from-u64 (as u64 0) 3)) (& "000"))
-       (equals (& (hex-prefixed-from-u64 0xDEAD_BEEF 8)) (& "0xDEADBEEF"))
-       (equals (& (hex-from-u64 (big) 4)) (& "FFFFFFFFFFFFFFFF"))))
+  (and (equals &(hex-from-u64 (big) 0) &"FFFFFFFFFFFFFFFF")
+       (equals &(hex-from-u64 0x2A 0) &"2A")
+       (equals &(hex-from-u64 0x2A 6) &"00002A")
+       (equals &(hex-from-u64 (as u64 0) 0) &"0")
+       (equals &(hex-from-u64 (as u64 0) 3) &"000")
+       (equals &(hex-prefixed-from-u64 0xDEAD_BEEF 8) &"0xDEADBEEF")
+       (equals &(hex-from-u64 (big) 4) &"FFFFFFFFFFFFFFFF")))

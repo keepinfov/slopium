@@ -6123,10 +6123,10 @@ fn specialize_pattern(pattern: &mut TPattern, substitutions: &HashMap<String, Ty
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ast, lexer, parser};
+    use crate::{ast, lexer, parser, reader};
 
     fn analyze_source(source: &str) -> CompileResult<TypedProgram> {
-        let tokens = lexer::lex("test.slp", source)?;
+        let tokens = reader::expand("test.slp", &lexer::lex("test.slp", source)?)?;
         let forms = parser::parse("test.slp", &tokens)?;
         let program = ast::build_program("test.slp", &forms)?;
         analyze("test.slp", &program)

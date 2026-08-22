@@ -22,12 +22,12 @@
 ; Asking without taking, the pair `core:option` has for the same reason
 ; (`D-099`). Testing a `Result` used to cost the `Result`, which made checking
 ; one before deciding what to do with it impossible to write.
-(fn is-ok (T E) ((value (& (Result T E)))) -> bool
+(fn is-ok (T E) ((value &(Result T E))) -> bool
   (match value
     ((Result:Ok _) true)
     ((Result:Err _) false)))
 
-(fn is-err (T E) ((value (& (Result T E)))) -> bool
+(fn is-err (T E) ((value &(Result T E))) -> bool
   (match value
     ((Result:Ok _) false)
     ((Result:Err _) true)))

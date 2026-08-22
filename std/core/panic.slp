@@ -17,19 +17,19 @@
 
 ; The message crosses as the pointer alone, NUL-terminated, which is what a
 ; borrowed `String` is at the boundary (`D-065`).
-(extern "sl_rt_panic" (panic-raw (message (& String))) -> unit)
+(extern "sl_rt_panic" (panic-raw (message &String)) -> unit)
 
 ; The result is `unit` rather than a type that says "never", because this
 ; language has no such type and adding one to spell three functions would be a
 ; larger change than the functions (`D-130`). So a panic is written where a
 ; statement goes — under a `when`, at the end of a branch — and not where a
 ; value is expected.
-(fn panic ((message (& String))) -> unit
+(fn panic ((message &String)) -> unit
   (panic-raw message))
 
-(fn assert ((held bool) (message (& String))) -> unit
+(fn assert ((held bool) (message &String)) -> unit
   (when (not held)
     (panic message)))
 
 (fn unreachable () -> unit
-  (panic (& "reached a branch the program said it could not")))
+  (panic &"reached a branch the program said it could not"))

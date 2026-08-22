@@ -50,18 +50,18 @@
 ; and all of them run before the scope drops what it owns, which is why the
 ; message a deferred expression borrows is still there to print.
 (fn ordered () -> unit
-  (let message (concat (& "third: ") (& "the owned message is still alive")))
-  (defer (println (& message)))
-  (defer (println (& "second")))
-  (defer (println (& "first"))))
+  (let message (concat &"third: " &"the owned message is still alive"))
+  (defer (println &message))
+  (defer (println &"second"))
+  (defer (println &"first")))
 
 ; A scope inside a scope ends first, and so does what it deferred.
 (fn nested ((enter bool)) -> unit
-  (defer (println (& "outer scope ended")))
+  (defer (println &"outer scope ended"))
   (when enter
-    (defer (println (& "inner scope ended")))
-    (println (& "inside")))
-  (println (& "after")))
+    (defer (println &"inner scope ended"))
+    (println &"inside"))
+  (println &"after"))
 
 (fn main () -> i32
   (println-i64 (reads-and-returns))

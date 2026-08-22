@@ -93,13 +93,13 @@
   (println-i64 0xFFFF_FFFF_FFFF_FFFF)
 
   (let text (from-i64 (negated 7)))
-  (println (& text))
+  (println &text)
 
   ; A payload is bytes: a NUL in the middle, a byte above `\x7f`, and `len`
   ; counting bytes rather than characters.
   (let payload "A\x00B\xffC")
-  (println-i64 (len (& payload)))
-  (println (& payload))
+  (println-i64 (len &payload))
+  (println &payload)
   0)
 
 (test "a remainder agrees with its division in every quadrant"
@@ -141,7 +141,7 @@
 (test "negating a float keeps the sign of a zero"
   (let text (from-f64 (negated-float 0.0)))
   (let expected "-0.0")
-  (equals (& text) (& expected)))
+  (equals &text &expected))
 
 (test "a literal reads the same in every base"
   (and (= 255 0xFF)
@@ -152,11 +152,11 @@
 
 (test "a text literal holds any byte"
   (let payload "\x00\x7f\x80\xff")
-  (and (= 4 (len (& payload)))
-       (= 0 (byte-at (& payload) 0))
-       (= 127 (byte-at (& payload) 1))
-       (= 128 (byte-at (& payload) 2))
-       (= 255 (byte-at (& payload) 3))))
+  (and (= 4 (len &payload))
+       (= 0 (byte-at &payload 0))
+       (= 127 (byte-at &payload 1))
+       (= 128 (byte-at &payload 2))
+       (= 255 (byte-at &payload 3))))
 
 (test "a hexadecimal literal matches as a pattern"
   (let answer

@@ -1,39 +1,39 @@
 (take std:io println println-i64)
 
-(fn show ((value (& String))) -> unit
+(fn show ((value &String)) -> unit
   (println value))
 
-(fn append ((values (&mut (List String)))) -> unit
+(fn append ((values &mut (List String))) -> unit
   (push values "tail"))
 
 (fn consume ((value String)) -> unit
-  (println (& value)))
+  (println &value))
 
 (fn main () -> i32
   (let original "owner")
   (let copied (clone original))
-  (show (& original))
+  (show &original)
   (consume copied)
   (let mut values (list "head"))
-  (let first (get-ref (& values) 0))
+  (let first (get-ref &values 0))
   (println first)
-  (append (&mut values))
-  (println-i64 (len (& values)))
-  (let removed (remove (&mut values) 1))
-  (show (& removed))
+  (append &mut values)
+  (println-i64 (len &values))
+  (let removed (remove &mut values 1))
+  (show &removed)
   0)
 
 (test "borrow ends after its last use"
   (do
     (let mut values (list "one"))
-    (let first (get-ref (& values) 0))
+    (let first (get-ref &values 0))
     (println first)
     (do
-      (push (&mut values) "two"))
-    (= (len (& values)) 2)))
+      (push &mut values "two"))
+    (= (len &values) 2)))
 
 (test "clone keeps the source available"
   (do
     (let source (list 1 2))
     (let copied (clone source))
-    (= (+ (len (& source)) (len (& copied))) 4)))
+    (= (+ (len &source) (len &copied)) 4)))

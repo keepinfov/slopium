@@ -15,7 +15,7 @@
   (let mut answer 40)
   (set answer (+ answer 2))
   (let label "basics:")
-  (print (& label))
+  (print &label)
   (println-i64 answer)
   (println-bool true)
   (println-i64 (factorial 6))

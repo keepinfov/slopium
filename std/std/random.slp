@@ -17,7 +17,7 @@
 
 (struct Error ((code i64)))
 
-(extern "sl_rt_random_bytes" (bytes-raw (into (&mut (List u8)))) -> i64)
+(extern "sl_rt_random_bytes" (bytes-raw (into &mut (List u8))) -> i64)
 
 (extern "sl_rt_last_error" (last-error) -> i64)
 
@@ -28,9 +28,9 @@
   (let mut buffer (list) : (List u8))
   (let mut index 0)
   (while (< index count)
-    (push (&mut buffer) (as u8 0))
+    (push &mut buffer (as u8 0))
     (set index (+ index 1)))
-  (let filled (bytes-raw (&mut buffer)))
+  (let filled (bytes-raw &mut buffer))
   (let code (last-error))
   (if (and (= code 0) (= filled count))
     (Result:Ok buffer)
@@ -47,6 +47,6 @@
       (let mut index 8)
       (while (> index 0)
         (set index (- index 1))
-        (set value (bit-or (shl value 8) (as u64 (get (& drawn) index)))))
+        (set value (bit-or (shl value 8) (as u64 (get &drawn index)))))
       (Result:Ok value))
     ((Result:Err reason) (Result:Err reason))))

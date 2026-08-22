@@ -27,10 +27,10 @@
   (>= bits 32))
 
 (fn main () -> i32
-  (println (& (architecture)))
+  (println &(architecture))
   (println-i64 pointer-bits)
   (println-bool (wide-enough pointer-bits))
   0)
 
 (test "the selected architecture is the one this was built for"
-  (and (> (len (& (architecture))) 0) (= pointer-bits 64)))
+  (and (> (len &(architecture)) 0) (= pointer-bits 64)))

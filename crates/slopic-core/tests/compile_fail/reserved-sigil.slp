@@ -1,0 +1,7 @@
+; The reader's table has rows nothing expands yet, held for the macros `D-109`
+; deferred rather than left free for whatever claims a character first
+; (`D-149`). A refusal that names what a character is kept for is #22's rule
+; applied to punctuation.
+(fn main () -> i32
+  (let quoted 'answer)
+  0)

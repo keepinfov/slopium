@@ -1,6 +1,10 @@
-(take std:io println-i64)
+(take std:io println)
 
-(fn show ((value &String)) -> unit
-  (println-i64 value))
+; `&String` is this language's own spelling now — a sigil standing before the
+; form it borrows (`D-149`) — so the hint a reader arriving from Rust needs is
+; no longer about the `&`. It is about what follows one: there is no `str` here,
+; and a borrowed text is a borrow of the one string type there is.
+(fn show ((value &str)) -> unit
+  (println value))
 
 (fn main () -> i32 0)

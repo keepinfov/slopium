@@ -14,6 +14,7 @@ pub mod mir_print;
 pub mod opt;
 pub mod package;
 pub mod parser;
+pub mod reader;
 pub mod regalloc;
 pub mod sema;
 pub mod syntax;

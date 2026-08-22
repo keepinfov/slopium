@@ -29,15 +29,15 @@
 
 ; A key type brings its own two functions, and nothing about `i64` had to be
 ; anticipated by the library for this to work.
-(fn hash-i64 ((key (& i64))) -> i64
+(fn hash-i64 ((key &i64)) -> i64
   (clone key))
 
-(fn same-i64 ((a (& i64)) (b (& i64))) -> bool
+(fn same-i64 ((a &i64) (b &i64)) -> bool
   (= (clone a) (clone b)))
 
 ; A hash is free to be negative — nothing in the interface says otherwise — and
 ; the smallest `i64` is where a hash that took an absolute value would trap.
-(fn below-zero ((key (& i64))) -> i64
+(fn below-zero ((key &i64)) -> i64
   (let value (clone key))
   (if (> value 0) (- 0 value) value))
 
@@ -47,12 +47,12 @@
 (fn key-for ((index i64)) -> String
   (let prefix "key-")
   (let digits (from-i64 index))
-  (concat (& prefix) (& digits)))
+  (concat &prefix &digits))
 
-(fn add-up ((carried i64) (key (& String)) (value (& i64))) -> i64
+(fn add-up ((carried i64) (key &String) (value &i64)) -> i64
   (+ carried (clone value)))
 
-(fn longest ((carried i64) (key (& String))) -> i64
+(fn longest ((carried i64) (key &String)) -> i64
   (if (> (len key) carried) (len key) carried))
 
 ; Forty keys into a table that starts with four buckets: three rehashes, and
@@ -61,71 +61,71 @@
   (let mut counts (empty-scores))
   (let mut index 0)
   (while (< index upto)
-    (map-insert (&mut counts) (key-for index) index)
+    (map-insert &mut counts (key-for index) index)
     (set index (+ index 1)))
   counts)
 
 (fn main () -> i32
   (let counts (counted 40))
-  (println-i64 (map-size (& counts)))
-  (println-i64 (map-fold (& counts) 0 add-up))
+  (println-i64 (map-size &counts))
+  (println-i64 (map-fold &counts 0 add-up))
   (let present (key-for 37))
   (let absent (key-for 40))
-  (println-i64 (unwrap-or (map-lookup (& counts) (& present)) (- 0 1)))
-  (println-i64 (unwrap-or (map-lookup (& counts) (& absent)) (- 0 1)))
+  (println-i64 (unwrap-or (map-lookup &counts &present) (- 0 1)))
+  (println-i64 (unwrap-or (map-lookup &counts &absent) (- 0 1)))
 
   ; A key inserted twice keeps the second value and does not grow the map, and
   ; the value it replaced is dropped with the entry that held it.
   (let mut notes (empty-notes))
-  (map-insert (&mut notes) 7 "seven")
-  (map-insert (&mut notes) 8 "eight")
-  (map-insert (&mut notes) 7 "SEVEN")
-  (println-i64 (map-size (& notes)))
+  (map-insert &mut notes 7 "seven")
+  (map-insert &mut notes 8 "eight")
+  (map-insert &mut notes 7 "SEVEN")
+  (println-i64 (map-size &notes))
   (let seven 7)
-  (let found (unwrap-or (map-lookup (& notes) (& seven)) "none"))
-  (println (& found))
-  (map-delete (&mut notes) (& seven))
-  (println-i64 (map-size (& notes)))
-  (if (map-contains (& notes) (& seven)) (println-i64 1) (println-i64 0))
+  (let found (unwrap-or (map-lookup &notes &seven) "none"))
+  (println &found)
+  (map-delete &mut notes &seven)
+  (println-i64 (map-size &notes))
+  (if (map-contains &notes &seven) (println-i64 1) (println-i64 0))
 
   ; A set is a map whose values carry nothing, and `each` is its fold.
   (let mut names (empty-names))
-  (set-add (&mut names) "ann")
-  (set-add (&mut names) "bo")
-  (set-add (&mut names) "ann")
-  (println-i64 (set-count (& names)))
-  (println-i64 (set-each (& names) 0 longest))
+  (set-add &mut names "ann")
+  (set-add &mut names "bo")
+  (set-add &mut names "ann")
+  (println-i64 (set-count &names))
+  (println-i64 (set-each &names 0 longest))
   (let bo "bo")
-  (set-discard (&mut names) (& bo))
-  (if (set-holds (& names) (& bo)) (println-i64 1) (println-i64 0))
-  (println-i64 (set-count (& names)))
+  (set-discard &mut names &bo)
+  (if (set-holds &names &bo) (println-i64 1) (println-i64 0))
+  (println-i64 (set-count &names))
   0)
 
 (test "a key found after three rehashes is the one that was put there"
   (let counts (counted 40))
   (let key (key-for 39))
-  (= 39 (unwrap-or (map-lookup (& counts) (& key)) (- 0 1))))
+  (= 39 (unwrap-or (map-lookup &counts &key) (- 0 1))))
 
 (test "inserting a key twice replaces the value and keeps the size"
   (let mut notes (empty-notes))
-  (map-insert (&mut notes) 1 "first")
-  (map-insert (&mut notes) 1 "second")
+  (map-insert &mut notes 1 "first")
+  (map-insert &mut notes 1 "second")
   (let one 1)
-  (let held (unwrap-or (map-lookup (& notes) (& one)) "none"))
+  (let held (unwrap-or (map-lookup &notes &one) "none"))
   (let want "second")
-  (and (= 1 (map-size (& notes))) (equals (& held) (& want))))
+  (and (= 1 (map-size &notes)) (equals &held &want)))
 
 (test "deleting a key that was never there changes nothing"
   (let mut names (empty-names))
-  (set-add (&mut names) "ann")
+  (set-add &mut names "ann")
   (let missing "zz")
-  (set-discard (&mut names) (& missing))
-  (= 1 (set-count (& names))))
+  (set-discard &mut names &missing)
+  (= 1 (set-count &names)))
 
 (test "a negative hash finds its bucket, and so does the smallest i64"
   (let mut marks (empty-marks))
   (let smallest (- 0 9223372036854775807))
-  (map-insert (&mut marks) (- smallest 1) 111)
-  (map-insert (&mut marks) 7 70)
+  (map-insert &mut marks (- smallest 1) 111)
+  (map-insert &mut marks 7 70)
   (let key (- smallest 1))
-  (and (= 111 (unwrap-or (map-lookup (& marks) (& key)) 0)) (= 2 (map-size (& marks)))))
+  (and (= 111 (unwrap-or (map-lookup &marks &key) 0)) (= 2 (map-size &marks))))

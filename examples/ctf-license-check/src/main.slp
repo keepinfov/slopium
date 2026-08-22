@@ -17,25 +17,25 @@
 (fn reveal-flag () -> i32
   (let flag-name "FLAG")
   (let accepted "license accepted")
-  (println (& accepted))
-  (match (env (& flag-name))
-    ((Option:Some flag) (println (& flag)))
+  (println &accepted)
+  (match (env &flag-name)
+    ((Option:Some flag) (println &flag))
     ((Option:None) ()))
   0)
 
 (fn reject-license () -> i32
   (let rejected "invalid license")
-  (println (& rejected))
+  (println &rejected)
   1)
 
 (fn main () -> i32
   (let banner "=== Slopium License Center ===")
   (let ticket-prompt "ticket id:")
   (let pin-prompt "activation pin:")
-  (println (& banner))
-  (println (& ticket-prompt))
+  (println &banner)
+  (println &ticket-prompt)
   (let ticket (entered))
-  (println (& pin-prompt))
+  (println &pin-prompt)
   (let pin (entered))
   (if (= (mix-ticket ticket) 41904900)
     (if (= (mix-pin pin) 411463) (reveal-flag) (reject-license))

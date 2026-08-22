@@ -22,13 +22,13 @@
 ; block owns `who` from the moment the lambda is written, and its drop helper
 ; is what releases it — which is the whole reason a `Fn` is not `Copy`.
 (fn greeter ((who String)) -> (Fn ((& String)) String)
-  (lambda (who) ((mark (& String))) -> String (concat (& who) mark)))
+  (lambda (who) ((mark &String)) -> String (concat &who mark)))
 
 ; A `lambda` written inside a generic body is monomorphized with it: the
 ; capture is a `T` here and an `i64` and a `String` in the program below.
 (fn keeping-all (T) ((items (List T))) -> (List T)
   (let sentinel 0)
-  (filter items (lambda (sentinel) ((element (& T))) -> bool (= sentinel 0))))
+  (filter items (lambda (sentinel) ((element &T)) -> bool (= sentinel 0))))
 
 ; An empty `Option` of a type nothing else names: `or-else` has to know what it
 ; is falling back to, and a function's result says so at every call rather than
@@ -36,7 +36,7 @@
 (fn nothing () -> (Option String)
   (Option:None))
 
-(fn rank-of ((names (& (List String))) (ranks (& (List i64))) (name (& String))) -> i64
+(fn rank-of ((names &(List String)) (ranks &(List i64)) (name &String)) -> i64
   (let size (len names))
   (let mut index 0)
   (let mut found 0)
@@ -59,10 +59,10 @@
   (let hello (greeter "hello"))
   (let bang "!")
   (let query "?")
-  (let loud (hello (& bang)))
-  (let asked (hello (& query)))
-  (println (& loud))
-  (println (& asked))
+  (let loud (hello &bang))
+  (let asked (hello &query))
+  (println &loud)
+  (println &asked)
 
   ; What v0.7.1 measured and could not write: sorting by a key held in a table
   ; the caller has. The comparator carries the table, so the workaround — the
@@ -72,11 +72,11 @@
   (let words (list "ann" "bo" "cy"))
   (let sorted
     (sort-by words
-      (lambda (names ranks) ((a (& String)) (b (& String))) -> bool
-        (< (rank-of (& names) (& ranks) a) (rank-of (& names) (& ranks) b)))))
+      (lambda (names ranks) ((a &String) (b &String)) -> bool
+        (< (rank-of &names &ranks a) (rank-of &names &ranks b)))))
   (let mut index 0)
-  (while (< index (len (& sorted)))
-    (println (get-ref (& sorted) index))
+  (while (< index (len &sorted))
+    (println (get-ref &sorted index))
     (set index (+ index 1)))
 
   ; A fallback that computes from something nearby, which is the one place in
@@ -87,15 +87,15 @@
     (unwrap-or
       (or-else missing
         (lambda (fallback) () -> (Option String)
-          (Option:Some (concat (& fallback) (& fallback)))))
+          (Option:Some (concat &fallback &fallback))))
       "never"))
-  (println (& answer))
+  (println &answer)
 
   ; The generic body, at two instantiations.
   (let numbers (keeping-all (list 4 5)))
   (let letters (keeping-all (list "x" "y" "z")))
-  (println-i64 (len (& numbers)))
-  (println-i64 (len (& letters)))
+  (println-i64 (len &numbers))
+  (println-i64 (len &letters))
   0)
 
 (test "a closure carries what it captured"
@@ -105,6 +105,6 @@
 (test "a captured value survives the frame it was written in"
   (let mark "!")
   (let hello (greeter "hi"))
-  (let first (hello (& mark)))
-  (let second (hello (& mark)))
-  (equals (& first) (& second)))
+  (let first (hello &mark))
+  (let second (hello &mark))
+  (equals &first &second))

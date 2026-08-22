@@ -1,0 +1,8 @@
+; A sigil stands before the one form it applies to, so a sigil with nothing
+; after it abbreviates nothing (`D-149`).
+(fn borrowed ((value &String)) -> unit ())
+
+(fn main () -> i32
+  (let text "hello")
+  (borrowed &)
+  0)

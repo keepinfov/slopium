@@ -5,8 +5,8 @@
 ; fails (`D-103`).
 (fn main () -> i32
   (let mut values (list "one"))
-  (let displaced (replace (&mut values) 2 "three"))
-  (println (& displaced))
+  (let displaced (replace &mut values 2 "three"))
+  (println &displaced)
   0)
 
 (test "fixture compiles" true)

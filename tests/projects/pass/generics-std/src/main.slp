@@ -24,13 +24,13 @@
   (match result
     ((Result:Ok value) value)
     ((Result:Err error)
-      (println (& error))
+      (println &error)
       0)))
 
 (fn main () -> i32
   (println-i64 (identity 42))
   (let text (identity "generic"))
-  (println (& text))
+  (println &text)
   (let wrapped (wrap "wrapped"))
   (let boxed (Box :value 7))
   (println-i64 (. boxed value))
@@ -43,7 +43,7 @@
   (println-i64 (show-result (forward false)))
   (let mut values (list 9))
   (println-i64
-    (match (pop (&mut values))
+    (match (pop &mut values)
       ((Option:Some value) value)
       ((Option:None) 0)))
   0)

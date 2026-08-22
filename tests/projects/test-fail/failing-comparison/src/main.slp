@@ -23,6 +23,6 @@
   (equal-u64 (as u64 7) (as u64 9)))
 
 (test "text says both sides in quotes"
-  (equal-text (& (from-i64 41)) (& "42")))
+  (equal-text &(from-i64 41) &"42"))
 
 (test "a bare condition still fails with nothing to say" false)

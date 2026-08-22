@@ -19,7 +19,11 @@ command-line protocol is internal and versioned.
 1. The lossless syntax layer retains exact tokens, comments, and whitespace
    for formatting and editor features.
 2. The semantic lexer and balanced S-expression parser produce a structural
-   tree with byte and line/column spans.
+   tree with byte and line/column spans. Between them sits the reader's
+   abbreviation table: a sigil is a token standing for structure nobody typed,
+   and it is rewritten into that structure here, so no later stage learns it
+   was written (`D-149`). The table also holds rows nothing expands, refused by
+   name so that the macros `D-109` deferred still have their characters.
 3. AST construction validates declaration and expression shapes. It is also
    where a declaration's annotations are read and checked: the list between a
    keyword and a name is an annotation, and one table decides which names

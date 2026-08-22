@@ -1130,6 +1130,13 @@ fn module_interface(file: &str, source: &str) -> Result<(String, bool), String> 
             .collect::<Vec<_>>()
             .join("; ")
     })?;
+    let tokens = slopic_core::reader::expand(file, &tokens).map_err(|diagnostics| {
+        diagnostics
+            .into_iter()
+            .map(|diagnostic| diagnostic.message)
+            .collect::<Vec<_>>()
+            .join("; ")
+    })?;
     let forms = slopic_core::parser::parse(file, &tokens).map_err(|diagnostics| {
         diagnostics
             .into_iter()

@@ -1,0 +1,5 @@
+sigil-without-operand.slp:7:13: error[SL0007]: `&` stands before a form, and there is none here
+  |
+ 7 |   (borrowed &)
+  |             ^
+  = help: write the form it applies to, as in `&value`

@@ -10,7 +10,7 @@
     ((Choice::None) 0)
     ((Choice::Some value) value)
     ((Choice::Message text)
-      (println (& text))
+      (println &text)
       1)))
 
 (fn main () -> i32

@@ -8,10 +8,10 @@
 (take std:string equals concat)
 (take std:option Option unwrap-or)
 
-(fn read ((text (& String))) -> f64
+(fn read ((text &String)) -> f64
   (unwrap-or (to-f64 text) (- 0.0 1.0)))
 
-(fn refused ((text (& String))) -> bool
+(fn refused ((text &String)) -> bool
   (match (to-f64 text)
     ((Option:Some _) false)
     ((Option:None) true)))
@@ -35,7 +35,7 @@
   (let mut text "1")
   (let mut index 0)
   (while (< index count)
-    (let next (concat (& text) (& zero)))
+    (let next (concat &text &zero))
     (set text next)
     (set index (+ index 1)))
   text)
@@ -45,15 +45,15 @@
   (let mut text "0.")
   (let mut index 0)
   (while (< index count)
-    (let next (concat (& text) (& zero)))
+    (let next (concat &text &zero))
     (set text next)
     (set index (+ index 1)))
   (let one "1")
-  (concat (& text) (& one)))
+  (concat &text &one))
 
 (fn round-trips ((value f64)) -> bool
   (let text (from-f64 value))
-  (= (read (& text)) value))
+  (= (read &text) value))
 
 (fn main () -> unit
   (println-f64 1.0)
@@ -68,23 +68,23 @@
   (println-f64 (not-a-number))
   (print-f64 2.5)
   (let space " ")
-  (print (& space))
+  (print &space)
   (print-f64 (- 0.0 0.5))
-  (println (& space))
+  (println &space)
   (let text (from-f64 (/ 2.0 7.0)))
-  (println (& text)))
+  (println &text))
 
 (test "a whole number keeps a fractional digit"
   (let one (from-f64 1.0))
   (let hundred (from-f64 100.0))
   (let expected-one "1.0")
   (let expected-hundred "100.0")
-  (and (equals (& one) (& expected-one)) (equals (& hundred) (& expected-hundred))))
+  (and (equals &one &expected-one) (equals &hundred &expected-hundred)))
 
 (test "seventeen digits is the width that comes back"
   (let tenth (from-f64 0.1))
   (let expected "0.10000000000000001")
-  (equals (& tenth) (& expected)))
+  (equals &tenth &expected))
 
 (test "every shape of value survives the trip"
   (and (round-trips 0.1)
@@ -97,7 +97,7 @@
   (let signed (from-f64 (negative-zero)))
   (let expected-plain "0.0")
   (let expected-signed "-0.0")
-  (and (equals (& plain) (& expected-plain)) (equals (& signed) (& expected-signed))))
+  (and (equals &plain &expected-plain) (equals &signed &expected-signed)))
 
 (test "the three values with no digits have names"
   (let up (from-f64 (infinity)))
@@ -106,16 +106,16 @@
   (let expected-up "inf")
   (let expected-down "-inf")
   (let expected-none "nan")
-  (and (equals (& up) (& expected-up))
-       (equals (& down) (& expected-down))
-       (equals (& none) (& expected-none))))
+  (and (equals &up &expected-up)
+       (equals &down &expected-down)
+       (equals &none &expected-none)))
 
 (test "a name reads back as the value it names"
   (let up "inf")
   (let down "-inf")
-  (and (= (read (& up)) (infinity))
+  (and (= (read &up) (infinity))
     (do
-      (let value (read (& down)))
+      (let value (read &down))
       (= value (- 0.0 (infinity))))))
 
 (test "text that is not a number is refused"
@@ -124,24 +124,24 @@
   (let trailing "1.")
   (let leading ".5")
   (let empty "")
-  (and (refused (& doubled))
-       (refused (& letters))
-       (refused (& trailing))
-       (refused (& leading))
-       (refused (& empty))))
+  (and (refused &doubled)
+       (refused &letters)
+       (refused &trailing)
+       (refused &leading)
+       (refused &empty)))
 
 (test "a whole number needs no point to be read"
   (let text "42")
-  (= (read (& text)) 42.0))
+  (= (read &text) 42.0))
 
 (test "past the top of the range is an infinity, and past the bottom a zero"
   (let huge (one-and-zeros 400))
   (let tiny (zeros-then-one 400))
-  (and (= (read (& huge)) (infinity)) (= (read (& tiny)) 0.0)))
+  (and (= (read &huge) (infinity)) (= (read &tiny) 0.0)))
 
 (test "a subnormal is a value like any other"
   (let text (zeros-then-one 322))
-  (let value (read (& text)))
+  (let value (read &text))
   (and (> value 0.0) (round-trips value)))
 
 ; The claim `D-098` rests on, made by a program rather than by prose: this

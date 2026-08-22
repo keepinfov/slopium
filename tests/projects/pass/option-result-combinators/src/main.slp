@@ -29,23 +29,23 @@
 
 (fn shout ((text String)) -> String
   (let mark "!")
-  (concat (& text) (& mark)))
+  (concat &text &mark))
 
-(fn parse ((text (& String))) -> (Result i64 String)
+(fn parse ((text &String)) -> (Result i64 String)
   (match (to-i64 text)
     ((Option:Some value) (Result:Ok value))
     ((Option:None) (Result:Err "not a number"))))
 
 (fn explain ((reason String)) -> String
   (let prefix "error: ")
-  (concat (& prefix) (& reason)))
+  (concat &prefix &reason))
 
 (fn recover ((reason String)) -> (Result i64 String)
-  (Result:Ok (len (& reason))))
+  (Result:Ok (len &reason)))
 
 (fn main () -> i32
   (let text "21")
-  (println-i64 (unwrap-or (option-map (to-i64 (& text)) double) 0))
+  (println-i64 (unwrap-or (option-map (to-i64 &text) double) 0))
   (println-i64 (unwrap-or (option-map (nothing) double) 7))
   (println-i64 (unwrap-or (and-then (Option:Some 8) halve) 0))
   (println-i64 (unwrap-or (and-then (Option:Some 9) halve) (- 0 1)))
@@ -57,17 +57,17 @@
   (let spelled (option-map (Option:Some 42) spell))
   (let loud (option-map spelled shout))
   (let shown (unwrap-or loud "none"))
-  (println (& shown))
+  (println &shown)
 
-  (println-i64 (result-unwrap-or (result-map (parse (& text)) double) 0))
+  (println-i64 (result-unwrap-or (result-map (parse &text) double) 0))
   (let bad "twenty")
-  (println-i64 (result-unwrap-or (result-map (parse (& bad)) double) (- 0 1)))
-  (println-i64 (unwrap-or (ok (parse (& text))) 0))
-  (println-i64 (unwrap-or (ok (parse (& bad))) 5))
-  (println-i64 (result-unwrap-or (result-or-else (parse (& bad)) recover) 0))
-  (match (map-err (parse (& bad)) explain)
+  (println-i64 (result-unwrap-or (result-map (parse &bad) double) (- 0 1)))
+  (println-i64 (unwrap-or (ok (parse &text)) 0))
+  (println-i64 (unwrap-or (ok (parse &bad)) 5))
+  (println-i64 (result-unwrap-or (result-or-else (parse &bad) recover) 0))
+  (match (map-err (parse &bad) explain)
     ((Result:Ok value) (println-i64 value))
-    ((Result:Err reason) (println (& reason))))
+    ((Result:Err reason) (println &reason)))
   0)
 
 (test "map carries a payload through and leaves the empty case empty"
@@ -85,5 +85,5 @@
 (test "a Result maps its value, and recovers from its error"
   (let text "21")
   (let bad "twenty")
-  (and (= 42 (result-unwrap-or (result-map (parse (& text)) double) 0))
-       (= 12 (result-unwrap-or (result-or-else (parse (& bad)) recover) 0))))
+  (and (= 42 (result-unwrap-or (result-map (parse &text) double) 0))
+       (= 12 (result-unwrap-or (result-or-else (parse &bad) recover) 0))))

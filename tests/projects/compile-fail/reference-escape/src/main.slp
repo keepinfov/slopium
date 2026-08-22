@@ -1,4 +1,4 @@
-(fn leaked ((value String)) -> (& String)
-  (& value))
+(fn leaked ((value String)) -> &String
+  &value)
 
 (fn main () -> i32 0)
