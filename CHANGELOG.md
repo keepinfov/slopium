@@ -13,6 +13,46 @@ rather than everything it touched.
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-08-22
+
+### Changed
+- `(& mut T)` is refused by a message that says `&mut` is one token and `& mut`
+  is two, in type position and where a value is borrowed alike, rather than by
+  `invalid type` or by a complaint about a call head that is not a name. A
+  sigil is matched as a whole atom, so the space a reader arriving from Rust
+  writes turns one borrow into a borrow of `mut` standing before the operand,
+  and that is what the help now says.
+
+### Fixed
+- A function whose code does not fit in the megabyte an AArch64 conditional
+  branch reaches is refused with `SL0502` naming the function, instead of
+  reaching the object writer and coming back as an internal error whose advice
+  was to assemble the program by hand. `docs/architecture.md` says what the
+  limit is and that it bounds one function rather than a module or a program.
+- A `slopium build` that fails because the program does not compile says
+  `build failed`, the way `check` does, instead of naming whichever module's
+  object the loop happened to be asking for. That module had compiled fine and
+  was usually one from the standard library, so the last line of the output
+  sent a reader looking for a bug a long way from the file the diagnostic above
+  it named. A build that fails for any other reason still names the module.
+- A type that borrows a borrow is refused where it is written: `&&String` in a
+  parameter, a result or a field is `SL0200` at the type, rather than a
+  declaration that compiles and cannot be called. A generic reaching the same
+  shape — a parameter `&T` whose `T` an earlier argument bound to `&String` —
+  is refused at the argument that asked for it, instead of a mismatch naming a
+  type no value can have.
+- `slopium fmt` keeps the parentheses of `(& mut x)` rather than writing it
+  `&mut x`, which is the exclusive borrow and a different program. `&` is the
+  one sigil another begins with, so it is the one place where an abbreviation
+  written short would fuse with what stands after it.
+- `SL0800` marks a deprecated field at the field in all three places it can be
+  named. A struct pattern used to carry the caret on the local the pattern
+  introduces, which the author is free to call anything, where a construction
+  and a read already pointed at the field itself. A struct pattern that names
+  one field twice is marked the same way, on the keyword rather than on the
+  binding beside it.
+
+
 ## [0.15.0] - 2026-08-22
 
 ### Added
@@ -509,6 +549,7 @@ package manager, the language server and the Neovim plugin as they stood when
 tagging began.
 
 [Unreleased]: https://github.com/keepinfov/slopium/compare/v0.11.0...HEAD
+[0.15.1]: https://github.com/keepinfov/slopium/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/keepinfov/slopium/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/keepinfov/slopium/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/keepinfov/slopium/compare/v0.12.0...v0.13.0
