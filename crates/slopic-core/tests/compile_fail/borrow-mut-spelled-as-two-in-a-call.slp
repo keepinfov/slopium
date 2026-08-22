@@ -1,0 +1,11 @@
+; The same mistake where a value is borrowed rather than where a type is
+; spelled: `(& mut text)` is a call whose head is the borrow `(& mut)`, and it
+; gets the message that names the spelling rather than the one about a head
+; that is not a name.
+(fn take-it ((value &mut String)) -> unit
+  ())
+
+(fn main () -> i32
+  (let text (String "hello"))
+  (take-it (& mut text))
+  0)

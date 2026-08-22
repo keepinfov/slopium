@@ -1,0 +1,5 @@
+borrow-mut-spelled-as-two.slp:5:21: error[SL0100]: `&mut` is one token, and `& mut` is two
+  |
+ 5 | (fn take-it ((value (& mut String))) -> unit
+  |                     ^^^^^^^^^^^^^^
+  = help: an exclusive borrow of `T` is `&mut T`, written without a space; with one, `&` stands before `mut` and borrows it

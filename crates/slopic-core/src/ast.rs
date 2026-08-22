@@ -1499,6 +1499,22 @@ impl AstBuilder<'_> {
         Some(parameters)
     }
 
+    /// The refusal both positions give for `& mut`, so neither drifts.
+    fn refuse_borrow_mut_as_two_tokens(&mut self, span: Span) {
+        self.diagnostics.push(
+            Diagnostic::error(
+                codes::INVALID_SYNTAX,
+                self.file,
+                span,
+                "`&mut` is one token, and `& mut` is two",
+            )
+            .with_help(
+                "an exclusive borrow of `T` is `&mut T`, written without a space; with one, \
+                 `&` stands before `mut` and borrows it",
+            ),
+        );
+    }
+
     fn ty(&mut self, form: &SExpr) -> Option<Type> {
         match &form.kind {
             // A sigil that reached a type on its own lost its operand to the
@@ -1585,6 +1601,16 @@ impl AstBuilder<'_> {
                     mutable: atom(&parts[0]) == Some("&mut"),
                     inner: Box::new(self.ty(&parts[1])?),
                 })
+            }
+            // `&mut` is a sigil only as a whole atom, so a space inside it is
+            // two tokens rather than one: `(& mut String)` reads as the borrow
+            // `(& mut)` with a `String` standing after it, and what reaches
+            // here is a list whose head is a list. A reader arriving from Rust
+            // writes that space, where it is legal and means nothing different,
+            // so the spelling is named rather than left to the catch-all below.
+            SExprKind::List(parts) if parts.first().is_some_and(borrow_mut_as_two_tokens) => {
+                self.refuse_borrow_mut_as_two_tokens(form.span);
+                None
             }
             // Before the generic catch-all, and matching on the head alone
             // rather than on the whole shape: `D-088` wrote `(Fn i64 i64)`
@@ -1772,6 +1798,13 @@ impl AstBuilder<'_> {
                     return Some(applied);
                 }
                 let Some(head) = items.first().and_then(atom) else {
+                    // The same mistake as in type position, and the same
+                    // message: `(& mut text)` is a borrow of `mut` standing
+                    // before `text`, so what a call finds at its head is a list.
+                    if items.first().is_some_and(borrow_mut_as_two_tokens) {
+                        self.refuse_borrow_mut_as_two_tokens(form.span);
+                        return None;
+                    }
                     self.error(form.span, "call head must be a name");
                     return None;
                 };
@@ -2256,6 +2289,20 @@ impl AstBuilder<'_> {
             span,
             message,
         ));
+    }
+}
+
+/// `(& mut T)` — the two tokens somebody writes for `&mut` with a space in it.
+///
+/// The reader expands a sigil around the form that follows it, so the space
+/// makes `(& mut)` a borrow of `mut`, and the head of the list holding it is a
+/// list rather than the atom every other type spelling has there.
+fn borrow_mut_as_two_tokens(head: &SExpr) -> bool {
+    match &head.kind {
+        SExprKind::List(parts) => {
+            parts.len() == 2 && atom(&parts[0]) == Some("&") && atom(&parts[1]) == Some("mut")
+        }
+        _ => false,
     }
 }
 

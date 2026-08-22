@@ -361,11 +361,32 @@ fn abbreviated(entries: &[Entry]) -> Option<(String, &Entry)> {
         return None;
     };
     let sigil = reader::sigil_for_head(text)?;
+    let prefix = sigil.prefix();
     let ordinary = !head.spelled_out
         && head.trailing.is_empty()
         && operand.trailing.is_empty()
-        && !matches!(operand.item, Item::Comment(_));
-    ordinary.then(|| (sigil.prefix(), operand))
+        && !matches!(operand.item, Item::Comment(_))
+        && !fuses_into_another_sigil(&prefix, operand);
+    ordinary.then_some((prefix, operand))
+}
+
+/// A short spelling that would lex as a longer sigil rather than as the two
+/// tokens it stands for.
+///
+/// `(& mut)` is a borrow of `mut`, and written short it is `&mut`, which is the
+/// exclusive borrow — a different form. `&` is the one sigil another begins
+/// with, so it is the one case, and the parentheses are what keeps the two
+/// apart.
+fn fuses_into_another_sigil(prefix: &str, operand: &Entry) -> bool {
+    let Item::Atom(text) = &operand.item else {
+        return false;
+    };
+    // A sigil of more than one character is written with a space after it, and
+    // nothing fuses across one.
+    if prefix.ends_with(' ') {
+        return false;
+    }
+    reader::pieces(&format!("{prefix}{text}")) != [prefix, text.as_str()]
 }
 
 /// Folds each sigil into the form it stands before, so that the layout has one
@@ -1152,6 +1173,19 @@ mod tests {
             shape("(fn main () -> i32 (f (& x)))\n"),
             shape("(fn main () -> i32 (f &x))\n")
         );
+    }
+
+    /// `&` is the one sigil another begins with, so it is the one place where
+    /// writing an abbreviation short would say something else: `(& mut x)` is a
+    /// borrow of `mut` standing before `x`, and `&mut x` is the exclusive
+    /// borrow. The parentheses are what keeps the two apart.
+    #[test]
+    fn a_borrow_of_mut_keeps_its_parentheses() {
+        let source = "(fn main () -> i32 (f (& mut x)))\n";
+        let formatted = format_source("borrow-of-mut.slp", source, &FormatOptions::default())
+            .expect("the source parses");
+        assert!(formatted.contains("((& mut) x)"), "{formatted}");
+        assert_eq!(shape(source), shape(&formatted));
     }
 
     /// Left-trim every line: a different source, the same program, and no
