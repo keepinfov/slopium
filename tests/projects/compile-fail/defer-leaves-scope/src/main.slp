@@ -13,6 +13,6 @@
 
 (fn breaks-from-a-defer () -> unit
   (loop
-    (defer (break))))
+    (defer (break|)
 
 (fn main () -> i32 0)

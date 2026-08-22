@@ -1,0 +1,11 @@
+; A `)` lost inside a declaration used to swallow every declaration after it and
+; surface as one `SL0004` at the end of the file, pointing hundreds of lines up.
+; A `|)` forces the depth to zero, so the loss cannot leave the declaration it
+; was written in: what is reported is this `if`, and `second` and `main` below
+; are read as the declarations they are (`D-151`).
+(fn first ((value i64)) -> i64
+  (if (> value 0 1 0|)
+
+(fn second () -> i64 2)
+
+(fn main () -> i32 0)

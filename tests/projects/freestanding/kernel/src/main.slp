@@ -69,13 +69,13 @@
 (fn vga-write ((index u64) (byte u8)) -> unit
   (unsafe
     (let cells (as (Ptr u16) (vga-base)))
-    (volatile-write (ptr-offset cells index) (vga-cell byte))))
+    (volatile-write (ptr-offset cells index) (vga-cell byte|)
 
 (fn vga-read ((index u64)) -> u8
   (unsafe
     (let cells (as (Ptr u16) (vga-base)))
     (let cell (volatile-read (ptr-offset cells index)))
-    (as u8 (bit-and cell 0x00FF))))
+    (as u8 (bit-and cell 0x00FF|)
 
 (fn main () -> i64
   (serial-init)

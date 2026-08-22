@@ -34,7 +34,7 @@
   (let code (last-error))
   (if (and (= code 0) (= filled count))
     (Result:Ok buffer)
-    (Result:Err (Error :code code))))
+    (Result:Err (Error :code code|)
 
 ; Eight bytes shifted together. A `u64` and not an `i64`, because every bit
 ; pattern here is a value and half of them are not a positive number — and it
@@ -49,4 +49,4 @@
         (set index (- index 1))
         (set value (bit-or (shl value 8) (as u64 (get &drawn index)))))
       (Result:Ok value))
-    ((Result:Err reason) (Result:Err reason))))
+    ((Result:Err reason) (Result:Err reason|)

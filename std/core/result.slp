@@ -17,7 +17,7 @@
 
 (enum Result (T E)
   (Ok ((value T)))
-  (Err ((error E))))
+  (Err ((error E|)
 
 ; Asking without taking, the pair `core:option` has for the same reason
 ; (`D-099`). Testing a `Result` used to cost the `Result`, which made checking
@@ -35,17 +35,17 @@
 (fn map (T E U) ((value (Result T E)) (f (Fn (T) U))) -> (Result U E)
   (match value
     ((Result:Ok inner) (Result:Ok (f inner)))
-    ((Result:Err reason) (Result:Err reason))))
+    ((Result:Err reason) (Result:Err reason|)
 
 (fn map-err (T E F) ((value (Result T E)) (f (Fn (E) F))) -> (Result T F)
   (match value
     ((Result:Ok inner) (Result:Ok inner))
-    ((Result:Err reason) (Result:Err (f reason)))))
+    ((Result:Err reason) (Result:Err (f reason|)
 
 (fn and-then (T E U) ((value (Result T E)) (f (Fn (T) (Result U E)))) -> (Result U E)
   (match value
     ((Result:Ok inner) (f inner))
-    ((Result:Err reason) (Result:Err reason))))
+    ((Result:Err reason) (Result:Err reason|)
 
 (fn unwrap-or (T E) ((value (Result T E)) (fallback T)) -> T
   (match value
@@ -57,11 +57,11 @@
 (fn or-else (T E) ((value (Result T E)) (f (Fn (E) (Result T E)))) -> (Result T E)
   (match value
     ((Result:Ok inner) (Result:Ok inner))
-    ((Result:Err reason) (f reason))))
+    ((Result:Err reason) (f reason|)
 
 ; Forget why it failed. The bridge to `core:option`, and the only place in the
 ; library where one of these two modules names the other.
 (fn ok (T E) ((value (Result T E))) -> (Option T)
   (match value
     ((Result:Ok inner) (Option:Some inner))
-    ((Result:Err _) (Option:None))))
+    ((Result:Err _) (Option:None|)

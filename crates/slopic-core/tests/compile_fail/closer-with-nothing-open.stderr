@@ -1,0 +1,5 @@
+closer-with-nothing-open.slp:4:1: error[SL0003]: unexpected `|)`
+  |
+ 4 | |)
+  | ^^
+  = help: `|)` ends a declaration by closing every list it left open, and there is none open here

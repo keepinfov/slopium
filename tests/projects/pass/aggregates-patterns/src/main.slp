@@ -4,12 +4,12 @@
 
 (enum Inner
   None
-  (Value ((number i64))))
+  (Value ((number i64|)
 
 (enum Outer
   Empty
   (Wrap ((inner Inner)))
-  (Pointed ((point Point))))
+  (Pointed ((point Point|)
 
 (fn score ((value Outer)) -> i64
   (match value

@@ -34,7 +34,7 @@
 (fn parse ((text &String)) -> (Result i64 String)
   (match (to-i64 text)
     ((Option:Some value) (Result:Ok value))
-    ((Option:None) (Result:Err "not a number"))))
+    ((Option:None) (Result:Err "not a number"|)
 
 (fn explain ((reason String)) -> String
   (let prefix "error: ")
@@ -72,18 +72,18 @@
 
 (test "map carries a payload through and leaves the empty case empty"
   (and (= 42 (unwrap-or (option-map (Option:Some 21) double) 0))
-       (= 7 (unwrap-or (option-map (nothing) double) 7))))
+       (= 7 (unwrap-or (option-map (nothing) double) 7|)
 
 (test "and-then does not nest"
   (and (= 4 (unwrap-or (and-then (Option:Some 8) halve) 0))
-       (= 0 (unwrap-or (and-then (Option:Some 9) halve) 0))))
+       (= 0 (unwrap-or (and-then (Option:Some 9) halve) 0|)
 
 (test "or-else runs only when there is nothing"
   (and (= 99 (unwrap-or (or-else (nothing) fallback) 0))
-       (= 1 (unwrap-or (or-else (Option:Some 1) fallback) 0))))
+       (= 1 (unwrap-or (or-else (Option:Some 1) fallback) 0|)
 
 (test "a Result maps its value, and recovers from its error"
   (let text "21")
   (let bad "twenty")
   (and (= 42 (result-unwrap-or (result-map (parse &text) double) 0))
-       (= 12 (result-unwrap-or (result-or-else (parse &bad) recover) 0))))
+       (= 12 (result-unwrap-or (result-or-else (parse &bad) recover) 0|)

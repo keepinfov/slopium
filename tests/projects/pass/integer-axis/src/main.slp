@@ -12,7 +12,7 @@
 (take std:option Option)
 
 (fn division-identity ((a u64) (b u64)) -> bool
-  (= a (+ (* (/ a b) b) (% a b))))
+  (= a (+ (* (/ a b) b) (% a b|)
 
 ; The whole of the canonical-word invariant in one function: a value goes out
 ; to a narrow type and comes back, and what returns is what the width can hold.
@@ -50,7 +50,7 @@
   (and (division-identity (big) 3)
        (division-identity (big) 10)
        (division-identity 0x8000_0000_0000_0000 7)
-       (division-identity 1 (big))))
+       (division-identity 1 (big|)
 
 ; The claim `D-107` rests on: a conversion is the target's width applied to the
 ; source's extension, so a value that already fits comes back unchanged and one
@@ -68,18 +68,18 @@
        (= 128 (as i64 (shl (as u8 1) 7)))
        (= 0 (as i64 (shl (as u8 128) 1)))
        (= 65535 (as i64 (bit-not (as u16 0))))
-       (= 32767 (as i64 (bit-not (as i16 0x8000))))))
+       (= 32767 (as i64 (bit-not (as i16 0x8000|)
 
 (test "a right shift is arithmetic when signed and logical when unsigned"
   (and (= -1 (shr -1 63))
        (= 1 (as i64 (shr (big) 63)))
-       (= 15 (as i64 (shifted (big) 60)))))
+       (= 15 (as i64 (shifted (big) 60|)
 
 (test "unsigned comparison reads the top bit as a magnitude"
   (and (> (big) 1)
        (< (as u64 1) (big))
        (>= (big) (big))
-       (not (< (big) 0x8000_0000_0000_0000))))
+       (not (< (big) 0x8000_0000_0000_0000|)
 
 (test "text round-trips through the unsigned width"
   (let text (from-u64 (big)))
@@ -87,7 +87,7 @@
   (and (equals &text &expected)
     (match (to-u64 &text)
       ((Option:Some value) (= value (big)))
-      ((Option:None) false))))
+      ((Option:None) false|)
 
 ; Hexadecimal is the bit pattern, so the identity is against the shifts rather
 ; than against a table: every four bits are one glyph, and the width is a floor

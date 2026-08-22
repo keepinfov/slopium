@@ -55,7 +55,7 @@
         ((Option:None) 0)))
     (match (pop &mut values)
       ((Option:Some value) false)
-      ((Option:None) (= first 1)))))
+      ((Option:None) (= first 1|)
 
 (test "array and slice lengths"
   (do

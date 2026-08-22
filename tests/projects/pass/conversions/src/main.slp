@@ -34,7 +34,7 @@
   0)
 
 (test "a widened i32 keeps its sign"
-  (and (= (as i64 (small)) 42) (= (as i64 (negative)) (- 0 7))))
+  (and (= (as i64 (small)) 42) (= (as i64 (negative)) (- 0 7|)
 
 (test "a clone through a borrow is an owned copy"
   (do

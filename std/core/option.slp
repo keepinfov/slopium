@@ -15,7 +15,7 @@
 
 (enum Option (T)
   None
-  (Some ((value T))))
+  (Some ((value T|)
 
 ; Asking without taking. The `_` matters: a payload bound through a borrow is a
 ; `(& T)` and binding one here would say this function cares what is inside,
@@ -33,13 +33,13 @@
 (fn map (T U) ((value (Option T)) (f (Fn (T) U))) -> (Option U)
   (match value
     ((Option:Some inner) (Option:Some (f inner)))
-    ((Option:None) (Option:None))))
+    ((Option:None) (Option:None|)
 
 ; `f` returns an `Option` of its own, so nesting does not accumulate.
 (fn and-then (T U) ((value (Option T)) (f (Fn (T) (Option U)))) -> (Option U)
   (match value
     ((Option:Some inner) (f inner))
-    ((Option:None) (Option:None))))
+    ((Option:None) (Option:None|)
 
 ; The fallback is evaluated by the caller either way. `or-else` is the lazy
 ; form, and the pair is deliberate rather than an oversight. Until `D-102` it
@@ -55,4 +55,4 @@
 (fn or-else (T) ((value (Option T)) (f (Fn () (Option T)))) -> (Option T)
   (match value
     ((Option:Some inner) (Option:Some inner))
-    ((Option:None) (f))))
+    ((Option:None) (f|)

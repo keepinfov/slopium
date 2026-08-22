@@ -2,4 +2,4 @@
 
 (enum Result (T E)
   (Ok ((value T)))
-  (Err ((error E))))
+  (Err ((error E|)

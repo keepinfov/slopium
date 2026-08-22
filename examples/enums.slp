@@ -3,7 +3,7 @@
 (enum Choice
   None
   (Some ((value i64)))
-  (Message ((text String))))
+  (Message ((text String|)
 
 (fn score ((choice Choice)) -> i64
   (match choice

@@ -74,7 +74,7 @@
         (set found index)
         (break))
       (set index (+ index 1)))
-    (if (< found 0) (Option:None) (Option:Some found))))
+    (if (< found 0) (Option:None) (Option:Some found|)
 
 (fn contains ((text &String) (needle &String)) -> bool
   (match (find text needle)
@@ -165,7 +165,7 @@
       (let sign "-")
       (let text (digits-of magnitude))
       (concat &sign &text))
-    (digits-of (as u64 value))))
+    (digits-of (as u64 value|)
 
 ; Hexadecimal, which is what a mask, an address and a device register are read
 ; as. The glyphs are uppercase because that is how this language writes a
@@ -232,7 +232,7 @@
       (if negative
         (Option:Some total)
         (if (< total smallest) (Option:None) (Option:Some (- total))))
-      (Option:None))))
+      (Option:None|)
 
 ; The unsigned counterpart of `to-i64`. No sign is accepted — a `u64` has none
 ; — and the refusal comes before the multiply, because arithmetic traps
@@ -256,4 +256,4 @@
         (break))
       (set total (+ (* total 10) (as u64 digit)))
       (set index (+ index 1)))
-    (if ok (Option:Some total) (Option:None))))
+    (if ok (Option:Some total) (Option:None|)

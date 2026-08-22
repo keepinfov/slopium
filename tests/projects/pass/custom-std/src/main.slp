@@ -30,7 +30,7 @@
     (let mut values (list 1))
     (match (pop &mut values)
       ((Option:Some value) (= value 1))
-      ((Option:None) false))))
+      ((Option:None) false|)
 
 (test "path std result language items"
   (match (forward)

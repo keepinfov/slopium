@@ -23,6 +23,8 @@ pub enum Expands {
     /// A list opened where the sigil is written and closed where the form
     /// holding it closes: `(a $ b c)` for `(a (b c))`.
     Rest,
+    /// The `)` of every list still open, back to the top level.
+    Everything,
     /// Nothing yet. The row is held so that what it is for cannot be beaten to
     /// the character by something else.
     Nothing,
@@ -58,6 +60,11 @@ pub const SIGILS: &[Sigil] = &[
         text: "$",
         expansion: Expands::Rest,
         means: "the rest of a form, nested",
+    },
+    Sigil {
+        text: "|)",
+        expansion: Expands::Everything,
+        means: "the close of every list a declaration left open",
     },
     Sigil {
         text: "'",
@@ -186,6 +193,7 @@ pub fn expand(file: &str, tokens: &[Token]) -> CompileResult<Vec<Token>> {
         tokens: split,
         cursor: 0,
         depth: 0,
+        closing: None,
         diagnostics: Vec::new(),
     };
     while reader.cursor < reader.tokens.len() {
@@ -204,6 +212,8 @@ struct Reader<'a> {
     out: Vec<Token>,
     cursor: usize,
     depth: usize,
+    /// The span of a `|)` being unwound, held until depth reaches zero.
+    closing: Option<Span>,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -286,6 +296,24 @@ impl Reader<'_> {
                 self.cursor += 1;
                 0
             }
+            // `|)` is read by the loop over the list it closes, so reaching one
+            // here means there is no list open for it to close.
+            (_, Some(sigil)) if sigil.expansion == Expands::Everything => {
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        codes::UNEXPECTED_CLOSE,
+                        self.file,
+                        token.span,
+                        "unexpected `|)`",
+                    )
+                    .with_help(
+                        "`|)` ends a declaration by closing every list it left open, and there \
+                         is none open here",
+                    ),
+                );
+                self.cursor += 1;
+                0
+            }
             // `$` nests what follows into the list around it, so it is read by
             // the loop over that list and never as an element of its own.
             // Reaching one here means there is no list for it to nest in.
@@ -319,8 +347,14 @@ impl Reader<'_> {
                 let mut first = true;
                 let mut nested = 0usize;
                 while self.cursor < self.tokens.len()
+                    && self.closing.is_none()
                     && !matches!(self.tokens[self.cursor].kind, TokenKind::RightParen)
                 {
+                    if self.closes_everything() {
+                        self.closing = Some(self.tokens[self.cursor].span);
+                        self.cursor += 1;
+                        break;
+                    }
                     if self.nests_here() {
                         if self.nest(first) {
                             nested += 1;
@@ -347,7 +381,17 @@ impl Reader<'_> {
                         },
                     });
                 }
-                if let Some(close) = self.tokens.get(self.cursor) {
+                // A `|)` closes this list too, and every one outside it, with
+                // a `)` whose span is the closer that was written.
+                if let Some(span) = self.closing {
+                    self.out.push(Token {
+                        kind: TokenKind::RightParen,
+                        span,
+                    });
+                    if self.depth == 0 {
+                        self.closing = None;
+                    }
+                } else if let Some(close) = self.tokens.get(self.cursor) {
                     self.out.push(close.clone());
                     self.cursor += 1;
                 }
@@ -358,6 +402,16 @@ impl Reader<'_> {
                 self.cursor += 1;
                 0
             }
+        }
+    }
+
+    /// Whether the token under the cursor is the row that closes everything.
+    fn closes_everything(&self) -> bool {
+        match &self.tokens[self.cursor].kind {
+            TokenKind::Atom(text) => {
+                sigil_of(text).is_some_and(|sigil| sigil.expansion == Expands::Everything)
+            }
+            _ => false,
         }
     }
 
@@ -645,6 +699,48 @@ mod tests {
         let options = crate::CompileOptions::default();
         let long = crate::compile_to_object("same.slp", written, &options).expect("it compiles");
         let short = crate::compile_to_object("same.slp", nested, &options).expect("it compiles");
+        assert_eq!(long, short);
+    }
+
+    #[test]
+    fn one_token_closes_every_list_a_declaration_left_open() {
+        assert_eq!(read("(a (b (c d|)"), "( a ( b ( c d ) ) )");
+        assert_eq!(read("(a b|)"), "( a b )");
+        assert_eq!(read("(a (b|)\n(c d)"), "( a ( b ) ) ( c d )");
+        // It closes what `$` opened as well, because those are lists too.
+        assert_eq!(read("(a $ b $ c d|)"), "( a ( b ( c d ) ) )");
+    }
+
+    #[test]
+    fn a_closer_with_nothing_open_is_refused() {
+        let tokens = lex("test.slp", "(f x)\n|)\n").unwrap();
+        let errors = expand("test.slp", &tokens).unwrap_err();
+        assert_eq!(errors[0].code, codes::UNEXPECTED_CLOSE);
+        assert!(errors[0].message.contains("|)"));
+    }
+
+    #[test]
+    fn a_bare_pipe_is_an_ordinary_name() {
+        assert_eq!(read("(f | x)"), "( f | x )");
+    }
+
+    /// The closer is a spelling of the parens it stands for, so the object is
+    /// the same file — the assertion `&` and `$` each get.
+    #[test]
+    fn closing_with_one_token_emits_the_same_object() {
+        let written = concat!(
+            "(fn describe ((value i64)) -> i64\n",
+            "  (if (> value 0) (if (> value 10) 2 1) 0))\n",
+            "(fn main () -> i32 (as i32 (describe 42)))\n",
+        );
+        let closed = concat!(
+            "(fn describe ((value i64)) -> i64\n",
+            "  (if (> value 0) (if (> value 10) 2 1) 0|)\n",
+            "(fn main () -> i32 (as i32 (describe 42|)\n",
+        );
+        let options = crate::CompileOptions::default();
+        let long = crate::compile_to_object("same.slp", written, &options).expect("it compiles");
+        let short = crate::compile_to_object("same.slp", closed, &options).expect("it compiles");
         assert_eq!(long, short);
     }
 

@@ -1,0 +1,35 @@
+; `|)` closes every list still open, back to the top level (`D-151`). A
+; declaration unwinds all at once at its end, and the parens that do it carry
+; nothing a reader can check without counting them. `slopium fmt` writes the
+; closer wherever that run is longer than three, which is why every declaration
+; below ends in one.
+
+(take std:io println println-i64)
+(take std:string concat from-i64)
+
+(enum Shape
+  Nothing
+  (Dot ((at i64)))
+  (Tag ((name String|)
+
+(fn depth-of ((shape &Shape)) -> i64
+  (match shape
+    ((Shape:Nothing) 0)
+    ((Shape:Dot at) (clone at))
+    ((Shape:Tag name) (len name|)
+
+; A stack of `if` inside a `match` arm inside a `fn`: the shape the closer was
+; measured on.
+(fn bucket ((value i64)) -> String
+  (match (Shape:Dot value)
+    ((Shape:Dot at) (if (> at 100) "large" (if (> at 10) "middle" "small")))
+    ((Shape:Nothing) "none")
+    ((Shape:Tag name) (clone name|)
+
+(fn main () -> i32
+  (println-i64 (depth-of &(Shape:Dot 7)))
+  (println-i64 (depth-of &(Shape:Tag "four")))
+  (println &(bucket 5))
+  (println &(bucket 50))
+  (println &(bucket 500))
+  0)

@@ -32,12 +32,12 @@
 (fn read ((path &String)) -> (Result String Error)
   (let contents (read-raw path (len path)))
   (let code (last-error))
-  (if (= code 0) (Result:Ok contents) (Result:Err (Error :code code))))
+  (if (= code 0) (Result:Ok contents) (Result:Err (Error :code code|)
 
 (fn write ((path &String) (contents &String)) -> (Result i64 Error)
   (let written (write-raw path (len path) contents (len contents)))
   (let code (last-error))
-  (if (= code 0) (Result:Ok written) (Result:Err (Error :code code))))
+  (if (= code 0) (Result:Ok written) (Result:Err (Error :code code|)
 
 ; Not a `Result`: "there is no such file" is the answer, not a failure.
 (fn exists ((path &String)) -> bool
@@ -48,4 +48,4 @@
 (fn delete ((path &String)) -> (Result i64 Error)
   (let status (delete-raw path (len path)))
   (let code (last-error))
-  (if (= code 0) (Result:Ok status) (Result:Err (Error :code code))))
+  (if (= code 0) (Result:Ok status) (Result:Err (Error :code code|)

@@ -1,0 +1,4 @@
+; `|)` ends a declaration by closing every list it left open, and it is written
+; where the pile would be. At the top level there is no pile (`D-151`).
+(fn main () -> i32 0)
+|)

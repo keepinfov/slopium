@@ -103,7 +103,7 @@
   (let code (last-error))
   (if (= code 0)
     (Result:Ok (Child :pid pid :output output))
-    (Result:Err (Error :code code))))
+    (Result:Err (Error :code code|)
 
 ; The child writes where this program writes. What a build tool wants, and what
 ; leaves nothing to close.
@@ -118,7 +118,7 @@
 
 (fn pid-of ((child &Child)) -> i64
   (match child
-    ((Child :pid pid :output _) (clone pid))))
+    ((Child :pid pid :output _) (clone pid|)
 
 ; The exit status, or `128` plus the signal for a child something killed, which
 ; is what a shell reports. A program that could not be started at all is `127`,
@@ -127,14 +127,14 @@
 (fn wait ((child &Child)) -> (Result i64 Error)
   (let status (wait-raw (pid-of child)))
   (let code (last-error))
-  (if (= code 0) (Result:Ok status) (Result:Err (Error :code code))))
+  (if (= code 0) (Result:Ok status) (Result:Err (Error :code code|)
 
 (fn read-output ((child &Child)) -> (Result String Error)
   (match child
     ((Child :pid _ :output output)
       (let text (read-raw (clone output)))
       (let code (last-error))
-      (if (= code 0) (Result:Ok text) (Result:Err (Error :code code))))))
+      (if (= code 0) (Result:Ok text) (Result:Err (Error :code code|)
 
 ; Written as a `defer` beside the call that opened the descriptor. It answers
 ; nothing: a close that fails has already lost the descriptor, and there is
@@ -143,4 +143,4 @@
   (match child
     ((Child :pid _ :output output)
       (let discarded (close-raw (clone output)))
-      (set output -1))))
+      (set output -1|)

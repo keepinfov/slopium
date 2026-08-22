@@ -14,7 +14,7 @@
 (fn text-or ((value (Option String)) (fallback &String)) -> String
   (match value
     ((Option:Some found) found)
-    ((Option:None) (clone fallback))))
+    ((Option:None) (clone fallback|)
 
 (fn main () -> i32
   (let missing "missing")

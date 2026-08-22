@@ -13,7 +13,7 @@
 (enum Shape
   Nothing
   (Dot ((at Point)))
-  (Tag ((name String))))
+  (Tag ((name String|)
 
 ; The case that used to be a silent miscompile: a generic body reading a
 ; borrowed element, instantiated once at a scalar and once at a `String`. Asking
@@ -38,7 +38,7 @@
       (let gap "@")
       (let head (concat label &gap))
       (concat &head &number))
-    ((Shape:Tag name) (clone name))))
+    ((Shape:Tag name) (clone name|)
 
 (fn none-i64 () -> (Option i64)
   (Option:None))
@@ -87,12 +87,12 @@
 
 (test "matching through a borrow leaves the value alone"
   (let value (Option:Some 9))
-  (and (= 9 (payload-or &value 0)) (= 9 (payload-or &value 0))))
+  (and (= 9 (payload-or &value 0)) (= 9 (payload-or &value 0|)
 
 (test "a question about an option does not consume it"
   (let value (Option:Some 1))
   (let missing (none-i64))
-  (and (is-some &value) (is-none &missing) (= 1 (unwrap-or value 0))))
+  (and (is-some &value) (is-none &missing) (= 1 (unwrap-or value 0|)
 
 (test "a question about a result does not consume it"
   (let good (ok-i64))
