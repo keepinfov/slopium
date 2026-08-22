@@ -1,0 +1,12 @@
+; A struct pattern names each field once. The second `:count` is the mistake
+; and the caret is on it, rather than on the local it introduces: what is
+; repeated is the field, and the binding beside it could have been called
+; anything at all.
+(struct Holder ((count i64)))
+
+(fn read-it ((holder Holder)) -> i64
+  (match holder
+    ((Holder :count first :count second) 0)))
+
+(fn main () -> i32
+  0)
