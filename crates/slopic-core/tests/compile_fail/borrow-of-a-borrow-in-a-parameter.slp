@@ -1,0 +1,9 @@
+; A borrow of a borrow says nothing the borrow did not say already, and the
+; expression `(& (& x))` has always been refused for it. The *type* used to be
+; accepted, so the declaration compiled and every call to it was refused
+; instead — a message about the call, for a mistake in the signature.
+(fn holds ((value &&String)) -> i64
+  0)
+
+(fn main () -> i32
+  0)

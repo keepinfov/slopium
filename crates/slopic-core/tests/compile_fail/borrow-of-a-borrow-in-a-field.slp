@@ -1,0 +1,6 @@
+; A field may not hold a borrow at all, and this is refused one step before
+; that: the type is not a type, whatever it is written in.
+(struct Holder ((slot &&String)))
+
+(fn main () -> i32
+  0)

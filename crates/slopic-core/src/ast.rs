@@ -3,6 +3,26 @@ use crate::parser::{SExpr, SExprKind};
 use serde::Serialize;
 use std::fmt;
 
+/// The refusal a borrow of a borrow gets, wherever it is met.
+///
+/// `sema` has refused the *expression* `(& (& x))` since borrows existed, and
+/// the *type* `&&T` reached the signature table intact, so a declaration
+/// nothing could call compiled. Both sides say this now, from one place, so
+/// the two cannot come to disagree about a rule they both apply.
+pub(crate) fn cannot_borrow_a_borrow(
+    file: impl Into<String>,
+    span: Span,
+    inner: &Type,
+) -> Diagnostic {
+    Diagnostic::error(
+        codes::NAME_OR_TYPE,
+        file,
+        span,
+        format!("`{inner}` cannot be borrowed"),
+    )
+    .with_help("a borrow of a borrow says nothing the borrow did not say already")
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize)]
 pub enum Type {
     Unit,
@@ -1597,9 +1617,17 @@ impl AstBuilder<'_> {
             SExprKind::List(parts)
                 if parts.len() == 2 && matches!(atom(&parts[0]), Some("&" | "&mut")) =>
             {
+                let inner = self.ty(&parts[1])?;
+                // Refused where it is written, so the caret is on the mistake
+                // rather than on every call to the declaration it is part of.
+                if matches!(inner, Type::Ref { .. }) {
+                    self.diagnostics
+                        .push(cannot_borrow_a_borrow(self.file, form.span, &inner));
+                    return None;
+                }
                 Some(Type::Ref {
                     mutable: atom(&parts[0]) == Some("&mut"),
-                    inner: Box::new(self.ty(&parts[1])?),
+                    inner: Box::new(inner),
                 })
             }
             // `&mut` is a sigil only as a whole atom, so a space inside it is

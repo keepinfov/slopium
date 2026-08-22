@@ -165,6 +165,7 @@ of what was believed at the time is the part worth keeping.
 - [D-150 — `$` nests the rest of the form it is written in](#d-150---nests-the-rest-of-the-form-it-is-written-in)
 - [D-151 — one token closes every list a declaration left open](#d-151--one-token-closes-every-list-a-declaration-left-open)
 - [D-152 — `deprecated` applies to a struct field, and warns wherever the field is named](#d-152--deprecated-applies-to-a-struct-field-and-warns-wherever-the-field-is-named)
+- [D-153 — a borrow of a borrow is refused where it is written and where it is instantiated](#d-153--a-borrow-of-a-borrow-is-refused-where-it-is-written-and-where-it-is-instantiated)
 
 ## D-001 — a native compiler, without LLVM
 
@@ -3544,3 +3545,38 @@ nothing a caller could act on. **`target` on a field**: a record whose fields
 differ per target is a layout that differs per target, which is a much larger
 question than an annotation slot. **`inline`**: meaningless on a field. Each of
 the three is refused by the table `D-122` already had, and by name.
+
+## D-153 — a borrow of a borrow is refused where it is written and where it is instantiated
+
+Status: approved · 2026-08-22
+
+`sema` has refused the expression `(& (& x))` for as long as borrows have
+existed, with a message saying that a borrow of a borrow says nothing the
+borrow did not say already. The *type* was never asked the question: `ast::ty`
+built `&&String` without complaint, so `(fn holds ((value &&String)) -> i64 0)`
+compiled and every call to it was refused instead — a diagnostic about the call
+for a mistake in the signature, naming a value that looks fine to whoever wrote
+it. The rule existed and was applied at one of the two places it belongs.
+
+**It is applied at two places rather than one, and they are different
+questions.** Where a type is spelled, `ast::ty` refuses it, because that is
+where the caret belongs: the mistake is four characters long and the reader is
+looking at them. Where an instance is decided, the generic call refuses it,
+because that shape is one nobody wrote — `(fn pair (T) ((first T) (second &T))
+...)` with `T` bound to `&String` by the first argument asks its second for
+`&&String`, and before this the mismatch named that type as though a reader
+could go and produce one. Neither site subsumes the other, and the message is
+built by one function so that the two cannot come to disagree about a rule they
+both apply.
+
+**`SL0200` is the code either way**, which is why this does not move anything
+`#23` will freeze. The refusal at the call also suppresses the mismatch it
+replaces: reporting both would say the argument has the wrong type and then say
+that the type it was measured against is not a type, and the second sentence is
+the only one worth reading.
+
+**It was cheap before the sigils and cheaper to fall into after them.**
+`(& (& String))` is a shape nobody reaches for; `&&String` is what a hand
+writes when it means "a borrow of the thing that was already borrowed", which
+is a thought a reader arriving from a language with references has had before.
+`D-149` did not create the hole. It made the hole easy to find.

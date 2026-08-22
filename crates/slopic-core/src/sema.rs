@@ -2575,15 +2575,9 @@ impl<'a> Analyzer<'a> {
             );
         }
         if matches!(inner.ty, Type::Ref { .. }) {
-            self.diagnostics.push(
-                Diagnostic::error(
-                    codes::NAME_OR_TYPE,
-                    self.file,
-                    value.span,
-                    format!("`{}` cannot be borrowed", inner.ty),
-                )
-                .with_help("a borrow of a borrow says nothing the borrow did not say already"),
-            );
+            self.diagnostics.push(crate::ast::cannot_borrow_a_borrow(
+                self.file, value.span, &inner.ty,
+            ));
             return self.typed(expr, Type::Unit, TExprKind::Unit);
         }
         let ty = Type::Ref {
@@ -3778,6 +3772,23 @@ impl<'a> Analyzer<'a> {
                 // not a type, and normalizing one would instantiate a generic
                 // under the parameter's own name.
                 .map(|ty| self.normalize_type(&ty, argument.span));
+            // A generic instantiated at a borrow asks for a type no value
+            // can have: `(fn pair (T) ((first T) (second &T)) ...)` with `T`
+            // bound to `&String` wants `&&String` here, and nothing can be
+            // written that has it. `ast` refuses the spelling somebody types;
+            // this is the same rule applied to the shape nobody typed, which
+            // is why the message is built in one place. The mismatch against
+            // that type is not also reported, because a reader cannot have
+            // meant it.
+            if let Some(inner) = filled.as_ref().and_then(borrowed_borrow) {
+                self.diagnostics.push(crate::ast::cannot_borrow_a_borrow(
+                    self.file,
+                    argument.span,
+                    inner,
+                ));
+                typed_args.push(self.expr(argument, None));
+                continue;
+            }
             let typed = self.expr(argument, filled.as_ref());
             if let Some(template) = template {
                 if let Err(message) = unify_type(
@@ -5922,6 +5933,26 @@ impl Instances<'_> {
         self.enums
             .get(instance)
             .or_else(|| self.structs.get(instance))
+    }
+}
+
+/// The innermost borrow of a type that borrows a borrow, if it holds one.
+///
+/// A written `&&T` never reaches here — `ast` refuses that where it is spelled
+/// — so what this finds is a shape substitution produced.
+fn borrowed_borrow(ty: &Type) -> Option<&Type> {
+    match ty {
+        Type::Ref { inner, .. } if matches!(**inner, Type::Ref { .. }) => Some(inner),
+        Type::List(inner) | Type::Slice(inner) | Type::Ptr(inner) | Type::Ref { inner, .. } => {
+            borrowed_borrow(inner)
+        }
+        Type::Array { element, .. } => borrowed_borrow(element),
+        Type::Apply { args, .. } => args.iter().find_map(borrowed_borrow),
+        Type::Fn { params, result } => params
+            .iter()
+            .chain([result.as_ref()])
+            .find_map(borrowed_borrow),
+        _ => None,
     }
 }
 
