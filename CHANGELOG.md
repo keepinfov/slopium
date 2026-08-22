@@ -13,6 +13,47 @@ rather than everything it touched.
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-08-22
+
+### Added
+- `deprecated` applies to a `struct`'s field, written before the name where
+  every declaration with a keyword carries one: every read, construction and
+  pattern that names the field warns with `SL0800` and the annotation's message
+  as a note. A write goes through a pattern, so those three are all the places a
+  field name appears. It is interface, so a module that names the field is
+  rebuilt when the annotation is added or taken away.
+- A borrow is written `&x` and `&mut x`, a sigil standing before the one form it
+  applies to. The reader expands it before anything reads a tree, so the object
+  a file compiles to is byte-identical whichever spelling it was written in, and
+  `(& x)` stays legal — a sigil that opens a list its own operand ends is the
+  head of that list. `slopium fmt` writes the short spelling, which is what
+  respelt the 752 sites in the bundled library and the fixtures. `'`, `` ` ``
+  and `,` are reserved for the macros this language has not built, and writing
+  one is refused with `SL0006` naming what it is held for.
+- `|)` closes every list a declaration left open, back to the top level, so the
+  run of closing parens that ends one is written as the single token a reader
+  can check without counting. `slopium fmt` writes it wherever that run is
+  longer than three. It is a resynchronisation point as much as an
+  abbreviation: a `)` lost inside a module used to swallow every declaration
+  after it and surface as one `SL0004` at the end of the file, and now cannot
+  leave the declaration it was written in. `|` ends a token wherever it appears,
+  and the shipped Neovim plugin has its own indenter, because Vim's built-in
+  Lisp one cannot be taught another closer.
+- `$` opens a list that closes where the form holding it closes, so a chain of
+  single-argument wrappers is written in the order the calls happen rather than
+  in the order the parentheses close: `(a $ b $ c d)` is `(a (b (c d)))`. It is
+  a row of the reader's abbreviation table beside `&`, expanded before anything
+  reads a tree, and a sigil before one applies to everything after it —
+  `(note $ & $ disagreement left right)` borrows the whole call. `slopium fmt`
+  neither writes a `$` nor removes one.
+
+### Fixed
+- `slopium fmt` measures a form against the closing parens that will follow it
+  on the same line, so a line whose form fitted only because the parens closing
+  every enclosing form were not counted now breaks instead of running past the
+  preferred width.
+
+
 ## [0.14.0] - 2026-08-21
 
 ### Added
@@ -468,6 +509,7 @@ package manager, the language server and the Neovim plugin as they stood when
 tagging began.
 
 [Unreleased]: https://github.com/keepinfov/slopium/compare/v0.11.0...HEAD
+[0.15.0]: https://github.com/keepinfov/slopium/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/keepinfov/slopium/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/keepinfov/slopium/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/keepinfov/slopium/compare/v0.11.0...v0.12.0
