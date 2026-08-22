@@ -545,7 +545,7 @@ impl Server {
         for keyword in [
             "fn", "test", "struct", "enum", "const", "export", "take", "let", "set", "if", "match",
             "when", "do", "loop", "while", "break", "continue", "try", "as", "Fn", "Ptr", "lambda",
-            "&", "&mut", "and", "or", "unsafe",
+            "&", "&mut", "$", "and", "or", "unsafe",
         ] {
             if seen.insert(keyword.to_owned()) {
                 items.push(json!({ "label": keyword, "kind": 14 }));
@@ -1792,9 +1792,10 @@ mod tests {
             );
         }
 
-        // A borrow is spelled with a sigil and `let mut` is two words; neither
-        // is a name the compiler holds in a table.
-        let composite = ["let mut", "&", "&mut"];
+        // A borrow is spelled with a sigil, `$` is the sigil that nests, and
+        // `let mut` is two words; none of them is a name the compiler holds in
+        // a table.
+        let composite = ["let mut", "&", "&mut", "$"];
         for label in &labels {
             assert!(
                 known.contains(label) || composite.contains(&label.as_str()),

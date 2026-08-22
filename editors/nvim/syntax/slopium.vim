@@ -63,6 +63,9 @@ syntax keyword slopiumModuleKeyword export take extern
 syntax match slopiumParameter "\v<[a-z_][A-Za-z0-9_-]*>\ze\s+(&mut\s+|&)?(unit|bool|i8|i16|i32|i64|u8|u16|u32|u64|f64|String|[A-Z][A-Za-z0-9_-]*)\s*\)"
 
 syntax match slopiumOwnership "&mut\|&"
+" `$` nests the rest of the form it is written in (`D-150`). It is structure
+" rather than a name, so it is highlighted with the parens it stands for.
+syntax match slopiumNest "\$"
 " The rows of the reader's abbreviation table nothing expands yet (`D-149`).
 " Writing one is refused, so it is marked where it is written rather than left
 " looking like part of the name beside it.
@@ -80,6 +83,7 @@ syntax match slopiumAscription "\v\s:\ze\s"
 syntax match slopiumArrow "->"
 syntax match slopiumWildcard "\v<_>"
 
+highlight default link slopiumNest Delimiter
 highlight default link slopiumReservedSigil Error
 highlight default link slopiumComment Comment
 highlight default link slopiumDoc SpecialComment

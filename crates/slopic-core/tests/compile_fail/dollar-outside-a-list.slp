@@ -1,0 +1,3 @@
+; `$` nests the rest of the form it is written in, and at the top level of a
+; file there is no form around it (`D-150`).
+$ fn main () -> i32 0

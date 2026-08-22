@@ -1,0 +1,14 @@
+dollar-in-a-parameter-list.slp:8:26: error[SL0200]: unknown generic type `i64`
+  |
+ 8 |   (let twice (lambda () ((value $ i64)) -> i64 value))
+  |                          ^^^^^^^^^^^^^
+
+dollar-in-a-parameter-list.slp:8:26: error[SL0452]: `i64` is not a generic type
+  |
+ 8 |   (let twice (lambda () ((value $ i64)) -> i64 value))
+  |                          ^^^^^^^^^^^^^
+
+dollar-in-a-parameter-list.slp:8:48: error[SL0200]: expected `i64`, found `unit`
+  |
+ 8 |   (let twice (lambda () ((value $ i64)) -> i64 value))
+  |                                                ^^^^^

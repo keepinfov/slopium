@@ -1,0 +1,5 @@
+dollar-as-a-head.slp:4:4: error[SL0007]: `$` nests the rest of a form, and a form's first element is its head
+  |
+ 4 |   ($ println-i64 42)
+  |    ^
+  = help: `$` stands between a form's head and the rest of it, as in `(println $ from-i64 42)`

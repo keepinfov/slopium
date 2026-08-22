@@ -1,0 +1,4 @@
+; A `$` at the end of a form nests nothing (`D-150`).
+(fn main () -> i32
+  (println-i64 $)
+  0)

@@ -31,6 +31,7 @@ before anything reads a tree, so nothing under the reader learns it was written
 | --- | --- | --- |
 | `&` | `(& x)` | a shared borrow |
 | `&mut` | `(&mut x)` | an exclusive borrow |
+| `$` | a list closing where the form holding it closes | the rest of a form, nested |
 | `'` | — | reserved for quotation |
 | `` ` `` | — | reserved for quasiquotation |
 | `,` | — | reserved for unquotation |
@@ -62,6 +63,32 @@ type, which keeps its parentheses:
 The first parameter list holds one borrowed type; the second holds two.
 Writing the first `(Fn (&String) i64)` would be a borrow of `String` where a
 list of parameters belongs, and the compiler says so.
+
+**`$` opens a list that closes where the form holding it closes**, so a chain
+of single-argument wrappers is written in the order the calls happen rather
+than in the order the parentheses close. It associates to the right:
+
+```lisp
+(a $ b c)       ≡   (a (b c))
+(a $ b $ c d)   ≡   (a (b (c d)))
+```
+
+A sigil before a `$` applies to everything after it, because that is what the
+`$` makes one form: `(note $ & $ disagreement left right)` is
+`(note (& (disagreement left right)))`. A `$` needs a form around it and
+something after it, and it cannot be a form's first element, which is where the
+head belongs; each of the three is refused with `SL0007`.
+
+The reader knows nothing about what a list is for, so a `$` inside a
+declaration's header expands there like anywhere else and lands on the shape
+error that list already has — `$` before a `lambda`'s body is useful and `$`
+inside its parameter list is nonsense, and the nonsense is refused by the
+grammar rather than by a second one in the reader.
+
+`slopium fmt` neither writes a `$` nor removes one: which grouping a person
+meant by one is not recoverable from the tree, and guessing is where a
+formatter starts having opinions about structure rather than about layout. All
+it does is keep one off the end of a line.
 
 ## Files, modules, and imports
 
