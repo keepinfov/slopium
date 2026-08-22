@@ -1,0 +1,30 @@
+; `$` opens a list that closes where the form holding it closes, so a chain of
+; single-argument wrappers is written in the order the calls happen instead of
+; in the order the parentheses close (`D-150`). It is a row of the reader's
+; abbreviation table like `&`, expanded before anything reads a tree, so every
+; line below could be written with parentheses and the object would not change.
+
+(take std:io println println-i64)
+(take std:string concat from-i64)
+
+(struct Reading ((label String) (value i64)))
+
+(fn note ((reading &Reading)) -> String
+  (match reading
+    ((Reading :label label :value value)
+      (concat label $ & $ concat &": " $ & $ from-i64 $ clone value))))
+
+(fn main () -> i32
+  ; Three deep, and each step reads before the one it feeds.
+  (println-i64 $ len $ & $ from-i64 12345)
+
+  ; The same chain written the long way, printing the same number.
+  (println-i64 (len &(from-i64 12345)))
+
+  (let reading (Reading :label "depth" :value 3))
+  (println $ & $ note &reading)
+
+  ; `$` and a sigil in one line: the sigil heads the list `$` opened, and its
+  ; operand is everything after it.
+  (println $ & $ concat &"sum = " $ & $ from-i64 $ + 20 22)
+  0)

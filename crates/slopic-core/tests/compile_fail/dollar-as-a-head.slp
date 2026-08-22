@@ -1,0 +1,5 @@
+; `$` stands between a form's head and the rest of it, so it cannot be the head
+; itself: the list it opens would have nothing to be the rest of (`D-150`).
+(fn main () -> i32
+  ($ println-i64 42)
+  0)

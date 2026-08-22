@@ -14,12 +14,26 @@ use crate::diagnostic::{codes, CompileResult, Diagnostic, Span};
 use crate::lexer::{Token, TokenKind};
 use crate::parser::MAX_NESTING_DEPTH;
 
-/// A sigil: a prefix standing before the one form it applies to.
+/// What a row of the table stands for.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Expands {
+    /// A list whose head is this name and whose one argument is the next form:
+    /// `&x` for `(& x)`.
+    Around(&'static str),
+    /// A list opened where the sigil is written and closed where the form
+    /// holding it closes: `(a $ b c)` for `(a (b c))`.
+    Rest,
+    /// Nothing yet. The row is held so that what it is for cannot be beaten to
+    /// the character by something else.
+    Nothing,
+}
+
+/// A sigil: a token standing for structure nobody typed.
 pub struct Sigil {
     /// The characters that are written.
     pub text: &'static str,
-    /// The head of the list it expands to, or `None` for a reserved row.
-    pub expansion: Option<&'static str>,
+    /// The structure it stands for.
+    pub expansion: Expands,
     /// What the row is for, in a sentence a refusal can end with.
     pub means: &'static str,
 }
@@ -32,27 +46,32 @@ pub struct Sigil {
 pub const SIGILS: &[Sigil] = &[
     Sigil {
         text: "&mut",
-        expansion: Some("&mut"),
+        expansion: Expands::Around("&mut"),
         means: "an exclusive borrow",
     },
     Sigil {
         text: "&",
-        expansion: Some("&"),
+        expansion: Expands::Around("&"),
         means: "a shared borrow",
     },
     Sigil {
+        text: "$",
+        expansion: Expands::Rest,
+        means: "the rest of a form, nested",
+    },
+    Sigil {
         text: "'",
-        expansion: None,
+        expansion: Expands::Nothing,
         means: "quotation, for the macros this language has not built yet",
     },
     Sigil {
         text: "`",
-        expansion: None,
+        expansion: Expands::Nothing,
         means: "quasiquotation, for the macros this language has not built yet",
     },
     Sigil {
         text: ",",
-        expansion: None,
+        expansion: Expands::Nothing,
         means: "unquotation, for the macros this language has not built yet",
     },
 ];
@@ -98,7 +117,9 @@ pub fn sigil_of(text: &str) -> Option<&'static Sigil> {
 /// recognises the list an abbreviation stands for rather than remembering
 /// which spelling arrived, so all three spellings leave as one.
 pub fn sigil_for_head(head: &str) -> Option<&'static Sigil> {
-    SIGILS.iter().find(|sigil| sigil.expansion == Some(head))
+    SIGILS
+        .iter()
+        .find(|sigil| matches!(sigil.expansion, Expands::Around(name) if name == head))
 }
 
 /// Divides an atom's text into the sigils it begins with and the name they
@@ -198,13 +219,21 @@ impl Reader<'_> {
     fn head_opens_the_list(&self) -> bool {
         let mut cursor = self.cursor;
         while let Some(TokenKind::Atom(text)) = self.tokens.get(cursor).map(|token| &token.kind) {
-            if sigil_of(text).is_some_and(|sigil| sigil.expansion.is_some()) {
+            if sigil_of(text).is_some_and(|sigil| matches!(sigil.expansion, Expands::Around(_))) {
                 cursor += 1;
             } else {
                 break;
             }
         }
         match self.tokens.get(cursor).map(|token| &token.kind) {
+            // `$` makes everything after it one form, so the run's operand is
+            // all that follows and the head opens the list after all:
+            // `(& $ f x)` is `(& (f x))`.
+            Some(TokenKind::Atom(text))
+                if sigil_of(text).is_some_and(|sigil| sigil.expansion == Expands::Rest) =>
+            {
+                return true
+            }
             Some(TokenKind::LeftParen) => {
                 let mut depth = 0usize;
                 loop {
@@ -235,14 +264,16 @@ impl Reader<'_> {
     /// `head` says the sigil opens the list rather than standing inside it,
     /// where there is nothing to abbreviate and `&` is the ordinary atom
     /// `(& value)` has always been written with.
-    fn element(&mut self, head: bool) {
+    /// The answer is how many lists the element left open for the form around
+    /// it to close, which is what `$` after a sigil produces.
+    fn element(&mut self, head: bool) -> usize {
         let token = self.tokens[self.cursor].clone();
         let sigil = match &token.kind {
             TokenKind::Atom(text) => sigil_of(text),
             _ => None,
         };
         match (&token.kind, sigil) {
-            (_, Some(sigil)) if sigil.expansion.is_none() => {
+            (_, Some(sigil)) if sigil.expansion == Expands::Nothing => {
                 self.diagnostics.push(
                     Diagnostic::error(
                         codes::RESERVED_SIGIL,
@@ -253,6 +284,26 @@ impl Reader<'_> {
                     .with_note(format!("it is held for {}", sigil.means)),
                 );
                 self.cursor += 1;
+                0
+            }
+            // `$` nests what follows into the list around it, so it is read by
+            // the loop over that list and never as an element of its own.
+            // Reaching one here means there is no list for it to nest in.
+            (_, Some(sigil)) if sigil.expansion == Expands::Rest => {
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        codes::ABBREVIATION,
+                        self.file,
+                        token.span,
+                        "`$` nests the rest of the form it is written in, and there is none here",
+                    )
+                    .with_help(
+                        "`$` stands between a form's head and the rest of it, as in \
+                                `(println $ from-i64 42)`",
+                    ),
+                );
+                self.cursor += 1;
+                0
             }
             (_, Some(sigil)) if !head => self.abbreviation(sigil),
             (TokenKind::LeftParen, _) => {
@@ -260,30 +311,96 @@ impl Reader<'_> {
                 // recursing beside it is what the limit exists to prevent.
                 if self.depth >= MAX_NESTING_DEPTH {
                     self.copy_balanced();
-                    return;
+                    return 0;
                 }
                 self.out.push(token);
                 self.cursor += 1;
                 self.depth += 1;
                 let mut first = true;
+                let mut nested = 0usize;
                 while self.cursor < self.tokens.len()
                     && !matches!(self.tokens[self.cursor].kind, TokenKind::RightParen)
                 {
+                    if self.nests_here() {
+                        if self.nest(first) {
+                            nested += 1;
+                            first = true;
+                        }
+                        continue;
+                    }
                     let head = first && self.head_opens_the_list();
-                    self.element(head);
+                    nested += self.element(head);
                     first = false;
                 }
                 self.depth -= 1;
+                // Every list `$` opened closes where this one does, innermost
+                // first, and each ends at the last form written into it.
+                let end = self.out.last().expect("the list opened with a paren").span;
+                for _ in 0..nested {
+                    self.out.push(Token {
+                        kind: TokenKind::RightParen,
+                        span: Span {
+                            start: end.end,
+                            end: end.end,
+                            line: end.line,
+                            column: end.column,
+                        },
+                    });
+                }
                 if let Some(close) = self.tokens.get(self.cursor) {
                     self.out.push(close.clone());
                     self.cursor += 1;
                 }
+                0
             }
             _ => {
                 self.out.push(token);
                 self.cursor += 1;
+                0
             }
         }
+    }
+
+    /// Whether the token under the cursor is the row that nests.
+    fn nests_here(&self) -> bool {
+        match &self.tokens[self.cursor].kind {
+            TokenKind::Atom(text) => {
+                sigil_of(text).is_some_and(|sigil| sigil.expansion == Expands::Rest)
+            }
+            _ => false,
+        }
+    }
+
+    /// Opens the list `$` stands for, and says whether one was opened.
+    ///
+    /// `first` says `$` is where a form's head belongs, which is the one place
+    /// it cannot go: the list it opens would have nothing to be the rest of.
+    fn nest(&mut self, first: bool) -> bool {
+        let span = self.tokens[self.cursor].span;
+        self.cursor += 1;
+        let empty = self
+            .tokens
+            .get(self.cursor)
+            .is_none_or(|token| matches!(token.kind, TokenKind::RightParen));
+        if first || empty {
+            let message = if first {
+                "`$` nests the rest of a form, and a form's first element is its head"
+            } else {
+                "`$` nests the rest of a form, and there is none here"
+            };
+            self.diagnostics.push(
+                Diagnostic::error(codes::ABBREVIATION, self.file, span, message).with_help(
+                    "`$` stands between a form's head and the rest of it, as in \
+                     `(println $ from-i64 42)`",
+                ),
+            );
+            return false;
+        }
+        self.out.push(Token {
+            kind: TokenKind::LeftParen,
+            span,
+        });
+        true
     }
 
     /// Expands a run of sigils and the one form they stand before.
@@ -291,7 +408,7 @@ impl Reader<'_> {
     /// The run is taken whole rather than one sigil at a time, so `&&value`
     /// costs the reader no stack: what nests is the output, which the parser
     /// bounds already.
-    fn abbreviation(&mut self, first: &'static Sigil) {
+    fn abbreviation(&mut self, first: &'static Sigil) -> usize {
         let mut run = vec![(first, self.tokens[self.cursor].span)];
         self.cursor += 1;
         while let Some(token) = self.tokens.get(self.cursor) {
@@ -301,7 +418,7 @@ impl Reader<'_> {
             let Some(sigil) = sigil_of(text) else {
                 break;
             };
-            if sigil.expansion.is_none() {
+            if !matches!(sigil.expansion, Expands::Around(_)) {
                 break;
             }
             run.push((sigil, token.span));
@@ -320,7 +437,7 @@ impl Reader<'_> {
                 )
                 .with_help(format!("write the form it applies to, as in `{text}value`")),
             );
-            return;
+            return 0;
         }
         for (sigil, span) in &run {
             self.out.push(Token {
@@ -328,14 +445,18 @@ impl Reader<'_> {
                 span: *span,
             });
             self.out.push(Token {
-                kind: TokenKind::Atom(
-                    sigil
-                        .expansion
-                        .expect("a reserved sigil never reaches an expansion")
-                        .to_owned(),
-                ),
+                kind: TokenKind::Atom(match sigil.expansion {
+                    Expands::Around(head) => head.to_owned(),
+                    _ => unreachable!("only a prefix row reaches an expansion"),
+                }),
                 span: *span,
             });
+        }
+        // `$` is the operand: what the sigil applies to is the rest of the
+        // form around it, so these lists close where that form closes and the
+        // loop over it is what counts them.
+        if self.nests_here() {
+            return run.len();
         }
         self.element(false);
         // The synthesized list ends where its operand does: text that exists,
@@ -356,6 +477,7 @@ impl Reader<'_> {
                 },
             });
         }
+        0
     }
 
     /// Copies tokens through the `)` that closes the already-seen `(`.
@@ -445,6 +567,85 @@ mod tests {
         let borrow = &items[1];
         assert_eq!(&source[borrow.span.start..borrow.span.end], "&value");
         assert_eq!(borrow.span.column, 4);
+    }
+
+    #[test]
+    fn dollar_nests_the_rest_of_the_form_it_is_in() {
+        assert_eq!(read("(a $ b c)"), "( a ( b c ) )");
+        assert_eq!(read("(a $ b $ c d)"), "( a ( b ( c d ) ) )");
+        assert_eq!(read("(a b $ c)"), "( a b ( c ) )");
+        // A sigil after `$` heads the list `$` opened, so its operand ending
+        // that list makes it the borrow it always was.
+        assert_eq!(
+            read("(note $ & disagreement)"),
+            "( note ( & disagreement ) )"
+        );
+        assert_eq!(read("(f $ g &x y)"), "( f ( g ( & x ) y ) )");
+        // Written without the space, exactly as `&` is.
+        assert_eq!(read("(a $b c)"), "( a ( b c ) )");
+    }
+
+    #[test]
+    fn a_sigil_whose_operand_is_the_rest_closes_where_the_form_does() {
+        assert_eq!(read("(f & $ g h)"), "( f ( & ( g h ) ) )");
+        assert_eq!(read("(f && $ g h)"), "( f ( & ( & ( g h ) ) ) )");
+        assert_eq!(read("(& $ f x)"), "( & ( f x ) )");
+        // The line the issue is written around, which is both rows at once.
+        assert_eq!(
+            read("(note $ & $ disagreement &(want) &(got))"),
+            "( note ( & ( disagreement ( & ( want ) ) ( & ( got ) ) ) ) )"
+        );
+    }
+
+    #[test]
+    fn dollar_is_refused_where_it_nests_nothing() {
+        for (source, expected) in [
+            ("($ a b)", "a form's first element is its head"),
+            ("(f $)", "there is none here"),
+            ("$ a", "there is none here"),
+        ] {
+            let tokens = lex("test.slp", source).unwrap();
+            let errors = expand("test.slp", &tokens).unwrap_err();
+            assert_eq!(errors[0].code, codes::ABBREVIATION, "for `{source}`");
+            assert!(
+                errors[0].message.contains(expected),
+                "`{source}` said `{}`",
+                errors[0].message
+            );
+        }
+    }
+
+    #[test]
+    fn a_nested_list_spans_from_the_dollar_to_its_last_element() {
+        let source = "(println $ from-i64 42)";
+        let tokens = lex("test.slp", source).unwrap();
+        let forms = parse("test.slp", &expand("test.slp", &tokens).unwrap()).unwrap();
+        let crate::parser::SExprKind::List(items) = &forms[0].kind else {
+            panic!("the form is a list")
+        };
+        let nested = &items[1];
+        assert_eq!(&source[nested.span.start..nested.span.end], "$ from-i64 42");
+        assert_eq!(nested.span.column, 10);
+    }
+
+    /// The same assertion `&` gets, for the same reason: an abbreviation is one
+    /// when the file it compiles to does not depend on it.
+    #[test]
+    fn nesting_with_a_dollar_emits_the_same_object() {
+        let written = concat!(
+            "(fn twice ((value i64)) -> i64 (* value 2))\n",
+            "(fn main () -> i32\n",
+            "  (as i32 (twice (twice (twice 1)))))\n",
+        );
+        let nested = concat!(
+            "(fn twice ((value i64)) -> i64 (* value 2))\n",
+            "(fn main () -> i32\n",
+            "  (as i32 $ twice $ twice $ twice 1))\n",
+        );
+        let options = crate::CompileOptions::default();
+        let long = crate::compile_to_object("same.slp", written, &options).expect("it compiles");
+        let short = crate::compile_to_object("same.slp", nested, &options).expect("it compiles");
+        assert_eq!(long, short);
     }
 
     #[test]

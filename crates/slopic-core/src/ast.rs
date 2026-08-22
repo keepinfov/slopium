@@ -1478,7 +1478,9 @@ impl AstBuilder<'_> {
             // because a head sigil whose form ends the list is that list
             // (`D-149`). The parameter list of one keeps its parentheses.
             SExprKind::Atom(name)
-                if crate::reader::sigil_of(name).is_some_and(|sigil| sigil.expansion.is_some()) =>
+                if crate::reader::sigil_of(name).is_some_and(|sigil| {
+                    matches!(sigil.expansion, crate::reader::Expands::Around(_))
+                }) =>
             {
                 self.diagnostics.push(
                     Diagnostic::error(

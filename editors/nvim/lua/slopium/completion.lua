@@ -50,6 +50,7 @@ local static_items = {
   { label = "_", kind = kinds.Keyword, detail = "wildcard pattern" },
   { label = "&", kind = kinds.Keyword, detail = "shared borrow: `&x`, or `(& x)`" },
   { label = "&mut", kind = kinds.Keyword, detail = "exclusive borrow: `&mut x`" },
+  { label = "$", kind = kinds.Keyword, detail = "nest the rest of this form: `(a $ b c)` is `(a (b c))`" },
   { label = "unit", kind = kinds.TypeParameter },
   { label = "bool", kind = kinds.TypeParameter },
   { label = "i8", kind = kinds.TypeParameter },

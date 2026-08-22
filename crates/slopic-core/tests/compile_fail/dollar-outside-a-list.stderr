@@ -1,0 +1,5 @@
+dollar-outside-a-list.slp:3:1: error[SL0007]: `$` nests the rest of the form it is written in, and there is none here
+  |
+ 3 | $ fn main () -> i32 0
+  | ^
+  = help: `$` stands between a form's head and the rest of it, as in `(println $ from-i64 42)`

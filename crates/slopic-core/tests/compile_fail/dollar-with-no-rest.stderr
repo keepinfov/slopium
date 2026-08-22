@@ -1,0 +1,5 @@
+dollar-with-no-rest.slp:3:16: error[SL0007]: `$` nests the rest of a form, and there is none here
+  |
+ 3 |   (println-i64 $)
+  |                ^
+  = help: `$` stands between a form's head and the rest of it, as in `(println $ from-i64 42)`

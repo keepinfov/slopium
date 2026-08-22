@@ -1,0 +1,9 @@
+; What `$` means inside a declaration header is what it means anywhere: the
+; reader nests the rest of the list and hands the result on, because it does not
+; know what a list is for. `$` before a `lambda`'s body is useful and `$` inside
+; its parameter list is nonsense, and the nonsense lands on the shape error
+; `ast.rs` already has for that list rather than on a second grammar in the
+; reader (`D-150`).
+(fn main () -> i32
+  (let twice (lambda () ((value $ i64)) -> i64 value))
+  0)

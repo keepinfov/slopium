@@ -313,10 +313,16 @@ struct Entry {
 }
 
 /// An atom that binds to what follows it, so the two are never split across
-/// two lines: `->` before a return type, `:` before a declared one, and a
-/// field keyword before the value it names.
+/// two lines: `->` before a return type, `:` before a declared one, a field
+/// keyword before the value it names, and `$` before the form it nests.
+///
+/// The layout knows nothing else about `$`: which grouping a human meant by one
+/// is not recoverable from the tree, so it is carried through untouched and
+/// only kept off the end of a line (`D-150`).
 fn is_glue(item: &Item) -> bool {
-    matches!(item, Item::Atom(text) if text == "->" || text.starts_with(':'))
+    matches!(item, Item::Atom(text)
+        if text == "->" || text == "$" || text.starts_with(':')
+            || reader::sigil_of(text).is_some())
 }
 
 /// The list an abbreviation stands for: its sigil, and the one form it applies
@@ -360,7 +366,10 @@ fn glue_sigils(entries: Vec<Entry>, in_list: bool) -> Vec<Entry> {
                 <= 1;
         let sigil = match &entry.item {
             Item::Atom(text) if !opens => reader::sigil_of(text)
-                .and_then(|sigil| sigil.expansion)
+                .and_then(|sigil| match sigil.expansion {
+                    reader::Expands::Around(head) => Some(head),
+                    _ => None,
+                })
                 .filter(|_| entry.trailing.is_empty()),
             _ => None,
         };
@@ -368,9 +377,13 @@ fn glue_sigils(entries: Vec<Entry>, in_list: bool) -> Vec<Entry> {
             folded.push(entry);
             continue;
         };
-        let takes = folded
-            .last()
-            .is_some_and(|next| !matches!(next.item, Item::Comment(_)));
+        // A sigil whose operand is `$` applies to everything after it rather
+        // than to the `$`, so the two stay the separate tokens they are: the
+        // layout has no shape to fold them into (`D-150`).
+        let takes = folded.last().is_some_and(|next| {
+            !matches!(next.item, Item::Comment(_))
+                && !matches!(&next.item, Item::Atom(text) if text == "$")
+        });
         if !takes {
             folded.push(entry);
             continue;
@@ -1051,6 +1064,38 @@ mod tests {
             .map(|token| token.text.trim_end().to_owned())
             .collect();
         (program, comments)
+    }
+
+    /// `$` is neither written nor removed: which grouping a human meant by one
+    /// is not in the tree, and guessing is where a formatter starts having
+    /// opinions about structure rather than about layout (`D-150`).
+    #[test]
+    fn the_layout_neither_writes_a_dollar_nor_removes_one() {
+        let options = FormatOptions::default();
+        let nested = "(fn main () -> i32\n  (println-i64 $ len $ from-i64 12345)\n  0)\n";
+        assert_eq!(format_source("test.slp", nested, &options).unwrap(), nested);
+        let written = "(fn main () -> i32\n  (println-i64 (len (from-i64 12345)))\n  0)\n";
+        assert_eq!(
+            format_source("test.slp", written, &options).unwrap(),
+            written
+        );
+    }
+
+    #[test]
+    fn a_dollar_never_ends_a_line() {
+        let source = concat!(
+            "(fn main () -> i32\n",
+            "  (println-i64 $ enormously-long-conversion-name-here $ ",
+            "another-long-name 1234567 7654321)\n",
+            "  0)\n",
+        );
+        let formatted = format_source("test.slp", source, &FormatOptions::default()).unwrap();
+        assert!(
+            formatted
+                .lines()
+                .all(|line| !line.trim_end().ends_with('$')),
+            "{formatted}"
+        );
     }
 
     #[test]

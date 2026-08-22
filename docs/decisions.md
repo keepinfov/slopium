@@ -162,6 +162,7 @@ of what was believed at the time is the part worth keeping.
 - [D-147 — the clock and the entropy are the operating system's, in nanoseconds and bytes](#d-147--the-clock-and-the-entropy-are-the-operating-systems-in-nanoseconds-and-bytes)
 - [D-148 — a child process is started with its arguments joined by NUL, and its output is a descriptor a `defer` closes](#d-148--a-child-process-is-started-with-its-arguments-joined-by-nul-and-its-output-is-a-descriptor-a-defer-closes)
 - [D-149 — a sigil stands before the form it applies to, and the reader expands it](#d-149--a-sigil-stands-before-the-form-it-applies-to-and-the-reader-expands-it)
+- [D-150 — `$` nests the rest of the form it is written in](#d-150---nests-the-rest-of-the-form-it-is-written-in)
 
 ## D-001 — a native compiler, without LLVM
 
@@ -3387,3 +3388,48 @@ its last line, which no corpus file had ever reached — until the abbreviation
 made a form short enough to be kept on a line whose tail then carried five of
 them. `render_item` is handed that count now, and a form that fits only when
 the parens are not counted breaks instead.
+
+## D-150 — `$` nests the rest of the form it is written in
+
+Status: approved · 2026-08-22
+
+Nesting inside a body is not branching. Across the 132 tracked `.slp` files,
+runs of closing parens that do not end a declaration numbered 1738 of length 1,
+1055 of 2 and 451 of 3, then fell off to 57 at length 4 — and reading the
+outliers showed what they were: chains of single-argument wrappers, each call
+taking the next as its only interesting argument and each step paying a paren
+back at the end. `$` opens a list that closes where the form holding it closes,
+right-associative as in Haskell, so `(a $ b $ c d)` is `(a (b (c d)))` and the
+chain reads in the order the calls happen rather than in the order the
+parentheses close.
+
+It is a row of `D-149`'s table rather than a form, so it expands in the reader
+and nothing downstream learns it was written; the list it synthesizes spans
+from the `$` to the end of its last element, which is text that exists, because
+a `compile_fail` snapshot asserts spans as numbers. The two rows compose: a
+sigil whose operand is a `$` applies to everything after it, which is what
+makes `(note $ & $ disagreement left right)` a borrow of the whole call rather
+than of the `$`. Three placements are refused with `SL0007` — a `$` as a form's
+first element, where the head belongs; a `$` with nothing after it; and a `$`
+with no form around it at all.
+
+**What `$` means inside a declaration's header is what it means anywhere.** The
+reader does not know what a list is for, and one that guessed would be reading
+the grammar `ast.rs` owns, so a `$` in a `lambda`'s parameter list expands there
+like everywhere else and lands on the shape error that list already produces.
+That is the answer the issue asked for, and it is written as a `compile_fail`
+case rather than as a rule.
+
+**The formatter neither writes a `$` nor removes one.** Which grouping a person
+meant by one is not recoverable from the tree, and a formatter that guessed
+would be having opinions about structure rather than about layout. Two things
+the layout does do: it keeps a `$` off the end of a line, and it leaves a sigil
+written before one as the separate token it is — folding `& $` into `&$` would
+be folding the sigil into an operand that is not its operand. It does not
+compete with the terminal closer either: `$` produces no run of closing parens,
+it prevents one, so code written with it reaches that rule with nothing to
+collapse.
+
+`.` was rejected for the same reason `D-139` spelled composition `<<` and `>>`:
+it is field access, and `tests/projects/pass/function-values` has a struct whose
+field holds a function.
