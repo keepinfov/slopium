@@ -164,6 +164,7 @@ of what was believed at the time is the part worth keeping.
 - [D-149 — a sigil stands before the form it applies to, and the reader expands it](#d-149--a-sigil-stands-before-the-form-it-applies-to-and-the-reader-expands-it)
 - [D-150 — `$` nests the rest of the form it is written in](#d-150---nests-the-rest-of-the-form-it-is-written-in)
 - [D-151 — one token closes every list a declaration left open](#d-151--one-token-closes-every-list-a-declaration-left-open)
+- [D-152 — `deprecated` applies to a struct field, and warns wherever the field is named](#d-152--deprecated-applies-to-a-struct-field-and-warns-wherever-the-field-is-named)
 
 ## D-001 — a native compiler, without LLVM
 
@@ -3497,3 +3498,49 @@ arguments plus the parens closing every enclosing form would pass the preferred
 width, which an indenter reading one line cannot know. Two lines of the tree
 differ that way. Neovim joins valgrind, gdb, qemu and the cross toolchain in the
 dev shell, and the check skips itself without one like the thirteen before it.
+
+## D-152 — `deprecated` applies to a struct field, and warns wherever the field is named
+
+Status: approved · 2026-08-22
+
+`deprecated` applied to a `fn`, an `extern` and a `const` (`D-122`) and could
+not apply to a field, because a field is exactly `(name type)` and the parser
+said so. It carries the slot now, written before the name, which is where every
+declaration with a keyword carries one. The space was free: nothing meant
+anything else there, so no program could have been relying on it. It is grammar,
+which is why it had to be decided before the freeze — after it a form that was
+never written down cannot be added by an edition.
+
+**Deprecating the type is the wrong instrument for the common case.** The
+migration that actually happens is that a record is fine and one field of it is
+going away. Saying that by annotating the whole `struct` warns at every mention
+of a type that is mostly healthy — in parameter types, in return types, in
+patterns that never touch the field in question — and a warning nobody can act
+on is a warning that stops being read.
+
+**A field name appears at exactly three places, and all three are literal**: a
+read `(. p label)`, a construction `(P :label "x")`, and a pattern
+`(P :label label)`. There is no fourth, because `set` writes a field only
+through a binding a pattern introduced, so the pattern case covers writes for
+free. That is what makes this cheaper than deprecating a type, whose name
+reaches several passes. The annotation is looked up by the declaration's name
+rather than an instance's, so a generic record carries it once however many
+times it is instantiated.
+
+**It is interface**, for the reason every `deprecated` is: what warns is the
+module that names the field, so a dependent that does not rebuild is a warning
+nobody sees. `module_interface` in the manager hashes a field's annotations
+beside its type, and `tests/projects/pass/annotations` declares the record in a
+module of its own so the warning has a boundary to cross.
+
+Deliberately not included, each for its own reason. **A variant of an `enum`**:
+a bare variant is an atom — `(enum E A B)` — so there is nowhere to put an
+annotation without wrapping it, and `((deprecated) A)` is then structurally a
+different thing from `A`; no spelling exists that is not a wart, and deprecating
+the enum or the payload field of a variant that has one is the answer. **A
+parameter**: the slot is offered where a `struct`'s fields are read and nowhere
+else, because a parameter is the caller's business and deprecating one says
+nothing a caller could act on. **`target` on a field**: a record whose fields
+differ per target is a layout that differs per target, which is a much larger
+question than an annotation slot. **`inline`**: meaningless on a field. Each of
+the three is refused by the table `D-122` already had, and by name.

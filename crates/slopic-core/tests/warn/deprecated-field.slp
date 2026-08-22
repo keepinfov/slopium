@@ -1,0 +1,16 @@
+; `deprecated` applies to a struct field, and a field name appears at exactly
+; three places — a read, a construction, and a pattern (`D-152`). A write goes
+; through a pattern, so there is no fourth, and `count` beside it is silent.
+(struct Holder (((deprecated "use `count`") tally i64) (count i64)))
+
+(fn read-it ((holder Holder)) -> i64
+  (. holder tally))
+
+(fn bump ((holder &mut Holder)) -> unit
+  (match holder
+    ((Holder :tally tally :count count) (set tally (+ (clone tally) 1)))))
+
+(fn build () -> Holder
+  (Holder :tally 0 :count 0))
+
+(fn main () -> i32 0)

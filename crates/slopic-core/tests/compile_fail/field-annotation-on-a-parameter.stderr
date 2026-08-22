@@ -1,0 +1,4 @@
+field-annotation-on-a-parameter.slp:4:12: error[SL0100]: expected `(name type)`
+  |
+ 4 | (fn widen (((deprecated) value i32)) -> i64 (as i64 value))
+  |            ^^^^^^^^^^^^^^^^^^^^^^^^

@@ -1,0 +1,17 @@
+deprecated-field.slp:7:13: warning[SL0800]: `tally` is deprecated
+  |
+ 7 |   (. holder tally))
+  |             ^^^^^
+  = note: use `count`
+
+deprecated-field.slp:11:21: warning[SL0800]: `tally` is deprecated
+  |
+11 |     ((Holder :tally tally :count count) (set tally (+ (clone tally) 1)))))
+  |                     ^^^^^
+  = note: use `count`
+
+deprecated-field.slp:14:11: warning[SL0800]: `tally` is deprecated
+  |
+14 |   (Holder :tally 0 :count 0))
+  |           ^^^^^^
+  = note: use `count`

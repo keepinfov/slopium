@@ -670,6 +670,14 @@ struct Analyzer<'a> {
     /// Each is the literal the declaration held, already typed, so a use is a
     /// clone of it rather than a lookup anything downstream performs.
     consts: HashMap<String, TExpr>,
+    /// The `deprecated` each `struct` field carries, by declaration name and
+    /// then by field (`D-152`).
+    ///
+    /// Kept beside `structs` rather than inside it because a field's type is
+    /// read at every use and its annotation at three, and the three are named
+    /// sites rather than a pass: a read, a construction, and a pattern — and a
+    /// write goes through a pattern, so there is no fourth.
+    deprecated_fields: HashMap<String, HashMap<String, Deprecation>>,
     /// The `deprecated` a `const` carries, kept beside `consts` rather than in
     /// it: a use of an ordinary constant should not pay a word for it.
     deprecated_consts: HashMap<String, Deprecation>,
@@ -863,6 +871,20 @@ impl<'a> Analyzer<'a> {
             current_return_type: None,
             loops: Vec::new(),
             consts: HashMap::new(),
+            deprecated_fields: program
+                .structs
+                .iter()
+                .filter_map(|declaration| {
+                    let fields = declaration
+                        .fields
+                        .iter()
+                        .filter_map(|field| {
+                            Some((field.name.clone(), deprecation(&field.annotations)?))
+                        })
+                        .collect::<HashMap<_, _>>();
+                    (!fields.is_empty()).then(|| (declaration.name.clone(), fields))
+                })
+                .collect(),
             deprecated_consts: HashMap::new(),
             omitted_for_target: program
                 .omitted
@@ -3130,10 +3152,11 @@ impl<'a> Analyzer<'a> {
                         );
                     }
                 }
-                for name in provided.keys() {
-                    if !declared_fields.iter().any(|(field, _)| field == name) {
+                for (name, field) in &provided {
+                    if !declared_fields.iter().any(|(declared, _)| declared == name) {
                         self.error(pattern.span, format!("unknown field `{path}.{name}`"));
                     }
+                    self.deprecated_field(&expected_name, name, field.span);
                 }
                 self.pattern_depth += 1;
                 let typed_fields = declared_fields
@@ -3388,6 +3411,7 @@ impl<'a> Analyzer<'a> {
                 params: vec![Param {
                     name: parameter,
                     ty: argument,
+                    annotations: Vec::new(),
                     span: expr.span,
                 }],
                 result,
@@ -3959,6 +3983,7 @@ impl<'a> Analyzer<'a> {
                 self.error(pair[0].span, "field name must begin with `:`");
                 continue;
             };
+            self.deprecated_field(name, field_name, pair[0].span);
             if provided.insert(field_name.to_owned(), &pair[1]).is_some() {
                 self.error(
                     pair[0].span,
@@ -4018,6 +4043,7 @@ impl<'a> Analyzer<'a> {
                 self.error(pair[0].span, "field name must begin with `:`");
                 continue;
             };
+            self.deprecated_field(name, field_name, pair[0].span);
             if provided.insert(field_name.to_owned(), &pair[1]).is_some() {
                 self.error(
                     pair[0].span,
@@ -4156,6 +4182,7 @@ impl<'a> Analyzer<'a> {
             return self.typed(expr, Type::Unit, TExprKind::Unit);
         };
         let field_type = field_type.clone();
+        self.deprecated_field(struct_name, field_name, args[1].span);
         if !self.is_copy_type(&field_type) {
             self.diagnostics.push(
                 Diagnostic::error(
@@ -5152,6 +5179,26 @@ impl<'a> Analyzer<'a> {
     /// what the reader has to change, and the annotation's message — when it
     /// carries one — is a note rather than the message, so that every one of
     /// these warnings reads the same at its first line.
+    /// Warns where a field somebody annotated `deprecated` is named (`D-152`).
+    ///
+    /// A generic struct is looked up under the name it was declared with: an
+    /// instance is `Pair$<i64,String>` and the annotation is on the
+    /// declaration, one per field rather than one per instantiation.
+    fn deprecated_field(&mut self, struct_name: &str, field: &str, span: Span) {
+        let declared = struct_name
+            .split_once("$<")
+            .map_or(struct_name, |(base, _)| base);
+        let Some(deprecation) = self
+            .deprecated_fields
+            .get(declared)
+            .and_then(|fields| fields.get(field))
+            .cloned()
+        else {
+            return;
+        };
+        self.deprecated_use(field, span, &deprecation);
+    }
+
     fn deprecated_use(&mut self, name: &str, span: Span, deprecation: &Deprecation) {
         // The name a module resolver made canonical is not the name anybody
         // wrote, and the span already says which module this is. So the

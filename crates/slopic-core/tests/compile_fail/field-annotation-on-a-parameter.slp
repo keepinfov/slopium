@@ -1,0 +1,6 @@
+; A parameter is not a field: the slot is offered where a `struct`'s fields are
+; read and nowhere else, because deprecating one of a function's parameters
+; says nothing a caller could act on (`D-152`).
+(fn widen (((deprecated) value i32)) -> i64 (as i64 value))
+
+(fn main () -> i32 0)

@@ -1,0 +1,6 @@
+; A misspelling in a field's annotation is a refusal about the annotation
+; rather than about the field under it, which is what having a position of its
+; own is for (`D-152`).
+(struct Holder (((depracated "use `count`") tally i64) (count i64)))
+
+(fn main () -> i32 0)
