@@ -166,6 +166,7 @@ of what was believed at the time is the part worth keeping.
 - [D-151 — one token closes every list a declaration left open](#d-151--one-token-closes-every-list-a-declaration-left-open)
 - [D-152 — `deprecated` applies to a struct field, and warns wherever the field is named](#d-152--deprecated-applies-to-a-struct-field-and-warns-wherever-the-field-is-named)
 - [D-153 — a borrow of a borrow is refused where it is written and where it is instantiated](#d-153--a-borrow-of-a-borrow-is-refused-where-it-is-written-and-where-it-is-instantiated)
+- [D-154 — the manager reads the compiler's exit code, and stops naming a module it cannot blame](#d-154--the-manager-reads-the-compilers-exit-code-and-stops-naming-a-module-it-cannot-blame)
 
 ## D-001 — a native compiler, without LLVM
 
@@ -3580,3 +3581,40 @@ the only one worth reading.
 writes when it means "a borrow of the thing that was already borrowed", which
 is a thought a reader arriving from a language with references has had before.
 `D-149` did not create the hole. It made the hole easy to find.
+
+## D-154 — the manager reads the compiler's exit code, and stops naming a module it cannot blame
+
+Status: approved · 2026-08-22
+
+`build` asks `slopic` for one object per module, and each invocation is handed
+the whole package and checks the whole program before emitting anything. So a
+program that does not compile fails every invocation, and the summary line
+named whichever module's object the loop happened to be asking for when it
+stopped — the first in the order on a cold build, the first whose cache stamp
+went stale afterwards. The same error in the same file reported `core:list` on
+one run and `core:builder` on the next, and the module it named had compiled
+perfectly well.
+
+**A misleading line is worse than a missing one.** The diagnostic above it was
+always correct and always pointed at the real file; the summary contradicted it
+by naming something in the standard library, and a reader who trusts the last
+line of the output goes looking there for a bug in the file directly above.
+`check` never had the problem, because it does not go module by module and says
+`check failed` without naming anything.
+
+**The two cases are told apart by the exit code, which already distinguished
+them.** `slopic` exits `1` when the program does not compile, having printed
+every diagnostic itself, and `2` for anything else — a bad argument, a file it
+could not read, a `cc` that would not run. So the manager says `build failed`
+for `1`, the way `check` does, and keeps `codegen for module `X` failed` for
+every other status, which is the case that message was written for and the only
+one where the name carries information. That makes the two codes a contract
+between the programs rather than an accident, and both sides now say so where
+they are read and written.
+
+Nothing richer was built. A protocol in which the compiler reports which module
+it was working on would be a second channel to keep correct, and it would say
+nothing the diagnostics do not already say: every one of them carries a file and
+a span. The question this decision answers is not "which module failed" but
+"does the manager have anything to add", and for a program that does not
+compile the answer is no.
