@@ -583,4 +583,173 @@ mod tests {
         }
         assert!(checked, "the object has no symbol table");
     }
+
+    fn with_data_symbol() -> Object {
+        let mut assembly: Assembly<Nop> = Assembly::new();
+        assembly.push(Item::Section(Section::RODATA));
+        assembly.push(Item::Global("table".into()));
+        assembly.push(Item::Label("table".into()));
+        assembly.push(Item::Bytes(vec![1, 2, 3, 4]));
+        assembly.push(Item::Size("table".into()));
+        assembly.push(Item::Section(Section::TEXT));
+        assembly.push(Item::Global("main".into()));
+        assembly.push(Item::Function("main".into()));
+        assembly.push(Item::Label("main".into()));
+        assembly.push(Item::Instruction(Nop));
+        assembly.push(Item::Size("main".into()));
+        assembly.push(Item::Section(Section::GNU_STACK));
+        assembly.finish().unwrap()
+    }
+
+    /// Where a named section's body starts and how long it is.
+    fn section(file: &[u8], name: &str) -> (usize, usize) {
+        let count = half(file, 60) as usize;
+        let start = quad(file, 40) as usize;
+        let names = start + half(file, 62) as usize * 64;
+        let names_at = quad(file, names + 24) as usize;
+        for index in 1..count {
+            let header = start + index * 64;
+            let at = names_at
+                + u32::from_le_bytes(file[header..header + 4].try_into().unwrap()) as usize;
+            let end = file[at..].iter().position(|byte| *byte == 0).unwrap();
+            if &file[at..at + end] == name.as_bytes() {
+                return (
+                    quad(file, header + 24) as usize,
+                    quad(file, header + 32) as usize,
+                );
+            }
+        }
+        panic!("the object has no section named {name}");
+    }
+
+    /// Every symbol table entry as name, `st_info`, section, value and size,
+    /// with the name read through the offset the entry actually carries.
+    fn symbols(file: &[u8]) -> Vec<(String, u8, u16, u64, u64)> {
+        let count = half(file, 60) as usize;
+        let start = quad(file, 40) as usize;
+        let mut table = Vec::new();
+        for index in 1..count {
+            let header = start + index * 64;
+            let kind = u32::from_le_bytes(file[header + 4..header + 8].try_into().unwrap());
+            if kind != SHT_SYMTAB {
+                continue;
+            }
+            let offset = quad(file, header + 24) as usize;
+            let size = quad(file, header + 32) as usize;
+            let link =
+                u32::from_le_bytes(file[header + 40..header + 44].try_into().unwrap()) as usize;
+            let strings = quad(file, start + link * 64 + 24) as usize;
+            for entry in 0..size / SYMBOL_SIZE as usize {
+                let at = offset + entry * SYMBOL_SIZE as usize;
+                let name =
+                    strings + u32::from_le_bytes(file[at..at + 4].try_into().unwrap()) as usize;
+                let end = file[name..].iter().position(|byte| *byte == 0).unwrap();
+                table.push((
+                    String::from_utf8_lossy(&file[name..name + end]).into_owned(),
+                    file[at + 4],
+                    half(file, at + 6),
+                    quad(file, at + 8),
+                    quad(file, at + 16),
+                ));
+            }
+        }
+        table
+    }
+
+    #[test]
+    fn a_relocation_naming_a_symbol_that_does_not_exist_is_refused() {
+        let mut object = sample();
+        object
+            .relocations_mut(Section::TEXT)
+            .push(crate::asm::Relocation {
+                offset: 0,
+                kind: FixupKind::Pc32,
+                against: Against::Symbol(9),
+                addend: 0,
+            });
+        let error = write(&object, X86_64).unwrap_err();
+        assert!(error.contains("symbol 9, which does not exist"), "{error}");
+    }
+
+    #[test]
+    fn nothing_can_refer_to_a_section_that_holds_nothing() {
+        // A section symbol exists for `.note.GNU-stack` like any other, so the
+        // refusal is the only thing standing between a bug and a relocation
+        // against an empty marker.
+        let mut object = sample();
+        object
+            .relocations_mut(Section::TEXT)
+            .push(crate::asm::Relocation {
+                offset: 0,
+                kind: FixupKind::Pc32,
+                against: Against::Section(Section::GNU_STACK),
+                addend: 0,
+            });
+        let error = write(&object, X86_64).unwrap_err();
+        assert!(
+            error.contains("nothing can refer to .note.GNU-stack"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_symbol_is_typed_a_function_only_where_one_was_declared() {
+        let file = write(&with_data_symbol(), X86_64).unwrap();
+        let table = symbols(&file);
+        let named = |wanted: &str| {
+            table
+                .iter()
+                .find(|symbol| symbol.0 == wanted)
+                .unwrap_or_else(|| panic!("no symbol named {wanted}"))
+        };
+        assert_eq!(named("main").1, (STB_GLOBAL << 4) | STT_FUNC);
+        assert_eq!(named("table").1, (STB_GLOBAL << 4) | STT_NOTYPE);
+        assert_eq!(named("main").4, 1, "one `nop`");
+        assert_eq!(named("table").4, 4);
+    }
+
+    #[test]
+    fn an_undefined_symbol_names_no_section_and_claims_no_size() {
+        // Classification follows the definition rather than the `.type` the
+        // object happens to carry: a symbol the linker has to find elsewhere
+        // is `STT_NOTYPE` even where this object called it a function.
+        let mut object = sample();
+        object.symbols.push(crate::asm::Symbol {
+            name: "sl_rt_panic".into(),
+            definition: None,
+        });
+        object.functions.insert("sl_rt_panic".into());
+        let file = write(&object, X86_64).unwrap();
+        let symbol = symbols(&file)
+            .into_iter()
+            .find(|symbol| symbol.0 == "sl_rt_panic")
+            .expect("the undefined symbol is missing");
+        assert_eq!(symbol.1, (STB_GLOBAL << 4) | STT_NOTYPE);
+        assert_eq!(symbol.2, 0, "SHN_UNDEF");
+        assert_eq!((symbol.3, symbol.4), (0, 0));
+    }
+
+    #[test]
+    fn every_symbol_name_resolves_through_the_string_table() {
+        let file = write(&with_data_symbol(), X86_64).unwrap();
+        let (at, size) = section(&file, ".strtab");
+        assert_eq!(file[at], 0, "offset 0 is the empty name");
+        assert_eq!(file[at + size - 1], 0, "every name is terminated");
+        let table = symbols(&file);
+        assert_eq!(table[0].0, "", "the null entry names nothing");
+        let names: Vec<&str> = table.iter().map(|symbol| symbol.0.as_str()).collect();
+        assert!(
+            names.contains(&"main") && names.contains(&"table"),
+            "{names:?}"
+        );
+    }
+
+    #[test]
+    fn the_rodata_body_is_the_bytes_that_were_placed_in_it() {
+        let file = write(&sample(), X86_64).unwrap();
+        let (at, size) = section(&file, ".rodata");
+        assert_eq!(&file[at..at + size], b"hi\0");
+        let (text, text_size) = section(&file, ".text");
+        assert_eq!(&file[text..text + text_size], &[0x90]);
+    }
 }

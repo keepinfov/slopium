@@ -1124,4 +1124,135 @@ mod tests {
         let misaligned = word_displacement(6, 26).unwrap_err();
         assert!(misaligned.contains("whole instruction"), "{misaligned}");
     }
+
+    #[test]
+    fn nothing_can_be_placed_before_the_first_section() {
+        let error = program(vec![Item::Label("main".into())])
+            .finish()
+            .unwrap_err();
+        assert!(error.contains("before the first section"), "{error}");
+    }
+
+    #[test]
+    fn nothing_can_be_placed_in_a_section_that_holds_nothing() {
+        let error = program(vec![
+            Item::Section(Section::GNU_STACK),
+            Item::Bytes(vec![0]),
+        ])
+        .finish()
+        .unwrap_err();
+        assert!(
+            error.contains("nothing can be placed in .note.GNU-stack"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_instruction_before_the_first_section_is_refused() {
+        let error = program(vec![Item::Instruction(Toy::Copy(0, 1))])
+            .finish()
+            .unwrap_err();
+        assert!(
+            error.contains("instruction before the first section"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_instruction_outside_a_section_that_holds_code_is_refused() {
+        let error = program(vec![
+            Item::Section(Section::RODATA),
+            Item::Instruction(Toy::Copy(0, 1)),
+        ])
+        .finish()
+        .unwrap_err();
+        assert!(
+            error.contains("instruction outside a section that holds code"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_numeric_label_outside_a_section_that_holds_code_is_refused() {
+        let error = program(vec![Item::Section(Section::RODATA), Item::Numeric(1)])
+            .finish()
+            .unwrap_err();
+        assert!(
+            error.contains("numeric label 1 outside a section that holds code"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_size_before_its_label_is_refused() {
+        let error = program(vec![
+            Item::Section(Section::TEXT),
+            Item::Size("main".into()),
+        ])
+        .finish()
+        .unwrap_err();
+        assert!(error.contains("`.size main` before `main:`"), "{error}");
+    }
+
+    #[test]
+    fn a_size_in_another_section_than_its_label_is_refused() {
+        // A symbol's size is a distance within one section, so a `.size` that
+        // has changed section since the label cannot mean anything.
+        let error = program(vec![
+            Item::Section(Section::RODATA),
+            Item::Label("table".into()),
+            Item::Bytes(vec![1]),
+            Item::Section(Section::TEXT),
+            Item::Size("table".into()),
+        ])
+        .finish()
+        .unwrap_err();
+        assert!(
+            error.contains("`.size table` is in .text, but `table:` is in .rodata"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_file_and_a_loc_leave_the_object_exactly_as_it_was() {
+        // Line tables are built by the assembler from these directives, and
+        // the object path builds none (`D-028`), so they have to vanish rather
+        // than shift anything. Only their text rendering is covered above.
+        let items = || {
+            vec![
+                Item::Section(Section::TEXT),
+                Item::Global("main".into()),
+                Item::Function("main".into()),
+                Item::Label("main".into()),
+                Item::Instruction(Toy::Copy(0, 1)),
+                Item::Size("main".into()),
+            ]
+        };
+        let plain = program(items()).finish().unwrap();
+        let mut annotated = items();
+        annotated.insert(
+            1,
+            Item::File {
+                index: 1,
+                path: "t.slp".into(),
+            },
+        );
+        annotated.insert(
+            5,
+            Item::Loc {
+                file: 1,
+                line: 2,
+                column: 3,
+            },
+        );
+        let annotated = program(annotated).finish().unwrap();
+        assert_eq!(plain.text(), annotated.text());
+        assert_eq!(plain.label("main"), annotated.label("main"));
+        assert_eq!(plain.symbols.len(), annotated.symbols.len());
+        assert_eq!(plain.symbols[0].name, annotated.symbols[0].name);
+        assert_eq!(
+            plain.symbols[0].definition.unwrap().size,
+            annotated.symbols[0].definition.unwrap().size
+        );
+    }
 }
