@@ -13,6 +13,17 @@ rather than everything it touched.
 
 ## [Unreleased]
 
+## [0.15.2] - 2026-08-23
+
+### Fixed
+- A `(test ...)` in a module other than the entry module is compiled and run
+  like any other. One flag decided both whether a module emits the tests it
+  owns and whether it emits the harness, and only the entry module carried it,
+  so every other module's tests were dropped in silence and the link failed on
+  a mangled `sl_test_*` symbol. A test lives beside what it tests, and a module
+  chosen per target is the natural home for that target's tests.
+
+
 ## [0.15.1] - 2026-08-22
 
 ### Changed
@@ -549,6 +560,7 @@ package manager, the language server and the Neovim plugin as they stood when
 tagging began.
 
 [Unreleased]: https://github.com/keepinfov/slopium/compare/v0.11.0...HEAD
+[0.15.2]: https://github.com/keepinfov/slopium/compare/v0.15.1...v0.15.2
 [0.15.1]: https://github.com/keepinfov/slopium/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/keepinfov/slopium/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/keepinfov/slopium/compare/v0.13.0...v0.14.0
