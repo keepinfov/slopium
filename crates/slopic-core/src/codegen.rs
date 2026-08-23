@@ -302,6 +302,10 @@ pub fn target_spec(triple: &str) -> Option<&'static TargetSpec> {
 #[derive(Clone, Debug)]
 pub struct CodegenOptions {
     pub target: String,
+    /// Whether this is a `--test` build, so the module emits the tests it owns
+    /// (`D-156`). Every module carries it; `test_harness` is the entry
+    /// module's alone.
+    pub test_bodies: bool,
     pub test_harness: bool,
     pub emit_entrypoint: bool,
     /// The files spans refer to, when debug line tables are wanted. `None`
@@ -317,6 +321,7 @@ impl Default for CodegenOptions {
     fn default() -> Self {
         Self {
             target: DEFAULT_TARGET.into(),
+            test_bodies: false,
             test_harness: false,
             emit_entrypoint: true,
             panic_abort: false,
@@ -453,8 +458,10 @@ impl<'a> Generator<'a> {
         // A test is code only the harness calls, so a build without one has no
         // reason to carry it. Emitting the bodies anyway left every `sl_test_*`
         // function — and, through it, `sl_rt_test_result` — sitting dead in an
-        // ordinary release binary.
-        if self.options.test_harness {
+        // ordinary release binary. The harness is the entry module's, the
+        // bodies are every module's: a test is emitted by whichever module
+        // owns it, which is where it was written (`D-156`).
+        if self.options.test_bodies {
             for test in self.module.tests.iter().filter(|test| test.emit) {
                 self.function(&test.function, true);
             }
@@ -503,7 +510,7 @@ impl<'a> Generator<'a> {
                 self.module
                     .tests
                     .iter()
-                    .filter(|test| test.emit && self.options.test_harness)
+                    .filter(|test| test.emit && self.options.test_bodies)
                     .map(|test| &test.function),
             )
         {
@@ -2045,7 +2052,7 @@ impl<'a> Generator<'a> {
                     self.module
                         .tests
                         .iter()
-                        .filter(|test| test.emit && self.options.test_harness)
+                        .filter(|test| test.emit && self.options.test_bodies)
                         .map(|test| &test.function),
                 ),
         )

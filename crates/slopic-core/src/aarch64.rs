@@ -245,9 +245,10 @@ impl<'a> Generator<'a> {
         {
             self.function(function, false);
         }
-        // Tests belong to the harness build only; see the note in the x86-64
-        // backend. Without one, a test body is a function nothing calls.
-        if self.options.test_harness {
+        // Tests belong to a `--test` build only; see the note in the x86-64
+        // backend. Without one, a test body is a function nothing calls, and
+        // within one every module emits the tests it owns (`D-156`).
+        if self.options.test_bodies {
             for test in self.module.tests.iter().filter(|test| test.emit) {
                 self.function(&test.function, true);
             }
@@ -294,7 +295,7 @@ impl<'a> Generator<'a> {
                 self.module
                     .tests
                     .iter()
-                    .filter(|test| test.emit && self.options.test_harness)
+                    .filter(|test| test.emit && self.options.test_bodies)
                     .map(|test| &test.function),
             )
         {
@@ -1743,7 +1744,7 @@ impl<'a> Generator<'a> {
                     self.module
                         .tests
                         .iter()
-                        .filter(|test| test.emit && self.options.test_harness)
+                        .filter(|test| test.emit && self.options.test_bodies)
                         .map(|test| &test.function),
                 ),
         )

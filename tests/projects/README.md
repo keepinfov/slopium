@@ -24,6 +24,7 @@ scripts/project-tests.sh
 | `annotations` | A declaration's annotation slot, `deprecated` warning at a use across a module boundary, and an `inline` hint that reaches the optimizer |
 | `generics-std` | Generic functions/structs/enums, bundled `Option`/`Result`, successful and propagated `try` |
 | `modules` | Nested path modules, exports, `take` aliases, re-exports, qualified calls, separate objects |
+| `module-tests` | A `(test ...)` in a module that is not the entry module and in one nested below it, with checked arithmetic, a string literal and a `lambda` in the test bodies |
 | `path-dependencies` | Direct and transitive path dependencies, each under its package name |
 | `diamond-dependencies` | One dependency reached through two packages, resolved once under its own name; lockfile and `tree` |
 | `custom-std` | A path package supplying `[language-items]` in place of the bundled `std` |

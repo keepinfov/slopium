@@ -1,0 +1,18 @@
+; A test lives beside what it tests, so a module that is not the entry module
+; carries tests of its own. Every module of a `--test` build emits the tests it
+; owns; the harness that counts and calls them is the entry module's alone
+; (`D-156`). Until that was two flags rather than one, a test outside the entry
+; module was dropped in silence and the link failed on a mangled symbol.
+
+(take std:io println println-i64)
+(take counter bump doubled)
+(take counter:text label)
+
+(fn main () -> i32
+  (println-i64 (bump 41))
+  (println-i64 (doubled 21))
+  (println &(label))
+  0)
+
+(test "the entry module still carries its own"
+  (= (bump 41) 42))

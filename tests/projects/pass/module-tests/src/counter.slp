@@ -1,0 +1,23 @@
+(export bump doubled)
+
+(fn bump ((value i64)) -> i64
+  (+ value 1))
+
+(fn doubled ((value i64)) -> i64
+  (* value 2))
+
+(test "a test beside what it tests"
+  (= (bump 41) 42))
+
+; Checked arithmetic written in the test body rather than in a function it
+; calls: the panic trampoline it branches to belongs to whichever module emits
+; the body, and that is this one.
+(test "checked arithmetic in a test outside the entry module"
+  (and (= (+ (doubled 20) 2) 42) (= (- (bump 0) 1) 0)))
+
+; A `lambda` in a test body is named after the test it was written in, which is
+; how per-module partitioning finds the module that owns it.
+(test "a lambda written in a test outside the entry module"
+  (let offset 2)
+  (let shift (lambda (offset) ((value i64)) -> i64 (+ value offset)))
+  (= 42 (shift 40)))
