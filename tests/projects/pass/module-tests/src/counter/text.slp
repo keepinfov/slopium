@@ -1,0 +1,11 @@
+(export label)
+
+(take std:string equals)
+
+(fn label () -> String "counter")
+
+; A string literal written in a test body, in a module nested one level deeper
+; than the one the entry module names: the `.rodata` it lands in belongs to the
+; module that emits the body.
+(test "text in a test in a nested module"
+  (equals &(label) &"counter"))

@@ -738,6 +738,7 @@ fn an_extern_call_reaches_c_with_the_arguments_it_declared() {
         &module,
         &CodegenOptions {
             target: DEFAULT_TARGET.into(),
+            test_bodies: false,
             test_harness: false,
             emit_entrypoint: true,
             debug: None,
@@ -819,6 +820,7 @@ fn c_caller_agrees_with_slopium_stack_parameter_layout() {
         &module,
         &CodegenOptions {
             target: DEFAULT_TARGET.into(),
+            test_bodies: false,
             test_harness: false,
             emit_entrypoint: false,
             debug: None,
