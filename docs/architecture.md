@@ -482,7 +482,11 @@ graph.
 
 ## Runtime boundary
 
-Generated programs link a small C runtime through the stable `sl_rt_*` ABI. It
+Generated programs link a small C runtime through the `sl_rt_*` ABI — version
+1, additive under `D-108`: a later minor version may add symbols and may not
+change or remove one. Every symbol, its signature and its ownership rule is
+listed in `docs/runtime-abi.md`, and `scripts/runtime-check.sh` compares that
+list against what each built runtime object exports, both ways. The runtime
 provides allocation, strings, owned lists/arrays, borrowed slice descriptors,
 printing, input, files, and process arguments. It does not evaluate source or
 own language semantics, and since v0.5.3 it does not format or parse a number
@@ -512,7 +516,8 @@ So the hosted half keeps a status slot: every such call clears it on the way in
 and sets it to an `errno` on the way out, `sl_rt_last_error` reads it, and the
 library turns it into an `Option` or a `Result` in the form immediately after
 the call (`D-085`). Zero is success, a positive value is an `errno`, and `-1`
-is end of input.
+is end of input. The slot is thread-local (`D-108`): threads arrive after 1.0,
+and a symbol's storage class cannot move once the ABI holds, so it moved first.
 
 Which units link is the environment's to say, and the environment is the
 target's default overridden by `slopic --freestanding` (`D-081`). It decides
@@ -540,8 +545,10 @@ aspirational. It builds a `core`-only program — one that sends its answer out
 through `core:string` and `core:float` and reads it back, so the string and
 float libraries are covered too (`D-083`, `D-097`) — links it against
 `slop_rt_core.o` with `-nostdlib` and a supplied
-`_start`, requires `nm -u` to show nothing but the four hooks, and runs it. The runtime ABI freezes at v0.8,
-and freezing a half nothing had ever linked would be freezing a guess.
+`_start`, requires `nm -u` to show nothing but the four hooks, and runs it.
+This existed before any freestanding target did, on purpose: the ABI now
+written down in `docs/runtime-abi.md` would otherwise have frozen a half
+nothing had ever linked, which is freezing a guess.
 
 It then links the same program a second time and lets the compiler write the
 command line, over `x86_64-unknown-none` and with no `--library`, so that the

@@ -30,8 +30,12 @@ static char **sl_argv = NULL;
 /* The status slot (`D-085`). Zero is success, a positive value is an `errno`,
  * and `-1` is end of input. Every entry point below that can fail clears it on
  * the way in and sets it on the way out; the library reads it in the form
- * immediately after the call and turns it into an `Option` or a `Result`. */
-static int64_t sl_last_error = 0;
+ * immediately after the call and turns it into an `Option` or a `Result`.
+ *
+ * One slot per thread (`D-108`). Threads arrive after 1.0, and a symbol's
+ * storage class cannot move once the ABI holds, so it moved first: each
+ * thread reads only what its own calls left. */
+static _Thread_local int64_t sl_last_error = 0;
 
 int64_t sl_rt_last_error(void) {
     return sl_last_error;

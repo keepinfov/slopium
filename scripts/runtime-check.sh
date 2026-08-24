@@ -16,6 +16,81 @@ workspace_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 check_dir="$(mktemp -d)"
 trap 'rm -rf "$check_dir"' EXIT
 
+# The ABI gate. `docs/runtime-abi.md` is version 1 of the runtime ABI, and this
+# is what makes it normative rather than aspirational: the defined
+# `sl_`-prefixed symbols are read out of each flavor's object with `nm` and
+# compared against the document's fenced signature blocks, both ways. A symbol
+# an object exports without a line in the document fails here, and so does a
+# line no object backs — so a new entry point cannot arrive undocumented, and a
+# documented one cannot quietly disappear (`D-108`).
+abi_doc="$workspace_dir/docs/runtime-abi.md"
+
+# The fenced blocks under one `## ` heading, reduced to the symbols they
+# declare. The document keeps every declaration's name and opening parenthesis
+# on one line and says so; a declaration this cannot see is not silently
+# excused, because the object still exports the symbol and the comparison
+# reports it.
+abi_documented() {
+  awk -v want="$1" '
+    /^## /  { section = $0; fenced = 0 }
+    /^```/  { fenced = !fenced; next }
+    fenced && section == want && match($0, /sl_rt_[a-z0-9_]+\(/) {
+      print substr($0, RSTART, RLENGTH - 1)
+    }
+  ' "$abi_doc" | sort -u
+}
+
+# The same objects every build makes: core with the freestanding flags, so a
+# builtin the compiler recognized cannot smuggle a libc symbol in, and hosted
+# plain.
+cc -c -O2 -ffreestanding -fno-builtin -fno-stack-protector \
+  -o "$check_dir/abi-core.o" "$workspace_dir/runtime/slop_rt_core.c"
+cc -c -O2 -o "$check_dir/abi-hosted.o" "$workspace_dir/runtime/slop_rt_hosted.c"
+
+abi_documented "## The core runtime" >"$check_dir/abi-core.doc"
+abi_documented "## The hooks" >"$check_dir/abi-hooks.doc"
+{ cat "$check_dir/abi-hooks.doc"
+  abi_documented "## The hosted runtime"; } | sort -u >"$check_dir/abi-hosted.doc"
+
+# An empty parse is a broken parse — a renamed heading, a reshaped block — and
+# must not pass as a runtime that exports nothing.
+for abi_list in core hooks hosted; do
+  [ -s "$check_dir/abi-$abi_list.doc" ] ||
+    { echo "runtime-check: no symbols parsed out of docs/runtime-abi.md for $abi_list" >&2
+      exit 1; }
+done
+
+for abi_flavor in core hosted; do
+  nm -g --defined-only "$check_dir/abi-$abi_flavor.o" | awk 'NF { print $NF }' |
+    sort -u >"$check_dir/abi-$abi_flavor.nm"
+  abi_undocumented="$(comm -13 "$check_dir/abi-$abi_flavor.doc" "$check_dir/abi-$abi_flavor.nm")"
+  abi_unbacked="$(comm -23 "$check_dir/abi-$abi_flavor.doc" "$check_dir/abi-$abi_flavor.nm")"
+  if [ -n "$abi_undocumented" ]; then
+    echo "runtime-check: the $abi_flavor runtime exports symbols not in docs/runtime-abi.md:" >&2
+    echo "$abi_undocumented" >&2
+    exit 1
+  fi
+  if [ -n "$abi_unbacked" ]; then
+    echo "runtime-check: docs/runtime-abi.md lists symbols $abi_flavor does not export:" >&2
+    echo "$abi_unbacked" >&2
+    exit 1
+  fi
+done
+
+# What core leaves undefined must stay within the documented hooks (`D-080`).
+# A subset and not an equality, because a `panic = "abort"` build never
+# references `sl_rt_panic`; a fifth undefined symbol is a freestanding
+# program's problem before it is anybody else's.
+nm -u "$check_dir/abi-core.o" | awk 'NF { print $NF }' | sort -u \
+  >"$check_dir/abi-core.undef"
+abi_beyond="$(comm -23 "$check_dir/abi-core.undef" "$check_dir/abi-hooks.doc")"
+if [ -n "$abi_beyond" ]; then
+  echo "runtime-check: the core runtime reaches symbols beyond the documented hooks:" >&2
+  echo "$abi_beyond" >&2
+  exit 1
+fi
+echo "runtime-check: the runtime objects against docs/runtime-abi.md ... ok"
+
 # The C an `extern` reaches. Under ASan this is where a borrow handed across
 # the boundary is checked for real: the pointer must be live, and a `String`'s
 # must be NUL-terminated, or `strlen` walks off the allocation.
