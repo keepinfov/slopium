@@ -169,6 +169,7 @@ of what was believed at the time is the part worth keeping.
 - [D-154 — the manager reads the compiler's exit code, and stops naming a module it cannot blame](#d-154--the-manager-reads-the-compilers-exit-code-and-stops-naming-a-module-it-cannot-blame)
 - [D-155 — a function longer than a conditional branch reaches is refused, and the limit is written down](#d-155--a-function-longer-than-a-conditional-branch-reaches-is-refused-and-the-limit-is-written-down)
 - [D-156 — a test is emitted by the module that owns it, and the harness by the entry module](#d-156--a-test-is-emitted-by-the-module-that-owns-it-and-the-harness-by-the-entry-module)
+- [D-158 — an edition is named by a year, and a missing key means the first](#d-158--an-edition-is-named-by-a-year-and-a-missing-key-means-the-first)
 
 ## D-001 — a native compiler, without LLVM
 
@@ -3694,3 +3695,37 @@ linkage like any other function, and the harness already referenced it by name,
 which is why the reference existed before anything defined it. The release path
 is unchanged: without `--test` neither flag is set, so no `sl_test_*` function
 reaches an ordinary binary.
+
+## D-158 — an edition is named by a year, and a missing key means the first
+
+Status: approved · 2026-08-24
+
+A package says which edition of the language it is written in: `edition` in
+`[package]`, validated against the editions the toolchain has, of which there
+is exactly one, `2026`. Nothing branches on it yet, and that is the point —
+after the freeze a form that exists cannot change meaning, so the only way a
+language change survives 1.0 is a mechanism that lets a later toolchain read
+an old program as what it was (`D-111`). The mechanism has to exist before the
+first program is published, because a key added afterwards could not tell an
+old manifest from one that merely forgot it.
+
+**The identifier is a year.** An edition names when the language meant that,
+not what changed or how much: a counted edition reads as a version and drags
+version arithmetic behind it — whether `2` is compatible with `3`, what a
+range of them would mean — none of which applies to a set whose members are
+simply enumerated. A year orders itself, cannot run out, and is what a person
+already says when they mean the language as of some point. The value stays a
+string the toolchain matches against a list, and nothing anywhere parses it as
+a number.
+
+**A missing key means the first edition, and an unknown one is a refusal**
+(`SL1055`). The default reads a manifest from before the key existed as what
+it meant when it was written, which is why it is the oldest edition rather
+than the newest — defaulting to the newest would re-interpret every existing
+manifest the day a second edition appears. The refusal is the deliberate
+opposite of `D-128`: a key nobody knows is a message from a later toolchain
+that this one can skip, while an edition nobody knows says the program means
+something this toolchain does not carry, and building it anyway would be a
+guess. The message names the editions the toolchain has, because the fix is to
+pick one, and points at the value. `slopium new` writes the newest edition, so
+a new program starts from what the language is now.
