@@ -3,9 +3,10 @@
 # built against it alone links with `-nostdlib`, leaves no undefined symbol but
 # the four hooks of `D-080`, and runs.
 #
-# This exists before any freestanding target does, on purpose. The runtime ABI
-# freezes at v0.8, and freezing a core half nothing had ever linked would be
-# freezing a guess — `D-026` and `D-029` are the precedent.
+# This existed before any freestanding target did, on purpose. The runtime ABI
+# is now written down as version 1 in `docs/runtime-abi.md`, and freezing a
+# core half nothing had ever linked would have been freezing a guess — `D-026`
+# and `D-029` are the precedent.
 #
 # Two checks per target:
 #

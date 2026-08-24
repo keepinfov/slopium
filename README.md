@@ -1433,6 +1433,7 @@ test main:сумма ... FAILED: expected 42, got 41
 Контракт diagnostics: [`docs/diagnostics.md`](docs/diagnostics.md).
 Формат пакета и хранилище: [`docs/packaging.md`](docs/packaging.md).
 Модель безопасности: [`docs/security.md`](docs/security.md).
+ABI рантайма (версия 1): [`docs/runtime-abi.md`](docs/runtime-abi.md).
 
 ## Neovim
 

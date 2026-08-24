@@ -242,7 +242,9 @@ void *sl_rt_list_get(const SlList *list, uint64_t index) {
     return list->ptr + index * list->elem_size;
 }
 
-uint64_t sl_rt_list_pop(SlList *list) {
+/* `sl_rt_list_try_pop`'s helper, not ABI: the bare form panics where the
+ * wrapped one answers, and nothing generated or in the library calls it. */
+static uint64_t sl_rt_list_pop(SlList *list) {
     if (list->len == 0) {
         RT_FAIL("pop from empty list");
     }
