@@ -4,11 +4,13 @@
 #
 # A registry is a directory (`D-052`), so publishing is writing three files into
 # one and this script can build a whole registry, sign into it, and consume from
-# it without a server existing anywhere. The last section regenerates
+# it without a server existing anywhere. One section regenerates
 # `tests/registry` and `tests/consumer/Slopium.lock` and requires them to come
 # out byte-identical to what is committed — which is what makes the archive
 # format's reproducibility (`D-039`) and Ed25519's determinism assertions rather
-# than claims, and is what the Nix bridge builds from.
+# than claims, and is what the Nix bridge builds from. The last consumes
+# `tests/frozen`, an archive an older toolchain published, and never
+# regenerates it: the format is frozen, so those bytes must keep working.
 set -euo pipefail
 
 workspace_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -339,5 +341,54 @@ else
   diff -r -x target "$fixture/staged/consumer" "$workspace_dir/tests/consumer" ||
     fail "tests/consumer is not what resolution produces; SLOPIUM_UPDATE_FIXTURES=1 to rewrite it"
 fi
+
+# --- the frozen archive -------------------------------------------------------
+
+# `tests/frozen` holds one archive published by the v0.15.2 toolchain, with its
+# detached signature and its index line. Unlike the trees above it is NEVER
+# regenerated — not by SLOPIUM_UPDATE_FIXTURES=1, not by hand: the package
+# format is frozen at version 1 (docs/packaging.md), and these exact bytes
+# staying consumable under every later toolchain is that promise, tested. If
+# this section fails, the toolchain has stopped understanding format 1, and
+# the fix is never to rewrite the fixture.
+frozen="$workspace_dir/tests/frozen"
+frozen_checksum="$(sed -n 's/.*"checksum":"\([^"]*\)".*/\1/p' "$frozen/index/fr/oz/frozen.json")"
+[ "$(sha256sum "$frozen/packages/frozen/frozen-1.0.0.sl.tar" | cut -d ' ' -f 1)" = "$frozen_checksum" ] ||
+  fail "the frozen archive is not the bytes its index line published"
+
+mkdir -p "$scratch/frozen-consumer/src" "$scratch/frozen-consumer/.slopium"
+cat >"$scratch/frozen-consumer/Slopium.toml" <<'EOF'
+[package]
+name = "frozen-consumer"
+version = "0.1.0"
+source = "src"
+entry = "src/main.slp"
+
+[dependencies]
+std = { toolchain = true }
+frozen = "^1"
+EOF
+cat >"$scratch/frozen-consumer/src/main.slp" <<'EOF'
+(take std:io println-i64)
+(take frozen:lib format-version)
+
+(fn main () -> i32
+  (println-i64 (format-version))
+  0)
+EOF
+printf '[registry.default]\nindex = "%s"\ntrusted-keys = ["%s"]\n' \
+  "$frozen" "$fixture_public" >"$scratch/frozen-consumer/.slopium/config.toml"
+
+# The whole path, from a store that has never seen the archive: resolve,
+# download, check the digest, check the signature, unpack, build, run.
+output="$(cd "$scratch/frozen-consumer" && SLOPIUM_HOME="$scratch/frozen-home" slopium run | tail -1)" ||
+  fail "a consumer no longer builds against the frozen archive"
+[ "$output" = "1" ] ||
+  fail "expected 1 from the frozen archive, got: $output"
+(cd "$scratch/frozen-consumer" && SLOPIUM_HOME="$scratch/frozen-home" slopium verify) \
+  >"$scratch/frozen-verified" ||
+  fail "\`verify\` refuses the frozen archive"
+grep -q "signed by $fixture_public" "$scratch/frozen-verified" ||
+  fail "\`verify\` does not report the frozen archive's signer"
 
 echo "publish-check: ok"

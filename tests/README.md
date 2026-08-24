@@ -4,6 +4,9 @@
   See its own README.
 - `registry/` and `consumer/` — a whole published registry and a project that
   depends on it, both **generated** by `scripts/publish-check.sh`.
+- `frozen/` — a registry holding one archive published by an older toolchain,
+  **never regenerated**; `scripts/publish-check.sh` proves it still unpacks,
+  verifies and builds.
 
 ## Why the registry is committed
 
@@ -34,3 +37,15 @@ construction. Never publish anything real under it.
 `consumer/.slopium/config.toml` is committed even though `.slopium/` is
 otherwise ignored: it holds the index path and the trusted key the check
 resolves against, so a clone without it cannot run the check.
+
+## Why the frozen registry is never regenerated
+
+`frozen/` holds one package archive, its detached signature and its index
+line, published by the v0.15.2 toolchain and signed by the same fixture key.
+It is the package format's compatibility promise as bytes: version 1 is
+frozen (`docs/packaging.md`), so every later toolchain must still verify and
+build this exact archive. `publish-check.sh` consumes it on every run and
+never rewrites it — `SLOPIUM_UPDATE_FIXTURES=1` regenerates `registry/` and
+`consumer/` and leaves `frozen/` alone. If the check fails here, the
+toolchain has stopped reading format 1, and the fixture is never the thing
+to fix.

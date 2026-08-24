@@ -171,6 +171,7 @@ of what was believed at the time is the part worth keeping.
 - [D-156 — a test is emitted by the module that owns it, and the harness by the entry module](#d-156--a-test-is-emitted-by-the-module-that-owns-it-and-the-harness-by-the-entry-module)
 - [D-157 — a deprecated name lives out its major version, and removing it costs the next](#d-157--a-deprecated-name-lives-out-its-major-version-and-removing-it-costs-the-next)
 - [D-158 — an edition is named by a year, and a missing key means the first](#d-158--an-edition-is-named-by-a-year-and-a-missing-key-means-the-first)
+- [D-159 — the compiler protocol stays internal at 1.0](#d-159--the-compiler-protocol-stays-internal-at-10)
 
 ## D-001 — a native compiler, without LLVM
 
@@ -3766,3 +3767,26 @@ something this toolchain does not carry, and building it anyway would be a
 guess. The message names the editions the toolchain has, because the fix is to
 pick one, and points at the value. `slopium new` writes the newest edition, so
 a new program starts from what the language is now.
+
+## D-159 — the compiler protocol stays internal at 1.0
+
+Status: approved · 2026-08-24
+
+`D-002` separates the manager from the compiler, and the freeze does not pull
+the seam between them into the promise: the command-line protocol `slopium`
+speaks to `slopic` stays internal, `COMPILER_PROTOCOL` stays a handshake
+number the pair bump freely, and `slopium` is the interface a user of the
+toolchain holds. What 1.0 freezes is what leaves a machine — the archive, the
+lockfile, the index and the signature statement (`D-039`, `D-045`, `D-052`,
+`D-056`, and `docs/packaging.md` for the promise entire). A protocol spoken
+only between two binaries installed together has no compatibility to keep,
+and the handshake already turns a mismatched pair into a message rather than
+an unknown flag.
+
+Freezing it would cost exactly what the separation bought. The flags `slopic`
+takes have moved repeatedly behind a `slopium` whose surface did not, and
+each move was invisible because nothing outside this repository is entitled
+to notice one; a frozen protocol would turn every such move into a format
+change. A tool that wants what the compiler knows goes through `slopium`, or
+through `slopic-core` as a library — the door the language server already
+uses.

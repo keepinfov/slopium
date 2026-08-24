@@ -8,6 +8,37 @@ identical archives.
 Every `D-nnn` cited below is an entry in [`decisions.md`](decisions.md), the
 project's decision log.
 
+## The freeze
+
+What this document describes is version 1 of the package format, and version 1
+is frozen: the archive's shape (`D-039`, `D-045`), the lockfile at format 2
+(`D-045`), the index layout (`D-052`) and the signature statement
+`slopium-package-v1` (`D-056`) do not change under it. A package published
+today unpacks, verifies and builds under every later toolchain. The committed
+archive under `tests/frozen` is that promise as bytes — an archive an older
+toolchain published, which `scripts/publish-check.sh` consumes on every run
+and never regenerates.
+
+A later toolchain adds to the format rather than changing it, and the room to
+add is already in it:
+
+- a manifest key this toolchain does not know is reported and skipped
+  (`D-128`, `SL1200`). That rule is itself part of the promise rather than a
+  leniency: it is what lets `features`, dev-dependencies and target-specific
+  dependencies exist after 1.0 without every new package breaking every older
+  toolchain;
+- an unknown field in an index entry is ignored (`D-052`), so an index can
+  come to say more without an older client refusing to read it.
+
+What the additive rule cannot carry takes a new number — a second signature
+statement prefix, a higher lockfile `version` — and version 1 stays readable
+beside it: what an older toolchain meets is a number it can name, never bytes
+that changed meaning under it.
+
+The command-line protocol between `slopium` and `slopic` is not part of the
+format and stays internal at 1.0: `slopium` is the interface, and the pair
+move their protocol freely (`D-002`, `D-159`).
+
 ## The archive
 
 A package archive is a **ustar** tar file with every source of variation removed
@@ -404,6 +435,9 @@ The archive carries the key verbatim — nothing is rewritten on the way through
 this costs is the typo check that refusing gave for free, which is why the key
 is named rather than dropped in silence: a setting that quietly does nothing is
 worse than one that is refused.
+
+Since [the freeze](#the-freeze), this rule is a promise rather than a
+behaviour: every manifest key added after 1.0 arrives through it.
 
 The warning belongs to the manifests of the workspace being acted on. A
 dependency's manifest is the dependency's business, and a consumer that cannot

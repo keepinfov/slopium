@@ -12,7 +12,8 @@ Slopium.toml → package DAG → slopic → module objects → cc → ELF
 `slopium` owns manifests, profiles, target selection, caching, execution, and
 tests. `slopic` consumes an explicitly supplied source root and dependency
 roots; it does not discover manifests or access the network. Their
-command-line protocol is internal and versioned.
+command-line protocol is internal and versioned, and stays internal at 1.0:
+`slopium` is the interface a user of the toolchain holds (`D-159`).
 
 ## Compiler stages
 
