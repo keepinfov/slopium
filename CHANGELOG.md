@@ -13,6 +13,60 @@ rather than everything it touched.
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-08-24
+
+### Added
+- A package declares which edition of the language it is written in:
+  `[package] edition`, of which exactly one exists, `2026`, and `slopium new`
+  writes it. A manifest naming none is read as the first edition, so nothing
+  written before the key changes meaning, and an edition the toolchain does
+  not have is refused as `SL1055`, naming the ones it does.
+- The runtime ABI is written down as version 1 in `docs/runtime-abi.md`: every
+  `sl_rt_*` symbol a program can reach, its C signature and its ownership rule,
+  under the rule of `D-108` — a later minor version may add symbols and may not
+  change or remove one. `scripts/runtime-check.sh` compares the list against
+  what each built runtime object exports, both ways, so a symbol cannot arrive
+  undocumented or disappear unnoticed. The hosted error slot behind
+  `sl_rt_last_error` is thread-local now, before the ABI holds it in place.
+- The package format is frozen at version 1: the archive's shape, the lockfile
+  at format 2, the index layout and the signature statement do not change
+  under it, and a manifest key a toolchain does not know stays a warning
+  rather than a refusal, which is what lets the format grow after 1.0. An
+  archive published by v0.15.2 is committed under `tests/frozen` and every
+  future toolchain proves in CI that it still unpacks, verifies and builds.
+- Nine words are reserved and refused wherever a program would introduce one:
+  `async` and `await` for concurrency, `for` for iteration, `format` for
+  building a `String` from a literal template, `macro` and `define-syntax` for
+  pattern macros, and `usize`, `isize` and `f32` as type names. The refusal,
+  `SL0101`, says what each word is kept for, and the three type names answer
+  with it where a type is spelled rather than as unknown types — which is what
+  lets each of these arrive later without changing any program that compiles
+  today.
+- A deprecation policy in `docs/language.md` says how long a deprecated name
+  lives: until the next major version — before 1.0, the minor plays that
+  role — with removal a breaking change, and a program that ignores the
+  warning compiling and behaving the same until then. `SL0800`'s help now
+  points at the policy, so the first warning a reader meets says where the
+  contract is written.
+- `slopium fix` rewrites a program an old toolchain accepted into the current
+  spelling, whole files at a time. Its first rule is the `v0.5.1` move: a bare
+  `print`, `println` or one of their neighbours that nothing defines, imports
+  or binds gains the `(take std:io ...)` or `(take std:process ...)` that says
+  where the name went, placed and laid out as `fmt` would write it, comments
+  and layout untouched. A file the rule cannot mend whole is left alone with
+  `SL1110` naming the reason, a second run changes nothing, and `fix --check`
+  reports without writing (`D-160`).
+
+### Changed
+- Diagnostic codes are frozen: a code never changes its meaning, a new check
+  gets a new code, and a retired check's code is not reused.
+  `docs/diagnostics.md` is the registry, listing every compiler code, and a
+  test holds it and the compiler to exactly the same set in both directions.
+  `docs/language.md` stops calling itself `v0.2` and becomes the normative
+  reference, read end to end against what actually compiles before the
+  promotion: what it describes is what the language promises.
+
+
 ## [0.15.2] - 2026-08-23
 
 ### Fixed
@@ -560,6 +614,7 @@ package manager, the language server and the Neovim plugin as they stood when
 tagging began.
 
 [Unreleased]: https://github.com/keepinfov/slopium/compare/v0.11.0...HEAD
+[0.16.0]: https://github.com/keepinfov/slopium/compare/v0.15.2...v0.16.0
 [0.15.2]: https://github.com/keepinfov/slopium/compare/v0.15.1...v0.15.2
 [0.15.1]: https://github.com/keepinfov/slopium/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/keepinfov/slopium/compare/v0.14.0...v0.15.0
