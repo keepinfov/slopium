@@ -1,0 +1,5 @@
+reserved-word-usize.slp:5:24: error[SL0101]: `usize` is reserved
+  |
+ 5 | (fn widen ((n i64)) -> usize n)
+  |                        ^^^^^
+  = note: it is held for a pointer-sized unsigned integer, for the first target whose word is not 64 bits

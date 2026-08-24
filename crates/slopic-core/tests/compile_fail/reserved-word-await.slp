@@ -1,0 +1,5 @@
+; `await` is reserved beside `async` (`D-108`), and a binding is a place a
+; name is born, so the reservation is met here like at any other introduction.
+(fn main () -> i32
+  (let await 1)
+  0)

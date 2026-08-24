@@ -24,7 +24,7 @@ syntax match slopiumCall "\%((\s*\)\@<=[A-Za-z_.+*/<>=-][A-Za-z0-9_:!.+*/<>=-]*"
 
 " Declarations use nextgroup instead of a regexp beginning at `(`. This keeps
 " the opening delimiter from masking `fn`, `enum`, and their declared names.
-syntax keyword slopiumFunctionKeyword fn nextgroup=slopiumFunction skipwhite
+syntax keyword slopiumFunctionKeyword fn nextgroup=slopiumFunction,slopiumReservedWord skipwhite
 syntax keyword slopiumLambdaKeyword lambda
 syntax match slopiumFunction "[A-Za-z_][A-Za-z0-9_-]*" contained
 syntax keyword slopiumTypeKeyword struct enum nextgroup=slopiumTypeName skipwhite
@@ -37,13 +37,13 @@ syntax keyword slopiumTestKeyword test
 " is looking for the name and finds a `(`.
 syntax keyword slopiumAnnotation inline deprecated target
 
-syntax keyword slopiumBindingKeyword let nextgroup=slopiumModifier,slopiumVariableDefinition skipwhite
+syntax keyword slopiumBindingKeyword let nextgroup=slopiumModifier,slopiumVariableDefinition,slopiumReservedWord skipwhite
 " A module-level name for a literal. It binds like `let` and is declared like a
 " `fn`, so it takes the binding group and the declaration's `nextgroup`.
-syntax keyword slopiumConstKeyword const nextgroup=slopiumVariableDefinition skipwhite
-syntax keyword slopiumModifier mut contained nextgroup=slopiumVariableDefinition skipwhite
+syntax keyword slopiumConstKeyword const nextgroup=slopiumVariableDefinition,slopiumReservedWord skipwhite
+syntax keyword slopiumModifier mut contained nextgroup=slopiumVariableDefinition,slopiumReservedWord skipwhite
 syntax match slopiumVariableDefinition "[a-z_][A-Za-z0-9_-]*" contained
-syntax keyword slopiumAssignmentKeyword set nextgroup=slopiumVariable skipwhite
+syntax keyword slopiumAssignmentKeyword set nextgroup=slopiumVariable,slopiumReservedWord skipwhite
 syntax match slopiumVariable "[a-z_][A-Za-z0-9_-]*" contained
 syntax keyword slopiumControl do loop while break continue defer
 " `unsafe` is a block like `do`, and a permission rather than a second type
@@ -70,6 +70,10 @@ syntax match slopiumNest "\$"
 " Writing one is refused, so it is marked where it is written rather than left
 " looking like part of the name beside it.
 syntax match slopiumReservedSigil "['`,]"
+" The words the language reserves rather than defines — held for concurrency,
+" iteration, formatting, macros, and the reserved type names. Introducing one
+" is refused (`SL0101`), so it is marked the way a reserved sigil is.
+syntax match slopiumReservedWord "\v<(async|await|define-syntax|f32|for|format|isize|macro|usize)>"
 syntax keyword slopiumBuiltin clone list array slice len push get get-ref pop remove replace not bit-and bit-or bit-xor bit-not shl shr volatile-read volatile-write ptr-offset
 " `<<` and `>>` compose functions (`D-139`) and come first, so that a
 " composition is not highlighted as the comparison its first character is.
@@ -85,6 +89,7 @@ syntax match slopiumWildcard "\v<_>"
 
 highlight default link slopiumNest Delimiter
 highlight default link slopiumReservedSigil Error
+highlight default link slopiumReservedWord Error
 highlight default link slopiumComment Comment
 highlight default link slopiumDoc SpecialComment
 highlight default link slopiumTodo Todo

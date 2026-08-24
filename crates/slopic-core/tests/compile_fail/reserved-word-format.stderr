@@ -1,0 +1,5 @@
+reserved-word-format.slp:4:5: error[SL0101]: `format` is reserved
+  |
+ 4 | (fn format ((template String)) -> String template)
+  |     ^^^^^^
+  = note: it is held for building a `String` from a literal template, with `{}` as the hole

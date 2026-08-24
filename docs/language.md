@@ -125,6 +125,47 @@ populous buckets in the tree, so a lower threshold would rewrite half of it and
 flicker under ordinary editing, because every edit that changes nesting depth by
 one would cross it.
 
+## Reserved words
+
+Nine words are **reserved**: defined as nothing, and unusable wherever a name
+is born — a declaration, a binding, a parameter, a field, a variant, a generic
+parameter, an import alias. Writing one there is refused with `SL0101`, and the
+refusal says what the word is kept for, because a word listed in a document and
+accepted by the parser is not reserved. Three of the nine are also refused
+wherever a type is named, so a program asking for `usize` hears what the word
+is held for rather than `unknown type`.
+
+| Word | Held for |
+| --- | --- |
+| `async` | a suspending function, for the concurrency after 1.0 (`D-108`) |
+| `await` | the result of a suspended call (`D-108`) |
+| `for` | iteration over a collection |
+| `format` | building a `String` from a literal template (`D-125`) |
+| `macro`, `define-syntax` | declaring a pattern macro (`D-109`) |
+| `usize`, `isize` | pointer-sized integers, as type names (`D-107`, `D-110`) |
+| `f32` | a second, narrower float, as a type name (`D-107`, `D-110`) |
+
+The shape each reservation holds open is written down with it, because a
+reservation that does not say what it is holding open is not one:
+
+- `for` is `(for (name collection) body...)`, over a `(List T)`, an
+  `(Array T N)`, a `(Slice T)` and a range, with `break` and `continue`
+  reaching the loop it will be.
+- `format` takes a **literal** template, so the holes are counted at compile
+  time: `{}` is a hole, `{{` is a brace, each argument is expanded by its
+  static type, and what comes out is an owned `String` (`D-125`).
+- a macro's name will live in the one namespace every other name lives in — a
+  macro is a name resolved where names are resolved — which is why the two
+  words are unusable now rather than merely unused (`D-109`).
+- `usize` and `isize` are the pointer-sized integers, and `f32` the second
+  float, for the first target whose word is not 64 bits (`D-107`, `D-110`).
+
+A use of a reserved word needs no rule of its own: nothing can define one, so
+`(await x)` fails the way any unknown name does. What the reservation
+guarantees is the other direction — no program compiled today has taken a
+word, so the day one of these becomes real is a day nobody's program changes
+meaning.
+
 ## Files, modules, and imports
 
 Every `.slp` file contains declarations. Its module name is derived from its
@@ -311,7 +352,10 @@ to have settled it. The language has
 no traits and no bounds, and none are planned for 1.0 (`D-088`). A bound can be
 added later to a parameter that is unconstrained today without invalidating a
 program that already satisfies it, which is why refusing them now costs a
-future version nothing.
+future version nothing. A type-parameter list may likewise later hold a value
+parameter: every list written today holds only type names, so const generics —
+an `(Array T N)` whose `N` a caller chooses — stay a change no existing
+declaration can collide with.
 
 Scalar types are `unit`, `bool`, `f64`, and the eight integers `i8`, `i16`,
 `i32`, `i64`, `u8`, `u16`, `u32` and `u64` (`D-107`). Other built-in types are
@@ -1246,7 +1290,10 @@ on purpose: `(panic message)`, `(assert condition message)` and
 `(unreachable)`. All three end the program with status 101, the same one an
 overflow or an index past the end ends it with, and print the message on
 standard error. There is no catching one: a `Result` is how a failure the
-caller can answer is carried (`D-087`), and this is the other kind. Each
+caller can answer is carried (`D-087`), and this is the other kind. What a
+panic in a thread means is stated now, before a thread exists (`D-108`): it
+ends the process, like every other panic, so the day this language grows
+threads, a panic in any of them still ends the whole program. Each
 answers `unit`, because the language has no type meaning "never", so a panic is
 written where a statement goes — under a `when`, at the end of a branch — and
 not where a value is expected (`D-130`).

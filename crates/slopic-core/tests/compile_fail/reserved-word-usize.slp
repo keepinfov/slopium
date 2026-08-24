@@ -1,0 +1,7 @@
+; There is no `usize`: indices and lengths stay `i64`, and the name is
+; reserved because a pointer-sized integer becomes a real need the moment a
+; 32-bit target appears (`D-107`, `D-110`). A program naming it as a type
+; hears the reservation rather than `unknown type`.
+(fn widen ((n i64)) -> usize n)
+
+(fn main () -> i32 0)

@@ -1,0 +1,5 @@
+reserved-word-isize.slp:5:19: error[SL0101]: `isize` is reserved
+  |
+ 5 |   (let offset 0 : isize)
+  |                   ^^^^^
+  = note: it is held for a pointer-sized signed integer, for the first target whose word is not 64 bits

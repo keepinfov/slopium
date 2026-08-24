@@ -23,6 +23,80 @@ pub(crate) fn cannot_borrow_a_borrow(
     .with_help("a borrow of a borrow says nothing the borrow did not say already")
 }
 
+/// A word the language reserves rather than defines.
+pub struct ReservedWord {
+    /// The word as it is written.
+    pub text: &'static str,
+    /// What the row is for, in a sentence a refusal can end with.
+    pub means: &'static str,
+    /// Whether the word is also refused where a type is named (`D-107`,
+    /// `D-110`): a program writing one there is asking for the reserved type,
+    /// so it gets this answer rather than `unknown type`.
+    pub names_a_type: bool,
+}
+
+/// Every reserved word, in the order the decisions reserved them.
+///
+/// A word listed in a document and accepted by the parser is not reserved, so
+/// the builder refuses each of these wherever a program would introduce it —
+/// a declaration, a binding, a parameter, a field, a variant, a generic
+/// parameter, an import alias — and the three that name types wherever a type
+/// is spelled. A *use* needs no rule of its own: nothing can define these
+/// names, so a use resolves to nothing, the way any unknown name does.
+pub const RESERVED_WORDS: &[ReservedWord] = &[
+    ReservedWord {
+        text: "async",
+        means: "a suspending function, for the concurrency this language has not built yet",
+        names_a_type: false,
+    },
+    ReservedWord {
+        text: "await",
+        means:
+            "the result of a suspended call, for the concurrency this language has not built yet",
+        names_a_type: false,
+    },
+    ReservedWord {
+        text: "for",
+        means: "iteration over a collection, as `(for (name collection) body...)`",
+        names_a_type: false,
+    },
+    ReservedWord {
+        text: "format",
+        means: "building a `String` from a literal template, with `{}` as the hole",
+        names_a_type: false,
+    },
+    ReservedWord {
+        text: "macro",
+        means: "declaring a pattern macro, named in the one namespace every other name lives in",
+        names_a_type: false,
+    },
+    ReservedWord {
+        text: "define-syntax",
+        means: "declaring a pattern macro, named in the one namespace every other name lives in",
+        names_a_type: false,
+    },
+    ReservedWord {
+        text: "usize",
+        means: "a pointer-sized unsigned integer, for the first target whose word is not 64 bits",
+        names_a_type: true,
+    },
+    ReservedWord {
+        text: "isize",
+        means: "a pointer-sized signed integer, for the first target whose word is not 64 bits",
+        names_a_type: true,
+    },
+    ReservedWord {
+        text: "f32",
+        means: "a second, narrower float, for the targets whose hardware wants one",
+        names_a_type: true,
+    },
+];
+
+/// The row for a reserved word, if `name` is one.
+pub fn reserved_word(name: &str) -> Option<&'static ReservedWord> {
+    RESERVED_WORDS.iter().find(|word| word.text == name)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize)]
 pub enum Type {
     Unit,
@@ -1089,15 +1163,26 @@ impl AstBuilder<'_> {
 
     fn import_item(&mut self, form: &SExpr) -> Option<ImportItem> {
         match &form.kind {
-            SExprKind::Atom(path) => Some(ImportItem {
-                path: path.clone(),
-                alias: path.rsplit(':').next().unwrap_or(path).to_owned(),
-                span: form.span,
-            }),
+            SExprKind::Atom(path) => {
+                // The alias is the name this module now answers to, so it is
+                // where the reservation is checked — whether it was written
+                // with `:as` or fell out of the path's last segment. The path
+                // itself only points at another module's names, and a
+                // reserved word cannot be among them.
+                let alias = path.rsplit(':').next().unwrap_or(path).to_owned();
+                self.check_reserved(&alias, form.span);
+                Some(ImportItem {
+                    path: path.clone(),
+                    alias,
+                    span: form.span,
+                })
+            }
             SExprKind::List(parts) if parts.len() == 3 && atom(&parts[1]) == Some(":as") => {
+                let alias = self.required_atom(&parts[2], "import alias")?.to_owned();
+                self.check_reserved(&alias, parts[2].span);
                 Some(ImportItem {
                     path: self.required_atom(&parts[0], "imported path")?.to_owned(),
-                    alias: self.required_atom(&parts[2], "import alias")?.to_owned(),
+                    alias,
                     span: form.span,
                 })
             }
@@ -1250,6 +1335,7 @@ impl AstBuilder<'_> {
             return None;
         }
         let name = self.required_atom(&items[0], "function name")?.to_owned();
+        self.check_reserved(&name, items[0].span);
         let has_generics = items.len() >= 6
             && self.type_params_if_present(&items[1]).is_some()
             && matches!(items[2].kind, SExprKind::List(_));
@@ -1301,6 +1387,7 @@ impl AstBuilder<'_> {
             return None;
         };
         let name = self.required_atom(head, "extern name")?.to_owned();
+        self.check_reserved(&name, head.span);
         // `(name (T) (value T))` is the generic `fn` shape. There is nothing a
         // type parameter could be instantiated to here — the C vocabulary is
         // closed (`D-065`) — so say that instead of complaining that `(T)` is
@@ -1365,8 +1452,10 @@ impl AstBuilder<'_> {
             return None;
         }
         let has_generics = items.len() == 3;
+        let name = self.required_atom(&items[0], "struct name")?.to_owned();
+        self.check_reserved(&name, items[0].span);
         Some(StructDecl {
-            name: self.required_atom(&items[0], "struct name")?.to_owned(),
+            name,
             annotations,
             type_params: if has_generics {
                 self.type_params(&items[1])?
@@ -1389,6 +1478,7 @@ impl AstBuilder<'_> {
             return None;
         }
         let name = self.required_atom(&items[0], "enum name")?.to_owned();
+        self.check_reserved(&name, items[0].span);
         let has_generics = items.len() >= 3 && self.type_params_if_present(&items[1]).is_some();
         let type_params = if has_generics {
             self.type_params(&items[1])?
@@ -1398,15 +1488,19 @@ impl AstBuilder<'_> {
         let mut variants = Vec::new();
         for item in &items[if has_generics { 2 } else { 1 }..] {
             match &item.kind {
-                SExprKind::Atom(variant) => variants.push(EnumVariant {
-                    name: variant.clone(),
-                    fields: Vec::new(),
-                    span: item.span,
-                }),
+                SExprKind::Atom(variant) => {
+                    self.check_reserved(variant, item.span);
+                    variants.push(EnumVariant {
+                        name: variant.clone(),
+                        fields: Vec::new(),
+                        span: item.span,
+                    });
+                }
                 SExprKind::List(parts) if !parts.is_empty() => {
                     let Some(variant_name) = self.required_atom(&parts[0], "variant name") else {
                         continue;
                     };
+                    self.check_reserved(variant_name, parts[0].span);
                     let fields = if parts.len() == 1 {
                         Vec::new()
                     } else if parts.len() == 2 {
@@ -1489,6 +1583,7 @@ impl AstBuilder<'_> {
             let Some(name) = self.required_atom(&pair[0], "name") else {
                 continue;
             };
+            self.check_reserved(name, pair[0].span);
             let Some(ty) = self.ty(&pair[1]) else {
                 continue;
             };
@@ -1520,6 +1615,13 @@ impl AstBuilder<'_> {
             self.error(form.span, "generic parameter list must contain names");
             return None;
         };
+        if let SExprKind::List(items) = &form.kind {
+            for item in items {
+                if let Some(name) = atom(item) {
+                    self.check_reserved(name, item.span);
+                }
+            }
+        }
         let mut seen = std::collections::HashSet::new();
         for parameter in &parameters {
             if !seen.insert(parameter.clone()) {
@@ -1571,6 +1673,15 @@ impl AstBuilder<'_> {
                          keeps its parentheses, as in `(({name} T))`"
                     )),
                 );
+                None
+            }
+            // A reserved type name is answered here, where the type is
+            // spelled, so a program asking for `usize` hears what the word is
+            // held for rather than `unknown type` from a pass later.
+            SExprKind::Atom(name) if reserved_word(name).is_some_and(|word| word.names_a_type) => {
+                let word = reserved_word(name).expect("checked above");
+                self.diagnostics
+                    .push(reserved_refusal(self.file, form.span, word));
                 None
             }
             SExprKind::Atom(name) => Some(match name.as_str() {
@@ -1684,6 +1795,11 @@ impl AstBuilder<'_> {
             }
             SExprKind::List(parts) if !parts.is_empty() && atom(&parts[0]).is_some() => {
                 let name = atom(&parts[0]).expect("checked above").to_owned();
+                if let Some(word) = reserved_word(&name).filter(|word| word.names_a_type) {
+                    self.diagnostics
+                        .push(reserved_refusal(self.file, parts[0].span, word));
+                    return None;
+                }
                 let mut args = Vec::new();
                 for argument in &parts[1..] {
                     args.push(self.ty(argument)?);
@@ -2089,6 +2205,7 @@ impl AstBuilder<'_> {
         let name = self
             .required_atom(&items[name_index], "binding name")?
             .to_owned();
+        self.check_reserved(&name, items[name_index].span);
         let value = Box::new(self.expr(&items[value_index])?);
         let ty = self.ascription(span, &items[value_index + 1..], "let")?;
         Some(Expr {
@@ -2132,6 +2249,7 @@ impl AstBuilder<'_> {
             return None;
         }
         let name = self.required_atom(&items[0], "constant name")?.to_owned();
+        self.check_reserved(&name, items[0].span);
         let value = self.expr(&items[1])?;
         let ty = self.ascription(span, &items[2..], "const")?;
         // A literal and nothing else (`D-121`). Arithmetic here would be a
@@ -2285,7 +2403,10 @@ impl AstBuilder<'_> {
                     self.error(form.span, format!("`{value}` is not a pattern"));
                     return None;
                 }
-                NumericAtom::Name => PatternKind::Binding(value.to_owned()),
+                NumericAtom::Name => {
+                    self.check_reserved(value, form.span);
+                    PatternKind::Binding(value.to_owned())
+                }
             },
         };
         Some(Pattern {
@@ -2335,6 +2456,30 @@ impl AstBuilder<'_> {
             message,
         ));
     }
+
+    /// Refuses `name` where a program would introduce it, if it is reserved.
+    ///
+    /// Recorded rather than fatal: the declaration around the name still
+    /// builds, so one pass reports every reserved name a file holds, and the
+    /// diagnostic's existence is what makes `build_program` refuse the
+    /// program.
+    fn check_reserved(&mut self, name: &str, span: Span) {
+        if let Some(word) = reserved_word(name) {
+            self.diagnostics
+                .push(reserved_refusal(self.file, span, word));
+        }
+    }
+}
+
+/// The refusal a reserved word gets, wherever it is met.
+fn reserved_refusal(file: &str, span: Span, word: &ReservedWord) -> Diagnostic {
+    Diagnostic::error(
+        codes::RESERVED_WORD,
+        file,
+        span,
+        format!("`{}` is reserved", word.text),
+    )
+    .with_note(format!("it is held for {}", word.means))
 }
 
 /// `(& mut T)` — the two tokens somebody writes for `&mut` with a space in it.
@@ -2452,5 +2597,50 @@ mod tests {
         assert_eq!(program.functions.len(), 1);
         assert_eq!(program.tests.len(), 1);
         assert_eq!(program.functions[0].params.len(), 2);
+    }
+
+    fn reserved_codes(source: &str) -> Vec<String> {
+        let tokens = lexer::lex("test.slp", source).unwrap();
+        let tokens = reader::expand("test.slp", &tokens).unwrap();
+        let forms = parser::parse("test.slp", &tokens).unwrap();
+        build_program("test.slp", &forms)
+            .expect_err("a reserved word must be refused")
+            .into_iter()
+            .map(|diagnostic| diagnostic.code)
+            .collect()
+    }
+
+    /// The introduction positions the compile-fail fixtures do not exercise:
+    /// a struct name, an enum variant, a generic parameter, and a pattern
+    /// binding. Each is a place a name is born, so each refuses a reserved
+    /// word with the reservation's own code.
+    #[test]
+    fn every_place_a_name_is_born_refuses_a_reserved_word() {
+        for source in [
+            "(struct usize ((value i64)))",
+            "(enum Task Idle (await ((value i64))))",
+            "(fn pick (for) ((value for)) -> for value)",
+            "(fn tell ((value i64)) -> i64 (match value (macro macro)))",
+        ] {
+            let codes = reserved_codes(source);
+            assert!(
+                codes.contains(&codes::RESERVED_WORD.to_owned()),
+                "`{source}` was not refused as reserved: {codes:?}"
+            );
+        }
+    }
+
+    /// One file, every reserved name it holds reported: the refusal records
+    /// and continues rather than stopping at the first word.
+    #[test]
+    fn a_file_of_reserved_names_reports_each_one() {
+        let codes = reserved_codes("(fn async () -> i64 (let await 1))");
+        assert_eq!(
+            codes,
+            vec![
+                codes::RESERVED_WORD.to_owned(),
+                codes::RESERVED_WORD.to_owned()
+            ]
+        );
     }
 }

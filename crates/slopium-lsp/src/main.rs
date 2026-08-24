@@ -455,6 +455,15 @@ impl Server {
             ));
         }
         for token in &document.analysis.syntax.tokens {
+            // A reserved word is a word of the language even though nothing
+            // defines it: it reads as a keyword, and the diagnostic under it
+            // says what it is kept for.
+            if token.kind == SyntaxKind::Atom
+                && slopic_core::ast::reserved_word(&token.text).is_some()
+            {
+                tokens.push((token.span.start, token.span.end, 0, 0));
+                continue;
+            }
             if token.kind == SyntaxKind::Atom && KEYWORDS.contains(&token.text.as_str()) {
                 let token_type = if matches!(
                     token.text.as_str(),
@@ -1809,6 +1818,55 @@ mod tests {
                 known.contains(&word),
                 "`editors/nvim/ftplugin/slopium.lua` indents under `{word}`, which the \
                  language does not have"
+            );
+        }
+    }
+
+    /// The words of the completion table's `reserved` set, which is where a
+    /// reserved word lives in that file: as a name never offered, rather than
+    /// as a label.
+    fn completion_reserved(source: &str) -> Vec<String> {
+        let after = source
+            .split_once("local reserved = {")
+            .expect("the completion table holds no `reserved` set")
+            .1;
+        let table = &after[..after.find('}').expect("the `reserved` set is unterminated")];
+        table
+            .split('"')
+            .skip(1)
+            .step_by(2)
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// The reserved words are words of the language even though nothing
+    /// defines them (`SL0101`), so the editor's lists must know each one the
+    /// compiler's table holds — the syntax file to mark it, the completion
+    /// table to keep it out of what is offered.
+    #[test]
+    fn the_editor_lists_know_every_reserved_word() {
+        let syntax = editor_file("syntax/slopium.vim");
+        let completion = editor_file("lua/slopium/completion.lua");
+        let highlighted = without_comments(&syntax);
+        let refused = completion_reserved(&completion);
+        let labels = completion_labels(&completion);
+        for word in slopic_core::ast::RESERVED_WORDS {
+            assert!(
+                mentions_word(&highlighted, word.text),
+                "`{}` is reserved and `editors/nvim/syntax/slopium.vim` does not mention it",
+                word.text
+            );
+            assert!(
+                refused.iter().any(|name| name == word.text),
+                "`{}` is reserved and the `reserved` set in \
+                 `editors/nvim/lua/slopium/completion.lua` does not hold it",
+                word.text
+            );
+            assert!(
+                !labels.iter().any(|label| label == word.text),
+                "`{}` is reserved and `editors/nvim/lua/slopium/completion.lua` offers it \
+                 as a completion",
+                word.text
             );
         }
     }

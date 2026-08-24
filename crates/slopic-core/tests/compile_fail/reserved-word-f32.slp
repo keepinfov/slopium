@@ -1,0 +1,6 @@
+; `f32` is a second float rather than a width of an integer (`D-107`), and it
+; arrives with the target that wants one (`D-110`). A field naming it meets
+; the reservation where the type is spelled.
+(struct Sample ((half f32)))
+
+(fn main () -> i32 0)
