@@ -1,4 +1,10 @@
-# Slopium language v0.2
+# The Slopium language
+
+This document is **normative**. It is not a snapshot of a version but the
+reference the language answers to: a form it describes is a promise, a refusal
+it names is a contract with a stable code behind it, and a compiler that
+disagrees with either has the bug. What it does not describe, the language
+does not promise — a hole here is closed by changing this document first.
 
 Every `D-nnn` cited below is an entry in [`decisions.md`](decisions.md), the
 project's decision log.
@@ -335,8 +341,8 @@ that does not exist.
 Every declaration form carries the slot, including the ones no annotation
 applies to yet. That is the point of the mechanism rather than an oversight —
 a foreign record's `repr` and an interrupt handler's calling convention arrive
-with the target that needs them (`D-110`), and after the freeze at v0.10 a new
-form cannot be added while a new annotation can.
+with the target that needs them (`D-110`), and after the freeze a new form
+cannot be added while a new annotation can.
 
 Generic applications use S-expressions, for example `(Box String)` and
 `(Result i64 Error)`. Type arguments are inferred at calls and constructors.
@@ -985,13 +991,14 @@ ordinary modules of the bundled library, written in Slopium over `extern`
 declarations, and a program that uses one says so.
 
 The library is two packages. `core` is what a program with no C library under
-it can have — `option`, `result`, `list`, `string`, `builder`, `float`, `map`
-and `set`. `std` is `core` plus what needs an operating system — `io`,
-`process`, `fs`, `time` and `random` — and it re-exports `core` through
-`std:prelude`, `std:option`, `std:result`, `std:list`, `std:string`,
-`std:builder`, `std:float`, `std:map` and `std:set`, so a package that depends
-on `std` alone reaches everything by that name. The combinators live in modules of their own rather than in
-`prelude` because `option` and `result` both call theirs `map`.
+it can have — `option`, `result`, `list`, `string`, `builder`, `float`, `map`,
+`set` and `panic`. `std` is `core` plus what needs an operating system — `io`,
+`process`, `fs`, `time`, `random` and `test` — and it re-exports `core`
+through `std:prelude`, `std:option`, `std:result`, `std:list`, `std:string`,
+`std:builder`, `std:float`, `std:map`, `std:set` and `std:panic`, so a package
+that depends on `std` alone reaches everything by that name. The combinators
+live in modules of their own rather than in `prelude` because `option` and
+`result` both call theirs `map`.
 
 ```lisp
 (take std:io println println-i64 read-i64)
@@ -1204,8 +1211,9 @@ product is a finite decimal, reached by multiplying an integer by two or by
 five and never by scaling the float itself.
 
 `std:io` has `print` and `println` over `&String`, `print-i64`,
-`println-i64`, `print-bool` and `println-bool`, `read-line` returning
-`(Option String)` without LF/CRLF, and `read-i64` returning `(Option i64)`.
+`println-i64`, `print-u64`, `println-u64`, `print-bool` and `println-bool`,
+`read-line` returning `(Option String)` without LF/CRLF, and `read-i64`
+returning `(Option i64)`.
 There are no traits and none are planned (`D-088`), so one name cannot print
 every printable type (`D-078`); the widths are separate functions, and their
 bodies are Slopium over `from-i64`. There is no `println-i32` and there will
@@ -1313,7 +1321,8 @@ leave a note behind on a mismatch:
 
 They are not assertions, and that is the whole reason they are separate from
 `assert`: a failed assertion ends the program, and a suite that stops at the
-first failure reports one problem per run.
+first failure reports one problem per run. `note` leaves a note by hand, for a
+test whose failure needs more said than a comparison says.
 
 A lone file has no manifest to declare a dependency in, so `slopic file.slp`
 compiles it against `std` and `--no-std` opts out; `--freestanding` gets `core`
@@ -1334,7 +1343,7 @@ inside an `unsafe` block.
 ```lisp
 (fn clear-screen ((vga (Ptr u16))) -> unit
   (unsafe
-    (let mut cell 0)
+    (let mut cell 0 : u64)
     (while (< cell 2000)
       (volatile-write (ptr-offset vga cell) 0x0720)
       (set cell (+ cell 1)))))

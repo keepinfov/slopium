@@ -1428,7 +1428,7 @@ test main:сумма ... FAILED: expected 42, got 41
 - `modules-demo/` — multi-file modules, generics, bundled `std` и owned list;
 - `ctf-license-check/` — готовая reverse CTF-задача с TCP/Docker deployment.
 
-Полное описание синтаксиса: [`docs/language.md`](docs/language.md).
+Нормативное описание языка: [`docs/language.md`](docs/language.md).
 Архитектура компилятора: [`docs/architecture.md`](docs/architecture.md).
 Контракт diagnostics: [`docs/diagnostics.md`](docs/diagnostics.md).
 Формат пакета и хранилище: [`docs/packaging.md`](docs/packaging.md).
