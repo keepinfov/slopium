@@ -144,7 +144,7 @@ messages are that kind, deliberately (`D-071`).
   evaluation rather than printed by `slopium`, because that is where the
   refusal happens (`D-061`).
 
-The manifest, the workspace, the graph, the lock and the build:
+The manifest, the workspace, the graph, the lock, the build, and the fixer:
 
 - `SL1050`: a dependency entry names no source, or names several;
 - `SL1051`: a git dependency's reference is wrong — two of `branch`/`tag`/`rev`,
@@ -183,7 +183,11 @@ The manifest, the workspace, the graph, the lock and the build:
 - `SL1100`: a `c-sources` entry is absolute or leaves the package;
 - `SL1101`: `[build] linker-script` is absolute or leaves the package;
 - `SL1102`: a `[target."<triple>"] modules` entry names no file, leaves the
-  package, or is absolute.
+  package, or is absolute;
+- `SL1110`: a file `slopium fix` cannot mend whole — a moved name has no
+  current spelling that keeps the program's meaning, or the package does not
+  depend on the `std` the fix would take the name from. The file is left
+  exactly as it was (`D-160`).
 
 Resolution is spread over two families: `SL103x` keeps the registry errors that
 happen during resolution, because a stable code that moves is not stable

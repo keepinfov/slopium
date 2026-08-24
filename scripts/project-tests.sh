@@ -143,6 +143,47 @@ if [[ "$format_before" == "$format_after" ]]; then
 fi
 run_manager "$format_project/Slopium.toml" fmt --check >/dev/null
 
+# `slopium fix` and the v0.5.1 move: a program that called `println` and
+# `args-len` as builtins gains the `take` declarations that make it mean the
+# same thing today. The fixture is committed in today's canonical format,
+# missing only its imports, and `expected.slp` is the file `fix` must produce
+# byte for byte — which is what keeps the comments in evidence. The mended
+# program then satisfies `fmt --check`, builds and runs, and a second `fix`
+# writes nothing, which is the idempotence half of the contract.
+fix_project="$result_dir/fix-project"
+cp -R "$projects_dir/fix/pre-move" "$fix_project"
+if run_manager "$fix_project/Slopium.toml" fix --check \
+  >"$result_dir/fix-check.stdout" 2>"$result_dir/fix-check.stderr"; then
+  echo "project-tests: fix --check reported nothing for the pre-move program" >&2
+  exit 1
+fi
+assert_patterns <(printf '%s\n' 'spelling differs') "$result_dir/fix-check.stderr"
+run_manager "$fix_project/Slopium.toml" fix >"$result_dir/fix.stdout"
+assert_patterns <(printf '%s\n' 'Fixed ') "$result_dir/fix.stdout"
+if ! cmp --silent "$projects_dir/fix/pre-move/expected.slp" "$fix_project/src/main.slp"; then
+  echo "project-tests: fix did not produce the expected rewrite" >&2
+  diff -u "$projects_dir/fix/pre-move/expected.slp" "$fix_project/src/main.slp" >&2 || true
+  exit 1
+fi
+run_manager "$fix_project/Slopium.toml" fmt --check >/dev/null
+run_manager "$fix_project/Slopium.toml" run >"$result_dir/fix-run.stdout" 2>/dev/null
+sed '/^\(Compiling\|Fresh\|Finished\) /d' "$result_dir/fix-run.stdout" \
+  >"$result_dir/fix-program.stdout"
+if ! cmp --silent "$projects_dir/fix/pre-move/expected.stdout" "$result_dir/fix-program.stdout"; then
+  echo "project-tests: stdout mismatch for the fixed program" >&2
+  diff -u "$projects_dir/fix/pre-move/expected.stdout" "$result_dir/fix-program.stdout" >&2 || true
+  exit 1
+fi
+run_manager "$fix_project/Slopium.toml" fix --check >/dev/null
+fix_before="$(sha256sum "$fix_project/src/main.slp" | cut -d ' ' -f 1)"
+run_manager "$fix_project/Slopium.toml" fix >/dev/null
+fix_after="$(sha256sum "$fix_project/src/main.slp" | cut -d ' ' -f 1)"
+if [[ "$fix_before" != "$fix_after" ]]; then
+  echo "project-tests: a second fix rewrote a mended program" >&2
+  exit 1
+fi
+echo "project-tests: fix rewrites the v0.5.1 move ... ok"
+
 # Lockfile and dependency graph. The diamond fixture is the interesting one:
 # `foundation` is reached through both `mathlib` and `geometry` and must appear
 # once in the lock and once in the build.

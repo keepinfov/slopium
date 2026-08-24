@@ -172,6 +172,7 @@ of what was believed at the time is the part worth keeping.
 - [D-157 — a deprecated name lives out its major version, and removing it costs the next](#d-157--a-deprecated-name-lives-out-its-major-version-and-removing-it-costs-the-next)
 - [D-158 — an edition is named by a year, and a missing key means the first](#d-158--an-edition-is-named-by-a-year-and-a-missing-key-means-the-first)
 - [D-159 — the compiler protocol stays internal at 1.0](#d-159--the-compiler-protocol-stays-internal-at-10)
+- [D-160 — a fix is a named rule, tied to the release that made it necessary](#d-160--a-fix-is-a-named-rule-tied-to-the-release-that-made-it-necessary)
 
 ## D-001 — a native compiler, without LLVM
 
@@ -3790,3 +3791,41 @@ to notice one; a frozen protocol would turn every such move into a format
 change. A tool that wants what the compiler knows goes through `slopium`, or
 through `slopic-core` as a library — the door the language server already
 uses.
+
+## D-160 — a fix is a named rule, tied to the release that made it necessary
+
+Status: approved · 2026-08-24
+
+`slopium fix` rewrites a program an old toolchain accepted into the current
+spelling. It is not a general migration engine: a fix is a named rule, owned
+by the release whose change made it necessary, knowing exactly what that
+release moved and what the move's mechanical remainder is. The deprecation
+policy (`D-157`) promises that a name lives out its major version; what makes
+the promise more than a stay of execution is a tool that performs the move a
+deprecation announces, which is why the freeze's exit condition asks for a
+fixer that has been run on a real program rather than merely designed.
+
+**A fix promises three things.** It is meaning-preserving: it only adds what
+makes an old spelling name the thing it always named, and it never chooses
+among meanings — a name whose successor answers differently is refused, not
+guessed at. It is whole-file-or-nothing: a file the rule cannot mend
+completely is left untouched, with `SL1110` naming the file and the reason,
+because a half-rewritten program is wrong in a way neither the old toolchain
+nor the new one can explain. And it is idempotent by construction: a fix
+fires only where the old spelling is still in evidence, so on a mended or
+never-broken tree it writes nothing and `fix --check` exits zero — which is
+also how the test suite asserts that a second run changes nothing.
+
+**The first rule is the `v0.5.1` move**, because it is the one change in the
+history a program cannot survive unedited: `print`, `println`, `read-line`,
+`read-i64`, `env`, `args-len` and `arg` stopped being builtins and became
+exports of `std:io` and `std:process`, so a pre-move program calls them bare
+with no `take` to say where they now live. The fix inserts the missing `take`
+declarations — through the same lossless syntax `fmt` reads, laid out as
+`fmt` would lay them, at the line where the file's imports sit — and only for
+a name the file uses bare where nothing defines, imports, or binds it.
+`parse-i64` is the refused remainder: its successor `std:string:to-i64`
+returns an `(Option i64)` where the builtin aborted, and what a non-number
+now means is the program's decision. The manifest is the program's own
+business too — a package that never depended on `std` is told so rather than
+edited.
