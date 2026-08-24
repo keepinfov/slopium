@@ -12,6 +12,18 @@ and `suggestions` enrich newer consumers without breaking clients that ignore
 unknown fields. Suggestions carry a byte span, replacement text, explanation,
 and applicability.
 
+Every code below is **frozen**: a code never changes its meaning, a new check
+gets a new code, and a retired check's code is not reused, so what a reader
+once learned a code meant stays true. The freeze binds codes rather than
+ranges — the families are how the codes read, and a family that runs out of
+numbers continues in a fresh range written down here, because a stable code
+that moves is not stable (`D-071`). This document is the registry. The
+compiler's half is also `codes::ALL` in `crates/slopic-core/src/diagnostic.rs`,
+and a test holds that table and the codes listed here to exactly the same set,
+so a code raised and never documented fails it the same way a code documented
+and never raised does. The manager's codes have no table in code, so for them
+the list here is the only registry there is.
+
 Code families are stable:
 
 - `SL00xx`: lexer and S-expression parser, and the reader's abbreviation table
@@ -49,6 +61,35 @@ builds one object per module, only the module being compiled reports its own.
 So a build prints each warning once, and a module whose object was already
 fresh prints nothing.
 
+The compiler's codes, complete:
+
+- `SL0001`: an unknown string escape;
+- `SL0002`: an unterminated string literal;
+- `SL0003`: a closing parenthesis — `)` or `|)` — with nothing open;
+- `SL0004`: an unclosed list;
+- `SL0005`: expression nesting deeper than the parser descends;
+- `SL0006`: a reserved sigil;
+- `SL0007`: an abbreviation with nothing to expand;
+- `SL0100`: invalid declaration or expression syntax;
+- `SL0101`: a reserved word;
+- `SL0200`: a name resolution or type error;
+- `SL0300`: an ownership or borrowing error;
+- `SL0301`: a raw-pointer operation outside an `unsafe` block;
+- `SL0400`: a pattern matching error;
+- `SL0401`: an invalid program entry point;
+- `SL0450`: a module resolution or visibility error;
+- `SL0451`: a dependency graph or manifest dependency error;
+- `SL0452`: a generic declaration or instantiation error;
+- `SL0453`: a standard-library language-item contract error;
+- `SL0500`: an unsupported compilation target;
+- `SL0501`: an unsupported target ABI operation;
+- `SL0502`: a function too large for the target;
+- `SL0600`: a compiler input error;
+- `SL0601`: a compiler output error;
+- `SL0602`: an external toolchain error;
+- `SL0700`: an internal compiler error;
+- `SL0800`: a use of a deprecated declaration.
+
 `SL10xx` belongs to the project manager rather than the compiler, and is plain
 text rather than JSON — `slopium` reports one error and exits. `SL12xx` is the
 manager's **warning** family, which renders as `warning[SL12xx]` on standard
@@ -72,10 +113,12 @@ messages are that kind, deliberately (`D-071`).
 - `SL1003`: an archive holds more than one package;
 - `SL1004`: an archive is malformed;
 - `SL1010`: a stored archive does not match the digest it is filed under;
-- `SL1011`: a package is not in the store and cannot be fetched;
+- `SL1011`: a package or a registry index is not held locally and cannot be
+  fetched — `--offline` forbids it, or no source this toolchain has can;
 - `SL1012`: a vendored copy does not match its checksum;
 - `SL1020`: a `git` command could not be run, or failed;
-- `SL1021`: a fetched package uses submodules, which v0.4 does not fetch;
+- `SL1021`: a fetched package uses submodules, which this toolchain does not
+  fetch;
 - `SL1022`: a pinned commit no longer archives to the digest the lock records;
 - `SL1023`: a git reference names no commit in the repository;
 - `SL1030`: a registry a manifest or a lock names is not configured, or its
@@ -145,13 +188,6 @@ The manifest, the workspace, the graph, the lock and the build:
 Resolution is spread over two families: `SL103x` keeps the registry errors that
 happen during resolution, because a stable code that moves is not stable
 (`D-071`).
-
-The v0.2 package and language-core diagnostics reserve:
-
-- `SL0450`: module resolution and visibility;
-- `SL0451`: dependency graph or manifest dependency;
-- `SL0452`: generic declaration or instantiation;
-- `SL0453`: standard-library language-item contract.
 
 `SL0700` reports a failed internal consistency check, such as MIR verification
 or an optimizer analysis that did not settle within its bound. It is never

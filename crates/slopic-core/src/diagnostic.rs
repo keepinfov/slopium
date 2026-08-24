@@ -395,11 +395,46 @@ mod tests {
 
     #[test]
     fn diagnostic_codes_are_documented_and_unique() {
-        let mut seen = HashSet::new();
+        let mut compiled = HashSet::new();
         for (code, description) in codes::ALL {
             assert!(code.starts_with("SL") && code.len() == 6);
             assert!(!description.is_empty());
-            assert!(seen.insert(code), "duplicate diagnostic code {code}");
+            assert!(compiled.insert(*code), "duplicate diagnostic code {code}");
+        }
+
+        // The codes are frozen, and `docs/diagnostics.md` is the registry: it
+        // lists exactly the compiler's codes, so a code raised and never
+        // documented fails here the same way a code documented and never
+        // raised does. The manager's `SL1xxx` half has no table in code to
+        // hold the document against, which is why the comparison stops at
+        // `SL0`.
+        let contract = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/diagnostics.md");
+        let contract =
+            std::fs::read_to_string(contract).expect("docs/diagnostics.md is part of the clone");
+        let mut documented = HashSet::new();
+        let mut rest = contract.as_str();
+        while let Some(found) = rest.find("SL") {
+            let candidate = &rest[found..];
+            let digits = candidate[2..]
+                .bytes()
+                .take_while(u8::is_ascii_digit)
+                .count();
+            if digits == 4 && candidate.starts_with("SL0") {
+                documented.insert(&candidate[..6]);
+            }
+            rest = &candidate[2..];
+        }
+        for code in &compiled {
+            assert!(
+                documented.contains(code),
+                "{code} is raised by the compiler and not documented in docs/diagnostics.md"
+            );
+        }
+        for code in &documented {
+            assert!(
+                compiled.contains(code),
+                "{code} is documented in docs/diagnostics.md and nothing raises it"
+            );
         }
     }
 }
