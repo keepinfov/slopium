@@ -1,0 +1,6 @@
+; `define-syntax` is reserved beside `macro` (`D-109`), and an import alias is
+; a name this module answers to from then on — an introduction, so the
+; reservation is met at the alias rather than at the path.
+(take strings concat :as define-syntax)
+
+(fn main () -> i32 0)

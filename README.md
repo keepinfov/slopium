@@ -1486,6 +1486,10 @@ nvim examples/fibonacci.slp
 - целое любой ширины занимает машинное слово, поэтому `(List u8)` — это восемь
   байт на элемент; упаковка — отдельная задача с измерением перед ней;
 - нет traits, bounds и stable FFI;
+- девять слов зарезервированы и не могут быть именами: `async`, `await`,
+  `for`, `format`, `macro`, `define-syntax`, а `usize`, `isize` и `f32` — ещё
+  и как имена типов. Попытка ввести такое имя — ошибка `SL0101`, которая
+  говорит, для чего слово придержано;
 - dependency graph поддерживает path, bundled-toolchain, git и registry;
   подписи пакетов и `slopium publish` — v0.4.5;
 - опубликованный пакет может зависеть только от своего registry и toolchain:

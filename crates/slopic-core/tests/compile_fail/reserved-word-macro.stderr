@@ -1,0 +1,5 @@
+reserved-word-macro.slp:4:8: error[SL0101]: `macro` is reserved
+  |
+ 4 | (const macro 3)
+  |        ^^^^^
+  = note: it is held for declaring a pattern macro, named in the one namespace every other name lives in

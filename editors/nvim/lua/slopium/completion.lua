@@ -103,8 +103,23 @@ local static_items = {
   { label = "ptr-offset", kind = kinds.Function, detail = "ptr-offset((Ptr T) u64) -> (Ptr T)" },
 }
 
+-- The words the language reserves rather than defines. A program cannot
+-- introduce one (`SL0101`), so nothing scanned from a buffer may offer one
+-- back as a name to use.
+local reserved = {
+  ["async"] = true,
+  ["await"] = true,
+  ["for"] = true,
+  ["format"] = true,
+  ["macro"] = true,
+  ["define-syntax"] = true,
+  ["usize"] = true,
+  ["isize"] = true,
+  ["f32"] = true,
+}
+
 local function add(items, seen, label, kind, detail)
-  if not label or label == "" or seen[label] then
+  if not label or label == "" or seen[label] or reserved[label] then
     return
   end
   seen[label] = true

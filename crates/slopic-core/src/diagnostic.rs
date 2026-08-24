@@ -18,6 +18,15 @@ pub mod codes {
     /// An abbreviation with nothing to expand (`D-149`).
     pub const ABBREVIATION: &str = "SL0007";
     pub const INVALID_SYNTAX: &str = "SL0100";
+    /// A word the language reserves rather than defines (`D-107`, `D-108`,
+    /// `D-109`, `D-110`, `D-125`).
+    ///
+    /// Its own code rather than `INVALID_SYNTAX`'s, for `SL0006`'s reason: the
+    /// declaration is well formed and the name is spoken for, so a reader
+    /// looking the code up is asking what the word is kept for, and the note
+    /// answers that. One code for all nine words, because what varies by word
+    /// is the answer and the note is where the answer lives.
+    pub const RESERVED_WORD: &str = "SL0101";
     pub const NAME_OR_TYPE: &str = "SL0200";
     pub const OWNERSHIP: &str = "SL0300";
     /// A raw-pointer operation written outside an `unsafe` block (`D-067`).
@@ -60,6 +69,7 @@ pub mod codes {
         (RESERVED_SIGIL, "reserved sigil"),
         (ABBREVIATION, "abbreviation with nothing to expand"),
         (INVALID_SYNTAX, "invalid declaration or expression syntax"),
+        (RESERVED_WORD, "reserved word"),
         (NAME_OR_TYPE, "name resolution or type error"),
         (OWNERSHIP, "ownership or borrowing error"),
         (

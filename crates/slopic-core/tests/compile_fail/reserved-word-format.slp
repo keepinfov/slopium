@@ -1,0 +1,6 @@
+; `format` is reserved at the freeze and nothing is built (`D-125`): a
+; declaration may not take the name, which is what makes adding the form
+; later a change nobody's program can notice.
+(fn format ((template String)) -> String template)
+
+(fn main () -> i32 0)

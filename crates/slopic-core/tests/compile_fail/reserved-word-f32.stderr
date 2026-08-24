@@ -1,0 +1,5 @@
+reserved-word-f32.slp:4:23: error[SL0101]: `f32` is reserved
+  |
+ 4 | (struct Sample ((half f32)))
+  |                       ^^^
+  = note: it is held for a second, narrower float, for the targets whose hardware wants one

@@ -1,0 +1,6 @@
+; `isize` is reserved beside `usize` (`D-107`, `D-110`): the signed
+; pointer-sized integer arrives with the first target whose word is not 64
+; bits, and until then a type spelling it is refused as reserved.
+(fn main () -> i32
+  (let offset 0 : isize)
+  0)

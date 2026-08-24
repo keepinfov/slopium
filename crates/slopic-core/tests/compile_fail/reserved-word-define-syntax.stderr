@@ -1,0 +1,5 @@
+reserved-word-define-syntax.slp:4:26: error[SL0101]: `define-syntax` is reserved
+  |
+ 4 | (take strings concat :as define-syntax)
+  |                          ^^^^^^^^^^^^^
+  = note: it is held for declaring a pattern macro, named in the one namespace every other name lives in

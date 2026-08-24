@@ -1,0 +1,6 @@
+; `macro` is reserved with the namespace rule (`D-109`): a macro name will
+; live where every other name lives, so the word cannot be a constant today
+; without changing what an import means the day macros arrive.
+(const macro 3)
+
+(fn main () -> i32 0)

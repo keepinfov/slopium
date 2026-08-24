@@ -1,0 +1,6 @@
+; `for` is held for iteration, with its shape written down in
+; `docs/language.md` before anything implements it. A parameter is a name a
+; program introduces, so the reservation is met here.
+(fn count ((for i64)) -> i64 0)
+
+(fn main () -> i32 0)

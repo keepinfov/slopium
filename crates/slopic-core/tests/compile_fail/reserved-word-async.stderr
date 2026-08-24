@@ -1,0 +1,5 @@
+reserved-word-async.slp:4:5: error[SL0101]: `async` is reserved
+  |
+ 4 | (fn async () -> i64 0)
+  |     ^^^^^
+  = note: it is held for a suspending function, for the concurrency this language has not built yet

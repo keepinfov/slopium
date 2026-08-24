@@ -1,0 +1,5 @@
+reserved-word-await.slp:4:8: error[SL0101]: `await` is reserved
+  |
+ 4 |   (let await 1)
+  |        ^^^^^
+  = note: it is held for the result of a suspended call, for the concurrency this language has not built yet

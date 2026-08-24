@@ -19,7 +19,13 @@ Code families are stable:
   note says what the character is kept for, and `SL0007` for an abbreviation
   with nothing to expand (`D-149`). `SL0003` covers `|)` written where nothing
   is open, and `SL0004`'s help names it beside `)` (`D-151`);
-- `SL01xx`: declaration and expression shape;
+- `SL01xx`: declaration and expression shape, and `SL0101` for a word that is
+  reserved rather than defined, whose note says what the word is kept for
+  (`D-107`, `D-108`, `D-109`, `D-110`, `D-125`). It is raised wherever a
+  program would introduce the word — a declaration, a binding, a parameter, a
+  field, a variant, a generic parameter, an import alias — and where `usize`,
+  `isize` or `f32` is written as a type, so a reserved type name answers with
+  the reservation rather than as an unknown type;
 - `SL02xx`: name resolution and types;
 - `SL03xx`: ownership and borrowing, and `SL0301` for a raw-pointer operation
   written outside an `unsafe` block;

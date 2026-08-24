@@ -1,0 +1,6 @@
+; The freeze reserves `async` defined as nothing (`D-108`): concurrency comes
+; after 1.0, and the word has to be unusable before then, because a word
+; listed in a document and accepted by the parser is not reserved.
+(fn async () -> i64 0)
+
+(fn main () -> i32 0)
