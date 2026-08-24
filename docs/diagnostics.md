@@ -106,6 +106,8 @@ The manifest, the workspace, the graph, the lock and the build:
   package with no `entry` where a module to start from is needed;
 - `SL1054`: a `[source.*]` table in `.slopium/config.toml` is incomplete or
   points at nothing;
+- `SL1055`: a manifest names an edition this toolchain does not have; the
+  message names the ones it does, and points at the value (`D-158`);
 - `SL1060`: the selection is ambiguous or contradictory — `--workspace` with
   `--package`, or several members and neither;
 - `SL1061`: a named package is not a member of this workspace;

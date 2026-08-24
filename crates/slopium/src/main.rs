@@ -7,7 +7,8 @@ use slopic_core::syntax::{format_source, FormatOptions};
 use slopium_manifest::archive::{package_archive, ARCHIVE_EXTENSION};
 use slopium_manifest::lock::{Lockfile, LOCK_FILE};
 use slopium_manifest::manifest::{
-    load_local_config, validate_package_name, LocalConfig, Profile, Project, MANIFEST_FILE,
+    load_local_config, validate_package_name, LocalConfig, Profile, Project, EDITIONS,
+    MANIFEST_FILE,
 };
 use slopium_manifest::registry::{
     archive_path as published_archive_path, index_path as published_index_path,
@@ -586,8 +587,13 @@ fn create_project(name: &str, path: Option<PathBuf>, library: bool) -> Result<()
     } else {
         format!("[build]\ntarget = \"{DEFAULT_TARGET}\"\n\n")
     };
+    // A new package is written in the newest edition. The oldest is what a
+    // manifest naming none means, and the split matters: the default keeps old
+    // manifests meaning what they meant, while a new program starts from what
+    // the language is now (`D-158`).
+    let edition = EDITIONS[EDITIONS.len() - 1];
     let manifest = format!(
-        "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nsource = \"src\"\nentry = \"{entry}\"\n\n\
+        "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"{edition}\"\nsource = \"src\"\nentry = \"{entry}\"\n\n\
          [dependencies]\nstd = {{ toolchain = true }}\n\n\
          {build}\
          [profile.dev]\nopt-level = 0\ndebug = true\nstrip = false\npanic = \"message\"\n\n\
