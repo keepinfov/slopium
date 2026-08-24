@@ -265,6 +265,32 @@ describes the family. The name of an annotation is reserved nowhere else: a
 binding, a function or a field may be called `inline`, because the word means
 something only in the slot.
 
+**The deprecation policy** is what makes the warning worth heeding. A
+deprecated name lives until the next major version: every release that shares
+a major with the release that deprecated it still declares the name, still
+compiles a use of it, and gives that use the behaviour it always had. Within
+the major the warning is the whole cost, and `SL0800` never hardens into an
+error — a warning that escalates on a schedule would be a removal performed by
+the compiler instead of by the author. Removing the name is what costs a major
+version, because a caret requirement — `^1.2`, or the bare `1.2` that means
+the same — accepts every later minor of the major it names, so a name removed
+in a minor would break a program that never asked to move. Nothing is removed
+that a published release did not deprecate first; that holds for the standard
+library, and it is the convention for every published package: deprecate in
+one major, remove in the next at the earliest. Before 1.0 the minor plays the
+major's role, exactly as a caret requirement reads it — `^0.4` accepts `0.4.9`
+and refuses `0.5.0` — so a name deprecated in `0.x` holds through every
+`0.x.y` and may go at `0.(x+1)`.
+
+A program that ignores the warning is entitled to exactly that much and no
+more: it compiles, and what it computes does not change, for as long as its
+requirements resolve inside the major that warned it. The note the warning
+carries — the replacement, when the annotation named one — is the migration,
+and the next major is the deadline. Past it the entitlement ends: a use of a
+removed name is an ordinary unknown name, refused with `SL0200` and no memory
+of the deprecation, because by then the program is asking for a declaration
+that does not exist.
+
 Every declaration form carries the slot, including the ones no annotation
 applies to yet. That is the point of the mechanism rather than an oversight —
 a foreign record's `repr` and an interrupt handler's calling convention arrive

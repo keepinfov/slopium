@@ -169,6 +169,7 @@ of what was believed at the time is the part worth keeping.
 - [D-154 — the manager reads the compiler's exit code, and stops naming a module it cannot blame](#d-154--the-manager-reads-the-compilers-exit-code-and-stops-naming-a-module-it-cannot-blame)
 - [D-155 — a function longer than a conditional branch reaches is refused, and the limit is written down](#d-155--a-function-longer-than-a-conditional-branch-reaches-is-refused-and-the-limit-is-written-down)
 - [D-156 — a test is emitted by the module that owns it, and the harness by the entry module](#d-156--a-test-is-emitted-by-the-module-that-owns-it-and-the-harness-by-the-entry-module)
+- [D-157 — a deprecated name lives out its major version, and removing it costs the next](#d-157--a-deprecated-name-lives-out-its-major-version-and-removing-it-costs-the-next)
 
 ## D-001 — a native compiler, without LLVM
 
@@ -3694,3 +3695,39 @@ linkage like any other function, and the harness already referenced it by name,
 which is why the reference existed before anything defined it. The release path
 is unchanged: without `--test` neither flag is set, so no `sl_test_*` function
 reaches an ordinary binary.
+
+## D-157 — a deprecated name lives out its major version, and removing it costs the next
+
+Status: approved · 2026-08-24
+
+`deprecated` warned (`D-122`, `D-152`) without saying for how long, which made
+`SL0800` a mood rather than a contract: a warning whose consequence has no
+date is one a reader can postpone forever, and rightly. The policy now stands
+in `docs/language.md`, beside the annotation it governs, and the warning's
+help points at it, so the first `SL0800` a person meets says where the
+contract is written.
+
+**The lifetime is the major version, because that is what a caret requirement
+already protects.** A bare requirement is a caret requirement (`D-036`) and a
+caret holds the leftmost non-zero field, so a program that wrote `^1.2`
+receives every later minor without asking; a name removed in a minor breaks a
+program that never chose to move, which is the exact breakage semantic
+versioning exists to fence. So removal is a breaking change and waits for a
+major version, nothing is removed that a published release did not deprecate
+first, and before 1.0 the minor plays the major's role — the same field the
+caret holds — so a name deprecated in `0.x` lives through every `0.x.y`.
+
+**A program that ignores the warning keeps everything and gains nothing.**
+Within the major it is entitled to compilation and to unchanged behaviour:
+`SL0800` never hardens into an error on its own, because a warning that
+escalates on a schedule is a removal performed by the compiler instead of by
+the author. Past the major it is entitled to nothing, and a use of a removed
+name is an ordinary `SL0200` with no memory of the deprecation — an interface
+that kept a tombstone for every name it ever shed would grow forever in order
+to describe what it no longer contains.
+
+**The pointer lives in the help rather than in a longer message.** `D-122`
+gave every `SL0800` the same first line and kept the annotation's own string
+as the note, and both survive: the help is the one slot left, and what it
+names is the file rather than a section anchor, because a heading can be
+reworded without anybody thinking of a string in the compiler.

@@ -5188,12 +5188,6 @@ impl<'a> Analyzer<'a> {
         );
     }
 
-    /// A use of a declaration somebody marked `deprecated` (`D-122`).
-    ///
-    /// The span is the use rather than the declaration, because the use is
-    /// what the reader has to change, and the annotation's message — when it
-    /// carries one — is a note rather than the message, so that every one of
-    /// these warnings reads the same at its first line.
     /// Warns where a field somebody annotated `deprecated` is named (`D-152`).
     ///
     /// A generic struct is looked up under the name it was declared with: an
@@ -5214,6 +5208,14 @@ impl<'a> Analyzer<'a> {
         self.deprecated_use(field, span, &deprecation);
     }
 
+    /// A use of a declaration somebody marked `deprecated` (`D-122`).
+    ///
+    /// The span is the use rather than the declaration, because the use is
+    /// what the reader has to change, and the annotation's message — when it
+    /// carries one — is a note rather than the message, so that every one of
+    /// these warnings reads the same at its first line. The help points at
+    /// the deprecation policy (`D-157`): what the warning obliges, and for
+    /// how long, is written in `docs/language.md` rather than restated here.
     fn deprecated_use(&mut self, name: &str, span: Span, deprecation: &Deprecation) {
         // The name a module resolver made canonical is not the name anybody
         // wrote, and the span already says which module this is. So the
@@ -5225,7 +5227,8 @@ impl<'a> Analyzer<'a> {
             self.file,
             span,
             format!("`{written}` is deprecated"),
-        );
+        )
+        .with_help("the deprecation policy in `docs/language.md` says how long the name lives");
         if let Some(message) = &deprecation.message {
             warning = warning.with_note(message.clone());
         }
