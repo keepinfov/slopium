@@ -1,0 +1,19 @@
+; A doorman written against a pre-v0.5.1 toolchain: `println` and
+; `args-len` were builtins, so there was nothing here to `take`.
+
+(take std:io println)
+(take std:process args-len)
+
+; The sign above the door.
+(fn banner () -> String "slopium doorman")
+
+(fn main () -> i32
+  (let title (banner))
+  ; Printing was the compiler's business once.
+  (println &title)
+  (let plain "no arguments")
+  (let busy "arguments given")
+  (if (> (args-len) 0)
+    (println &busy) ; the process side of the move
+    (println &plain))
+  0)

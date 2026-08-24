@@ -1,9 +1,15 @@
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
 use serde::Deserialize;
-use slopic_core::ast::{Annotation, AnnotationArg, Expr, ExprKind};
+use slopic_core::ast::{
+    build_program, Annotation, AnnotationArg, Expr, ExprKind, Pattern, PatternKind, Program,
+};
 use slopic_core::codegen::{Environment, DEFAULT_TARGET, TARGETS};
-use slopic_core::syntax::{format_source, FormatOptions};
+use slopic_core::diagnostic::CompileResult;
+use slopic_core::syntax::{
+    format_source, parse_lossless, FormatOptions, SyntaxElement, SyntaxKind, SyntaxNode,
+};
+use slopic_core::{lexer, parser, reader};
 use slopium_manifest::archive::{package_archive, ARCHIVE_EXTENSION};
 use slopium_manifest::lock::{Lockfile, LOCK_FILE};
 use slopium_manifest::manifest::{
@@ -24,7 +30,7 @@ use slopium_manifest::std_library::{toolchain_module_path, toolchain_package};
 use slopium_manifest::store::{remove_tree, Access, Store};
 use slopium_manifest::version::Version;
 use slopium_manifest::workspace::{enclosing_workspace, load_workspace, Enclosing, Workspace};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ffi::OsString;
 use std::fs;
 use std::fs::OpenOptions;
@@ -64,6 +70,16 @@ enum Commands {
     },
     Test(BuildArgs),
     Fmt {
+        #[arg(long)]
+        check: bool,
+        #[command(flatten)]
+        select: SelectArgs,
+    },
+    /// Rewrite a spelling an old toolchain accepted into the current one,
+    /// a whole file at a time (`D-160`).
+    Fix {
+        /// Report the files the fix would rewrite and exit nonzero, without
+        /// writing anything.
         #[arg(long)]
         check: bool,
         #[command(flatten)]
@@ -368,6 +384,31 @@ fn main() {
                 ))
             })
         }
+        Commands::Fix { check, select } => {
+            open_workspace(cli.manifest_path).and_then(|workspace| {
+                let mut differences = Vec::new();
+                let mut refusals = Vec::new();
+                for project in select.all(&workspace)? {
+                    let outcome = fix_project(project, check)?;
+                    differences.extend(outcome.differences);
+                    refusals.extend(outcome.refusals);
+                }
+                if !refusals.is_empty() {
+                    return Err(refusals.join("\n"));
+                }
+                if differences.is_empty() {
+                    return Ok(());
+                }
+                Err(format!(
+                    "spelling differs: {}",
+                    differences
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+            })
+        }
         Commands::Clean(select) => {
             open_workspace(cli.manifest_path).and_then(|workspace| clean(&workspace, &select))
         }
@@ -565,6 +606,385 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+/// The names `v0.5.1` moved out of the compiler, and the module whose export
+/// each became. This table is the fix's whole knowledge of the move: one of
+/// these, used bare where nothing defines, imports, or binds it, is a use
+/// that resolved to a builtin before the move and resolves to nothing now,
+/// and is mended by taking it from the module written beside it.
+const MOVED_AT_0_5_1: &[(&str, &str)] = &[
+    ("arg", "std:process"),
+    ("args-len", "std:process"),
+    ("env", "std:process"),
+    ("print", "std:io"),
+    ("println", "std:io"),
+    ("read-i64", "std:io"),
+    ("read-line", "std:io"),
+];
+
+/// The one name the release moved and a later release renamed away:
+/// `parse-i64` has no current spelling, because its successor
+/// `std:string:to-i64` answers with an `(Option i64)` where the builtin
+/// aborted. A program using it has a decision to make that no rewrite can
+/// take off its hands, so the file is refused whole.
+const MOVED_WITHOUT_A_SPELLING: &[&str] = &["parse-i64"];
+
+/// What `fix` did to one package, or would do under `--check`.
+struct FixOutcome {
+    /// The files `--check` found still spelled the old way.
+    differences: Vec<PathBuf>,
+    /// The files left untouched, each with the reason it could not be mended.
+    refusals: Vec<String>,
+}
+
+/// Mend one package's sources, whole files at a time (`D-160`).
+///
+/// Each file is parsed to its declaration tree, which is enough to see every
+/// name it defines, imports, binds, and uses without resolving the package;
+/// the moved names still used bare then gain their `take` declarations. A
+/// file the rule cannot mend completely is reported and left exactly as it
+/// was, and a file with nothing old in it is not rewritten at all, which is
+/// what makes a second run write nothing.
+fn fix_project(project: &Project, check: bool) -> Result<FixOutcome, String> {
+    let mut outcome = FixOutcome {
+        differences: Vec::new(),
+        refusals: Vec::new(),
+    };
+    for source_path in source_files(project)? {
+        let source = fs::read_to_string(&source_path)
+            .map_err(|error| format!("cannot read `{}`: {error}", source_path.display()))?;
+        let file = source_path.display().to_string();
+        let program = parse_for_fix(&file, &source).map_err(|diagnostics| {
+            diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.render(&source))
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        })?;
+        let free = free_moved_names(&program);
+        if free.is_empty() {
+            continue;
+        }
+        if let Some(orphan) = free
+            .iter()
+            .find(|name| MOVED_WITHOUT_A_SPELLING.contains(&name.as_str()))
+        {
+            outcome.refusals.push(format!(
+                "SL1110: cannot fix `{file}`: `{orphan}` has no current spelling — \
+                 `std:string:to-i64` answers with an `(Option i64)` where the builtin \
+                 aborted, and what a non-number now means is the program's decision"
+            ));
+            continue;
+        }
+        if !project.dependencies.contains_key("std") {
+            let names = free
+                .iter()
+                .map(|name| format!("`{name}`"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            outcome.refusals.push(format!(
+                "SL1110: cannot fix `{file}`: {names} would be taken from `std`, \
+                 and the package does not depend on it"
+            ));
+            continue;
+        }
+        let fixed = insert_takes(&source, &free);
+        if check {
+            outcome.differences.push(source_path);
+        } else {
+            atomic_write(&source_path, fixed.as_bytes())?;
+            println!("Fixed {}", source_path.display());
+        }
+    }
+    Ok(outcome)
+}
+
+/// The front half of the compiler, up to one module's declaration tree. A
+/// file that does not lex and parse is refused rather than rewritten, exactly
+/// as `fmt` refuses it, so the output always describes the same program as
+/// the input.
+fn parse_for_fix(file: &str, source: &str) -> CompileResult<Program> {
+    let tokens = lexer::lex(file, source)?;
+    let expanded = reader::expand(file, &tokens)?;
+    let forms = parser::parse(file, &expanded)?;
+    build_program(file, &forms)
+}
+
+/// Every moved name the module uses bare where nothing binds it: not a
+/// declaration, not an import, not a local in scope at the use. These are
+/// exactly the uses that meant a builtin before `v0.5.1` and mean nothing
+/// now, so a bound name — however it is bound — is hands off.
+fn free_moved_names(program: &Program) -> BTreeSet<String> {
+    let mut declared = HashSet::new();
+    for take in &program.takes {
+        for item in &take.items {
+            declared.insert(item.alias.as_str());
+        }
+    }
+    for function in &program.functions {
+        declared.insert(function.name.as_str());
+    }
+    for declaration in &program.externs {
+        declared.insert(declaration.name.as_str());
+    }
+    for constant in &program.consts {
+        declared.insert(constant.name.as_str());
+    }
+    for declaration in &program.structs {
+        declared.insert(declaration.name.as_str());
+    }
+    for declaration in &program.enums {
+        declared.insert(declaration.name.as_str());
+        for variant in &declaration.variants {
+            declared.insert(variant.name.as_str());
+        }
+    }
+    for omission in &program.omitted {
+        declared.insert(omission.name.as_str());
+    }
+    let mut names = FreeNames {
+        declared,
+        scope: Vec::new(),
+        free: BTreeSet::new(),
+    };
+    for function in &program.functions {
+        let depth = names.scope.len();
+        for parameter in &function.params {
+            names.scope.push(parameter.name.clone());
+        }
+        names.walk(&function.body);
+        names.scope.truncate(depth);
+    }
+    for test in &program.tests {
+        names.scoped(&test.body);
+    }
+    for constant in &program.consts {
+        names.scoped(&constant.value);
+    }
+    names.free
+}
+
+/// The walk that finds them, carrying the lexical scope as a stack of names.
+///
+/// A `let` binds to the end of the block it stands in, so a sequencing form
+/// truncates the stack back to where it entered and everything else walks
+/// each child in a scope of its own — which is also why a use before its
+/// `let` in the same block counts as free, the way the language reads it.
+struct FreeNames<'a> {
+    declared: HashSet<&'a str>,
+    scope: Vec<String>,
+    free: BTreeSet<String>,
+}
+
+impl FreeNames<'_> {
+    fn used(&mut self, name: &str) {
+        let moved = MOVED_AT_0_5_1.iter().any(|(gone, _)| *gone == name)
+            || MOVED_WITHOUT_A_SPELLING.contains(&name);
+        if moved && !self.scope.iter().any(|bound| bound == name) && !self.declared.contains(name) {
+            self.free.insert(name.to_owned());
+        }
+    }
+
+    fn scoped(&mut self, expr: &Expr) {
+        let depth = self.scope.len();
+        self.walk(expr);
+        self.scope.truncate(depth);
+    }
+
+    fn walk(&mut self, expr: &Expr) {
+        match &expr.kind {
+            ExprKind::Unit
+            | ExprKind::Bool(_)
+            | ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::String(_)
+            | ExprKind::Continue
+            | ExprKind::Break(None) => {}
+            ExprKind::Var { name, .. } => self.used(name),
+            ExprKind::Let { name, value, .. } => {
+                self.scoped(value);
+                self.scope.push(name.clone());
+            }
+            ExprKind::Set { name, value } => {
+                self.used(name);
+                self.scoped(value);
+            }
+            ExprKind::Do(items) | ExprKind::Unsafe(items) => {
+                let depth = self.scope.len();
+                for item in items {
+                    self.walk(item);
+                }
+                self.scope.truncate(depth);
+            }
+            ExprKind::Defer(inner)
+            | ExprKind::Try(inner)
+            | ExprKind::Break(Some(inner))
+            | ExprKind::Borrow { value: inner, .. }
+            | ExprKind::Convert { value: inner, .. } => self.scoped(inner),
+            ExprKind::If {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                self.scoped(condition);
+                self.scoped(then_expr);
+                self.scoped(else_expr);
+            }
+            ExprKind::Loop { body } => self.scoped(body),
+            ExprKind::While { condition, body } => {
+                self.scoped(condition);
+                self.scoped(body);
+            }
+            ExprKind::Match { value, arms } => {
+                self.scoped(value);
+                for arm in arms {
+                    let depth = self.scope.len();
+                    self.bind(&arm.pattern);
+                    if let Some(guard) = &arm.guard {
+                        self.scoped(guard);
+                    }
+                    self.scoped(&arm.body);
+                    self.scope.truncate(depth);
+                }
+            }
+            ExprKind::Logical { operands, .. } | ExprKind::Compose { operands, .. } => {
+                for operand in operands {
+                    self.scoped(operand);
+                }
+            }
+            ExprKind::Call { callee, args } => {
+                self.used(callee);
+                for argument in args {
+                    self.scoped(argument);
+                }
+            }
+            ExprKind::Lambda {
+                captures,
+                params,
+                body,
+                ..
+            } => {
+                // A capture names a binding in the enclosing scope, so it is
+                // a use out there and a binding in the body.
+                for capture in captures {
+                    self.used(&capture.name);
+                }
+                let depth = self.scope.len();
+                for capture in captures {
+                    self.scope.push(capture.name.clone());
+                }
+                for parameter in params {
+                    self.scope.push(parameter.name.clone());
+                }
+                self.scoped(body);
+                self.scope.truncate(depth);
+            }
+        }
+    }
+
+    fn bind(&mut self, pattern: &Pattern) {
+        match &pattern.kind {
+            PatternKind::Wildcard | PatternKind::Bool(_) | PatternKind::Int(_) => {}
+            PatternKind::Binding(name) => self.scope.push(name.clone()),
+            PatternKind::Enum { fields, .. } => {
+                for field in fields {
+                    self.bind(field);
+                }
+            }
+            PatternKind::Struct { fields, .. } => {
+                for field in fields {
+                    self.bind(&field.pattern);
+                }
+            }
+        }
+    }
+}
+
+/// Insert the `take` declarations for the moved names, laid out as `fmt`
+/// would lay them, at the line where the file's imports sit.
+///
+/// The placement reads the lossless tree, so comments count. With imports in
+/// evidence the new ones join them, after the last `take` and whatever trails
+/// on its line. Without any, they land above the first declaration together
+/// with the comment block set against it — a comment touching a declaration
+/// describes the declaration, a comment set off by a blank line describes the
+/// file, and the imports belong between the two.
+fn insert_takes(source: &str, names: &BTreeSet<String>) -> String {
+    let mut modules: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for name in names {
+        let Some((_, module)) = MOVED_AT_0_5_1
+            .iter()
+            .find(|(gone, _)| *gone == name.as_str())
+        else {
+            continue;
+        };
+        modules.entry(module).or_default().push(name.as_str());
+    }
+    let lines = modules
+        .iter()
+        .map(|(module, imported)| format!("(take {module} {})\n", imported.join(" ")))
+        .collect::<String>();
+    let syntax = parse_lossless(source);
+    let mut last_take_end = None;
+    let mut first_list_start = None;
+    for child in &syntax.root.children {
+        let SyntaxElement::List(node) = child else {
+            continue;
+        };
+        if first_list_start.is_none() {
+            first_list_start = Some(node.span.start);
+        }
+        if head_atom(node) == Some("take") {
+            last_take_end = Some(node.span.end);
+        }
+    }
+    let mut fixed = String::with_capacity(source.len() + lines.len() + 1);
+    if let Some(end) = last_take_end {
+        let offset = source[end..]
+            .find('\n')
+            .map_or(source.len(), |newline| end + newline + 1);
+        fixed.push_str(&source[..offset]);
+        if !fixed.ends_with('\n') {
+            fixed.push('\n');
+        }
+        fixed.push_str(&lines);
+        fixed.push_str(&source[offset..]);
+    } else {
+        let start = first_list_start.unwrap_or(source.len());
+        let mut offset = source[..start].rfind('\n').map_or(0, |newline| newline + 1);
+        while offset > 0 {
+            let previous = source[..offset - 1]
+                .rfind('\n')
+                .map_or(0, |newline| newline + 1);
+            if source[previous..offset - 1].trim_start().starts_with(';') {
+                offset = previous;
+            } else {
+                break;
+            }
+        }
+        fixed.push_str(&source[..offset]);
+        fixed.push_str(&lines);
+        fixed.push('\n');
+        fixed.push_str(&source[offset..]);
+    }
+    fixed
+}
+
+/// The head of a form: its first atom, once the parenthesis and the trivia
+/// before it are skipped.
+fn head_atom(node: &SyntaxNode) -> Option<&str> {
+    for child in &node.children {
+        match child {
+            SyntaxElement::Token(token) => match token.kind {
+                SyntaxKind::LeftParen | SyntaxKind::Whitespace | SyntaxKind::Comment => continue,
+                SyntaxKind::Atom => return Some(&token.text),
+                _ => return None,
+            },
+            SyntaxElement::List(_) => return None,
+        }
+    }
+    None
 }
 
 fn create_project(name: &str, path: Option<PathBuf>, library: bool) -> Result<(), String> {
@@ -3206,6 +3626,102 @@ mod tests {
         fs::write(&source_path, "(fn main").unwrap();
         assert!(format_project(&project, false).is_err());
         assert_eq!(fs::read_to_string(&source_path).unwrap(), "(fn main");
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The `v0.5.1` fix inserts the missing `take` declarations where the
+    /// imports belong, writes what `fmt` would have written, and has nothing
+    /// left to do on the file it produced.
+    #[test]
+    fn fix_mends_the_v0_5_1_move_and_is_idempotent() {
+        let root = std::env::temp_dir().join(format!("slopium-fix-test-{}", std::process::id()));
+        if root.exists() {
+            fs::remove_dir_all(&root).unwrap();
+        }
+        create_project("fix-test", Some(root.clone()), false).unwrap();
+        let source_path = root.join("src/main.slp");
+        let pre_move = "; From before the move.\n\n; The door line.\n(fn main () -> i32\n  \
+                        (let title \"hello\")\n  (println &title) ; a builtin, once\n  0)\n";
+        fs::write(&source_path, pre_move).unwrap();
+        let project = load_project(Some(root.join("Slopium.toml"))).unwrap();
+
+        let outcome = fix_project(&project, true).unwrap();
+        assert_eq!(outcome.differences, vec![source_path.clone()]);
+        assert!(outcome.refusals.is_empty());
+        assert_eq!(fs::read_to_string(&source_path).unwrap(), pre_move);
+
+        let outcome = fix_project(&project, false).unwrap();
+        assert!(outcome.differences.is_empty() && outcome.refusals.is_empty());
+        let fixed = fs::read_to_string(&source_path).unwrap();
+        assert!(
+            fixed.starts_with(
+                "; From before the move.\n\n(take std:io println)\n\n; The door line.\n(fn main"
+            ),
+            "{fixed}"
+        );
+        assert!(fixed.contains("; a builtin, once"));
+        assert_eq!(
+            format_source("main.slp", &fixed, &FormatOptions::default()).unwrap(),
+            fixed,
+            "fix wrote something fmt would rewrite"
+        );
+        assert!(fix_project(&project, true).unwrap().differences.is_empty());
+        fix_project(&project, false).unwrap();
+        assert_eq!(fs::read_to_string(&source_path).unwrap(), fixed);
+
+        // With imports already in evidence, the new `take` joins them.
+        let partly = "(take std:io println)\n\n(fn main () -> i32\n  (let title \"x\")\n  \
+                      (println &title)\n  (let count (args-len))\n  0)\n";
+        fs::write(&source_path, partly).unwrap();
+        fix_project(&project, false).unwrap();
+        let fixed = fs::read_to_string(&source_path).unwrap();
+        assert!(
+            fixed.starts_with("(take std:io println)\n(take std:process args-len)\n\n(fn main"),
+            "{fixed}"
+        );
+        assert_eq!(
+            format_source("main.slp", &fixed, &FormatOptions::default()).unwrap(),
+            fixed,
+            "fix wrote something fmt would rewrite"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A bound name is not the moved one, and a file the rule cannot mend
+    /// completely is left exactly as it was.
+    #[test]
+    fn fix_leaves_the_bound_and_the_unmendable_alone() {
+        let root = std::env::temp_dir().join(format!("slopium-fix-refusal-{}", std::process::id()));
+        if root.exists() {
+            fs::remove_dir_all(&root).unwrap();
+        }
+        create_project("fix-refusal", Some(root.clone()), false).unwrap();
+        let source_path = root.join("src/main.slp");
+        let project = load_project(Some(root.join("Slopium.toml"))).unwrap();
+
+        // `arg` here is a local, so nothing is free and nothing is written.
+        let innocent = "(fn main () -> i32\n  (let arg 40)\n  (+ arg 2))\n";
+        fs::write(&source_path, innocent).unwrap();
+        let outcome = fix_project(&project, true).unwrap();
+        assert!(outcome.differences.is_empty() && outcome.refusals.is_empty());
+
+        // `parse-i64` has no current spelling: the `println` beside it is
+        // mendable, and the file is refused whole rather than half-rewritten.
+        let orphan = "(fn main () -> i32\n  (let text \"7\")\n  (println &text)\n  \
+                      (let value (parse-i64 &text))\n  0)\n";
+        fs::write(&source_path, orphan).unwrap();
+        let outcome = fix_project(&project, false).unwrap();
+        assert!(outcome.differences.is_empty());
+        assert_eq!(outcome.refusals.len(), 1);
+        assert!(
+            outcome.refusals[0].starts_with("SL1110"),
+            "{}",
+            outcome.refusals[0]
+        );
+        assert!(outcome.refusals[0].contains("parse-i64"));
+        assert_eq!(fs::read_to_string(&source_path).unwrap(), orphan);
 
         fs::remove_dir_all(root).unwrap();
     }

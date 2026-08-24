@@ -41,6 +41,15 @@ package to run: it has its own phase in the runner, which asserts that a command
 without `-p` or `--workspace` fails, that `members = ["crates/*"]` expands, that
 `exclude` keeps a directory out of the lock, and that `-p` builds one member.
 
+`fix/pre-move` is not a passing project either: it is a pre-`v0.5.1` program,
+canonically formatted but calling `println` and `args-len` bare, from the days
+when they were builtins and there was nothing to `take`. Beside it sit
+`expected.slp` — the file `slopium fix` must produce, byte for byte, which is
+what keeps its comments in evidence — and `expected.stdout` from running the
+mended program. The runner copies it aside, proves `fix --check` reports it,
+`fix` rewrites it into `expected.slp` exactly, `fmt --check` then has nothing
+to add, the program builds and runs, and a second `fix` writes nothing.
+
 A passing project may also carry an `expected.stderr`, whose lines must all
 appear in what `check` wrote to standard error. That is where a warning is
 asserted: a program the compiler has something to say about still compiles, so
