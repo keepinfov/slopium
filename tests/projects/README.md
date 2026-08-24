@@ -15,7 +15,7 @@ scripts/project-tests.sh
 
 | Project | Covered surface |
 | --- | --- |
-| `basics` | Scalars, arithmetic, comparisons, recursion, inference, mutation, `if`, `do`, calls with stack arguments, printing |
+| `basics` | Scalars, arithmetic, comparisons, recursion, inference, mutation, `if`, `do`, calls with stack arguments, printing, a manifest naming the current `edition` |
 | `ownership-borrows` | Moves, shared/mutable borrows, last-use shortening, strings, structural clone |
 | `aggregates-patterns` | Structs, field access, enums, bool/int/enum match, owned and nested patterns |
 | `collections` | Copy/owned lists, all list operations, `Option`, arrays, slices, clone/drop |

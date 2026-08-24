@@ -364,6 +364,31 @@ The archive carries every target's file, because a package is one thing wherever
 it is built. What a build leaves out is decided when it runs, not when it is
 packaged.
 
+### The edition a package is written in
+
+```toml
+[package]
+name = "geometry"
+version = "1.4.0"
+edition = "2026"
+```
+
+`edition` names the edition of the language the package is written in
+(`D-158`). Exactly one exists, `2026`, and nothing branches on it yet: the key
+is there so that a later edition can change what a form means while a program
+written today keeps compiling as what it was, which is the only thing that
+makes a language change possible after 1.0 at all. A manifest naming no
+`edition` is read as the first one, so a manifest written before the key
+existed keeps meaning what it meant — and `slopium new` writes the newest,
+because a new program starts from what the language is now.
+
+An edition this toolchain does not have is refused (`SL1055`), the message
+naming the ones it does and pointing at the value. That is the opposite of
+what the next section does with a key nobody knows, and the asymmetry is
+deliberate: an unknown key is a message from a later toolchain that this one
+can safely skip, while an unknown edition says the program means something
+this toolchain does not carry, and building it anyway would be a guess.
+
 ### A key the toolchain does not know
 
 A manifest is read by every toolchain that ever sees the package, and not only
@@ -371,7 +396,7 @@ by the one that wrote it. So a key this toolchain does not know is **reported
 and ignored**, not refused (`D-128`):
 
 ```text
-slopium: warning[SL1200]: `/w/Slopium.toml` sets `edition`, which this toolchain does not know; it is ignored
+slopium: warning[SL1200]: `/w/Slopium.toml` sets `license`, which this toolchain does not know; it is ignored
 ```
 
 The archive carries the key verbatim — nothing is rewritten on the way through

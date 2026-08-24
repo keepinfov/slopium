@@ -23,6 +23,14 @@ pub const MANIFEST_FILE: &str = "Slopium.toml";
 /// library (`D-015`), which is why there is one constant and not two.
 pub const LIBRARY_ENTRY: &str = "lib.slp";
 
+/// The editions of the language this toolchain has, oldest first (`D-158`).
+///
+/// A manifest naming none is read as the first, so a manifest written before
+/// the key existed keeps meaning what it meant; `slopium new` writes the last.
+/// Exactly one exists, and nothing branches on it yet — the mechanism is what
+/// a program written today needs from a second edition.
+pub const EDITIONS: &[&str] = &["2026"];
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct Manifest {
     #[serde(flatten)]
@@ -109,6 +117,14 @@ pub struct Package {
     pub unknown: BTreeMap<String, toml::Value>,
     pub name: String,
     pub version: Inheritable<Version>,
+    /// Which edition of the language the package is written in (`D-158`).
+    ///
+    /// Absent means the first entry of [`EDITIONS`]. A value that is not in
+    /// the list is refused as `SL1055` rather than ignored the way an unknown
+    /// key is (`D-128`): a key nobody knows is a message from a later
+    /// toolchain, while an edition nobody knows is a program this toolchain
+    /// cannot promise to compile.
+    pub edition: Option<String>,
     /// The module a build starts from. A library has no such module — it is
     /// entered through whichever of its modules a dependent takes from — so the
     /// key may be omitted, and omitting it is how a package says it is one.
@@ -667,6 +683,17 @@ impl RawManifest {
             )
         })?;
         validate_package_name(&package.name)?;
+        let edition = match package.edition.as_deref() {
+            None => EDITIONS[0].to_owned(),
+            Some(edition) if EDITIONS.contains(&edition) => edition.to_owned(),
+            Some(edition) => {
+                return Err(format!(
+                    "SL1055: `{}` names edition `{edition}`, which this toolchain does not have; it has {}",
+                    edition_location(&self.manifest_source, &self.manifest_path),
+                    list_editions(),
+                ))
+            }
+        };
         let version = package
             .version
             .resolve(
@@ -702,6 +729,7 @@ impl RawManifest {
             config,
             name: package.name,
             version,
+            edition,
             entry: package.entry,
             source: package.source,
             c_sources,
@@ -709,6 +737,50 @@ impl RawManifest {
             target_modules,
             dependencies,
         })
+    }
+}
+
+/// The editions this toolchain has, as the refusal that names them writes
+/// them.
+fn list_editions() -> String {
+    EDITIONS
+        .iter()
+        .map(|edition| format!("`{edition}`"))
+        .collect::<Vec<_>>()
+        .join(" and ")
+}
+
+/// Where a manifest's `edition` value sits, as `path:line:column`, so the
+/// refusal points at the value rather than at the file.
+///
+/// A second, targeted parse rather than a `Spanned` field on [`Package`]: the
+/// manifest structs carry a `#[serde(flatten)]` table for the keys nobody
+/// knows (`D-128`), and everything beside a flattened field is deserialized
+/// through a buffer that loses the span a value was read with.
+fn edition_location(source: &str, path: &Path) -> String {
+    #[derive(Deserialize)]
+    struct Shell {
+        package: Option<ShellPackage>,
+    }
+    #[derive(Deserialize)]
+    struct ShellPackage {
+        edition: Option<toml::Spanned<String>>,
+    }
+    let start = toml::from_str::<Shell>(source)
+        .ok()
+        .and_then(|shell| shell.package)
+        .and_then(|package| package.edition)
+        .map(|edition| edition.span().start);
+    match start {
+        None => path.display().to_string(),
+        Some(start) => {
+            let line = source[..start].matches('\n').count() + 1;
+            let column = match source[..start].rfind('\n') {
+                None => start + 1,
+                Some(newline) => start - newline,
+            };
+            format!("{}:{line}:{column}", path.display())
+        }
     }
 }
 
@@ -829,6 +901,10 @@ pub struct Project {
     pub config: LocalConfig,
     pub name: String,
     pub version: Version,
+    /// The edition the package is written in, the missing key already resolved
+    /// to the first entry of [`EDITIONS`] (`D-158`). Nothing branches on it
+    /// yet.
+    pub edition: String,
     pub entry: Option<PathBuf>,
     pub source: Option<PathBuf>,
     /// C files this package compiles and links, relative to [`Self::root`].
@@ -990,6 +1066,20 @@ mod tests {
         toml::from_str(text).map_err(|error| error.to_string())
     }
 
+    /// A project from manifest text alone, for the checks that need
+    /// `into_project` without a tree on disk. The root does not exist, which
+    /// `load_local_config` answers with the defaults.
+    fn project_from(text: &str) -> Result<Project, String> {
+        let manifest: Manifest = toml::from_str(text).unwrap();
+        RawManifest {
+            root: PathBuf::from("/no-such-package"),
+            manifest_path: PathBuf::from("/no-such-package/Slopium.toml"),
+            manifest_source: text.to_owned(),
+            manifest,
+        }
+        .into_project(None)
+    }
+
     #[test]
     fn parses_a_minimal_manifest() {
         let parsed = manifest(
@@ -1007,6 +1097,38 @@ mod tests {
             package.version.resolve("version", None).unwrap(),
             &Version::new(0, 1, 0)
         );
+    }
+
+    #[test]
+    fn the_current_edition_is_read_and_a_missing_key_means_the_first() {
+        let named = project_from(
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2026\"\nentry = \"src/main.slp\"\n",
+        )
+        .unwrap();
+        assert_eq!(named.edition, "2026");
+
+        // A manifest written before the key existed keeps meaning what it
+        // meant, so absent is the first edition rather than an error.
+        let silent = project_from(
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nentry = \"src/main.slp\"\n",
+        )
+        .unwrap();
+        assert_eq!(silent.edition, EDITIONS[0]);
+    }
+
+    #[test]
+    fn an_edition_this_toolchain_does_not_have_is_refused() {
+        let error = project_from(
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2030\"\nentry = \"src/main.slp\"\n",
+        )
+        .unwrap_err();
+        assert!(error.starts_with("SL1055"), "{error}");
+        assert!(error.contains("`2030`"), "{error}");
+        // The refusal names the editions the toolchain has, because the fix is
+        // to pick one of them.
+        assert!(error.contains("`2026`"), "{error}");
+        // And it points at the value: line 4, at the opening quote.
+        assert!(error.contains("Slopium.toml:4:11"), "{error}");
     }
 
     #[test]
