@@ -1,4 +1,5 @@
 warning[SL0800]: `widen` is deprecated
+= help: the deprecation policy in `docs/language.md` says how long the name lives
 = note: call `widen-checked` instead
 warning[SL0800]: `retry-limit` is deprecated
 = note: read the limit from the manifest

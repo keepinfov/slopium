@@ -2,4 +2,5 @@ deprecated-function-value.slp:7:10: warning[SL0800]: `twice` is deprecated
   |
  7 |   (apply twice 21))
   |          ^^^^^
+  = help: the deprecation policy in `docs/language.md` says how long the name lives
   = note: there is a combinator for this

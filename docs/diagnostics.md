@@ -30,7 +30,9 @@ Code families are stable:
 - `SL07xx`: internal compiler errors;
 - `SL08xx`: **warnings** — a program that compiles, about which the compiler
   has something to say. `SL0800` is a use of a declaration somebody annotated
-  `deprecated` (`D-122`).
+  `deprecated` (`D-122`), and its help points at the deprecation policy in
+  `docs/language.md` (`D-157`): the name lives until the next major version,
+  and its removal turns a use into an ordinary `SL0200`.
 
 Every family but the last is a refusal. A warning carries `severity` of
 `warning` rather than `error`, renders as `warning[SL08xx]`, and leaves the
