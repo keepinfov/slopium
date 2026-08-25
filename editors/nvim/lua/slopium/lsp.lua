@@ -56,12 +56,23 @@ function M.attach(bufnr)
   end
   local root = vim.fs.root(bufnr, { "Slopium.toml", ".git" })
     or vim.fs.dirname(vim.api.nvim_buf_get_name(bufnr))
+  local capabilities = vim.lsp.protocol.make_client_capabilities()
+  local has_cmp, cmp_lsp = pcall(require, "cmp_nvim_lsp")
+  if has_cmp then
+    capabilities = cmp_lsp.default_capabilities(capabilities)
+  end
   local client_id = vim.lsp.start({
     name = "slopium-lsp",
     cmd = { executable },
     root_dir = root,
+    capabilities = capabilities,
   }, { bufnr = bufnr })
   return client_id ~= nil
+end
+
+function M.attached(bufnr)
+  bufnr = bufnr or vim.api.nvim_get_current_buf()
+  return #vim.lsp.get_clients({ bufnr = bufnr, name = "slopium-lsp" }) > 0
 end
 
 function M.setup(opts)

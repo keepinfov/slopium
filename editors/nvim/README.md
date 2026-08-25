@@ -10,7 +10,8 @@
   (`D-151`), поэтому отступ считает `lua/slopium/indent.lua` — по тем же
   `lispwords`, которые задаёт `ftplugin`;
 - snippets, builtins, функции, параметры и bindings текущего buffer для
-  `nvim-cmp`;
+  `nvim-cmp`; при подключённом `slopium-lsp` собственный источник отдаёт
+  только snippets — остальное приходит от сервера;
 - `omnifunc` fallback без `nvim-cmp`;
 - semantic tokens, scoped completion, hover, definition, references и rename
   через `slopium-lsp`;

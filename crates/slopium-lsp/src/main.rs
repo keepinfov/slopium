@@ -551,11 +551,11 @@ impl Server {
                 }
             }
         }
-        for keyword in [
-            "fn", "test", "struct", "enum", "const", "export", "take", "let", "set", "if", "match",
-            "when", "do", "loop", "while", "break", "continue", "try", "as", "Fn", "Ptr", "lambda",
-            "&", "&mut", "$", "and", "or", "unsafe",
-        ] {
+        // The whole `KEYWORDS` table and the three sigils, so the editor's
+        // scanner loses no word by standing down while a server is attached.
+        // A word `BUILTINS` already offered as a symbol stays a symbol: `seen`
+        // was fed first.
+        for keyword in KEYWORDS.iter().copied().chain(["&", "&mut", "$"]) {
             if seen.insert(keyword.to_owned()) {
                 items.push(json!({ "label": keyword, "kind": 14 }));
             }

@@ -14,6 +14,7 @@ local function setup_cmp()
   cmp.register_source("slopium", require("slopium.completion").source())
   cmp.setup.filetype("slopium", {
     sources = cmp.config.sources({
+      { name = "nvim_lsp", priority = 1100 },
       { name = "slopium", priority = 1000 },
       { name = "buffer", priority = 500 },
     }),
