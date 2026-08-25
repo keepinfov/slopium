@@ -186,7 +186,21 @@ function Source:get_keyword_pattern()
   return [[\%([[:alnum:]_&:.+*/<>=-]\+\)]]
 end
 
+-- While `slopium-lsp` is attached and `cmp_nvim_lsp` carries its items into
+-- the popup, the scanner steps back to the snippets the server does not have;
+-- every other word it offered is offered by the server itself. Without either
+-- half, the full scan completes as before.
 function Source:complete(params, callback)
+  if require("slopium.lsp").attached(params.context.bufnr) and pcall(require, "cmp_nvim_lsp") then
+    local items = {}
+    for _, item in ipairs(static_items) do
+      if item.insertTextFormat == 2 then
+        table.insert(items, vim.deepcopy(item))
+      end
+    end
+    callback({ items = items, isIncomplete = false })
+    return
+  end
   callback({
     items = M.items(params.context.bufnr),
     isIncomplete = false,
@@ -198,6 +212,9 @@ function M.source()
 end
 
 function M.omnifunc(findstart, base)
+  if require("slopium.lsp").attached(0) then
+    return vim.lsp.omnifunc(findstart, base)
+  end
   if findstart == 1 then
     local line = vim.api.nvim_get_current_line()
     local column = vim.fn.col(".") - 1

@@ -173,6 +173,7 @@ of what was believed at the time is the part worth keeping.
 - [D-158 — an edition is named by a year, and a missing key means the first](#d-158--an-edition-is-named-by-a-year-and-a-missing-key-means-the-first)
 - [D-159 — the compiler protocol stays internal at 1.0](#d-159--the-compiler-protocol-stays-internal-at-10)
 - [D-160 — a fix is a named rule, tied to the release that made it necessary](#d-160--a-fix-is-a-named-rule-tied-to-the-release-that-made-it-necessary)
+- [D-161 — the scanner stands down to snippets while a server is attached](#d-161--the-scanner-stands-down-to-snippets-while-a-server-is-attached)
 
 ## D-001 — a native compiler, without LLVM
 
@@ -3829,3 +3830,25 @@ returns an `(Option i64)` where the builtin aborted, and what a non-number
 now means is the program's decision. The manifest is the program's own
 business too — a package that never depended on `std` is told so rather than
 edited.
+
+## D-161 — the scanner stands down to snippets while a server is attached
+
+Status: approved · 2026-08-25
+
+`D-005` promised the regexp omnifunc completion as a fallback under a language
+server, and the wiring delivered the opposite: the cmp filetype sources never
+named `nvim_lsp` and the ftplugin's `omnifunc` was the scanner, so the server's
+scoped completion reached the popup on no path. The plugin now registers
+`nvim_lsp` above its own source, advertises `cmp_nvim_lsp` capabilities when
+that plugin is present, and routes `omnifunc` to `vim.lsp.omnifunc` on a buffer
+where `slopium-lsp` is attached. While the server's items are reaching the
+popup, the plugin's own cmp source offers only its snippets — the one thing
+the server has none of — and otherwise the full scan completes as before.
+
+The demotion must lose no word, so the server's completion keyword list is the
+`KEYWORDS` table itself, chained with the three sigils `&`, `&mut` and `$`,
+rather than an inline copy that had already drifted. Every non-snippet label
+the scanner's static table offers is a member of `KEYWORDS`, of
+`analysis::BUILTINS` — which `visible_symbols` always includes — or of the
+sigil list, and the request's `seen` set keeps a word offered as a builtin
+symbol from repeating as a bare keyword.
