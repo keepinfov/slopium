@@ -1238,9 +1238,19 @@ impl Builder {
             TExprKind::Try {
                 value,
                 ok_type,
+                err_type,
+                return_enum_name,
                 ok_tag,
+                err_tag,
                 ..
-            } => self.lower_try(value, ok_type, *ok_tag),
+            } => self.lower_try(
+                value,
+                ok_type,
+                err_type,
+                return_enum_name,
+                *ok_tag,
+                *err_tag,
+            ),
             // The only pair `D-090` allows is `i32` to `i64`, and an `i32` is
             // kept sign-extended in its full word everywhere (`D-074`), so the
             // widening is already done and the move is the whole conversion.
@@ -1728,7 +1738,15 @@ impl Builder {
         self.current = self.block();
     }
 
-    fn lower_try(&mut self, value: &TExpr, ok_type: &Type, ok_tag: usize) -> Option<Value> {
+    fn lower_try(
+        &mut self,
+        value: &TExpr,
+        ok_type: &Type,
+        err_type: &Type,
+        return_enum_name: &str,
+        ok_tag: usize,
+        err_tag: usize,
+    ) -> Option<Value> {
         let value = self.expr(value)?;
         let tag = self.temp(Type::I64);
         self.emit(Instruction::EnumTag {
@@ -1757,12 +1775,34 @@ impl Builder {
         });
 
         self.current = error_block;
+        // The payload leaves before anything runs that could end the scope it
+        // would stand in: only the aggregate around it dies here. `try` may
+        // answer a different instance of the same `Result` than the call it
+        // tried, because sema has already matched the two error halves — so
+        // what an error returns is not this aggregate but a fresh variant of
+        // the function's own return type built from the same payload.
+        let payload = self.temp(err_type.clone());
+        self.emit(Instruction::EnumFieldLoad {
+            dst: payload,
+            base: value.local,
+            index: 0,
+        });
         // An error leaves the function, so every scope it stands in ends here.
         // This used to walk `self.live` and reproduce `drop_scope_except`'s
         // reverse order by hand: the same answer for drops, and nowhere to put
         // what a scope deferred (`D-133`).
         self.unwind_scopes(0, Some(value.local));
-        self.blocks[self.current].terminator = Some(Terminator::Return(Some(value.local)));
+        // The input instance is spent either way, like the one the `Ok` arm
+        // takes its payload out of.
+        self.emit(Instruction::Free { local: value.local });
+        let rebuilt = self.temp(self.return_type.clone());
+        self.emit(Instruction::EnumNew {
+            dst: rebuilt,
+            enum_name: return_enum_name.to_owned(),
+            tag: err_tag,
+            fields: vec![payload],
+        });
+        self.blocks[self.current].terminator = Some(Terminator::Return(Some(rebuilt)));
 
         self.current = ok_block;
         let payload = self.temp(ok_type.clone());
@@ -2770,5 +2810,85 @@ mod tests {
             Type::Unit,
             "the payload is a defined unit word, not a gap"
         );
+    }
+
+    /// An error out of a `try` belongs to the function's return type, and
+    /// sema lets the tried call produce a different instance of the same
+    /// `Result`. The error branch used to hand back the input aggregate
+    /// unchanged, which only verified when the two success halves agreed, so
+    /// this is the shape that used to stop at `SL0700`.
+    #[test]
+    fn an_err_out_of_try_is_rebuilt_for_the_return_instance() {
+        let source = r#"
+            (enum Result (T E)
+              (Ok ((value T)))
+              (Err ((error E))))
+            (fn prepare () -> (Result unit String)
+              (Result:Err "gone"))
+            (fn finish () -> (Result String String)
+              (do
+                (try (prepare))
+                (Result:Ok "ready")))
+            (fn main () -> i32 0)
+        "#;
+        let items = crate::LanguageItems {
+            result: Some("Result".to_owned()),
+            result_ok: Some("Result:Ok".to_owned()),
+            result_err: Some("Result:Err".to_owned()),
+            ..crate::LanguageItems::default()
+        };
+        // As lowering produced it, and again after the optimizer has rewritten
+        // around it.
+        for optimize in [false, true] {
+            let options = CompileOptions {
+                language_items: items.clone(),
+                optimize,
+                ..CompileOptions::default()
+            };
+            let mir = compile_to_mir("test.slp", source, &options).unwrap();
+            assert_eq!(crate::verify::verify_module("test.slp", &mir), Vec::new());
+            let finish = mir
+                .functions
+                .iter()
+                .find(|function| function.name.contains("finish"))
+                .unwrap();
+
+            // And somewhere in `finish` stands the return instance's own
+            // `Err`, built from one word of the error half. Locating it goes
+            // by variant rather than by exclusion because a run with
+            // `optimize` set is what the exercise asked for too, and then the
+            // inliner has long since folded `prepare` into its caller —
+            // putting the input instance's construction beside it.
+            let return_enum = match &finish.return_type {
+                Type::Named(name) => name.clone(),
+                other => panic!("finish returns `{other:?}`, not a Result"),
+            };
+            let err_tag = mir
+                .enums
+                .iter()
+                .find(|item| item.name == return_enum)
+                .unwrap()
+                .variants
+                .iter()
+                .find(|variant| variant.name == "Err")
+                .map(|variant| variant.tag)
+                .unwrap();
+            let rebuilt = finish
+                .blocks
+                .iter()
+                .flat_map(|block| block.instructions())
+                .find_map(|instruction| match instruction {
+                    Instruction::EnumNew {
+                        enum_name,
+                        tag,
+                        fields,
+                        ..
+                    } if enum_name == &return_enum && *tag == err_tag => Some(fields),
+                    _ => None,
+                })
+                .expect("an error arm built for the return instance never reached MIR");
+            assert_eq!(rebuilt.len(), 1);
+            assert!(matches!(&finish.locals[rebuilt[0]].ty, Type::String));
+        }
     }
 }
