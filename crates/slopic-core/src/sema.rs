@@ -2679,7 +2679,11 @@ impl<'a> Analyzer<'a> {
             );
             return self.typed(expr, Type::Unit, TExprKind::Unit);
         };
-        let Some((return_base, return_arguments)) = self.enum_instances.get(return_name) else {
+        // Held as an owned copy, so the borrow of the return type is over
+        // before anything below borrows `self` mutably again.
+        let return_enum_name = return_name.clone();
+        let Some((return_base, return_arguments)) = self.enum_instances.get(&return_enum_name)
+        else {
             self.error(
                 expr.span,
                 "`try` can only be used in a function returning Result",
@@ -2729,7 +2733,7 @@ impl<'a> Analyzer<'a> {
                 value: Box::new(value),
                 ok_type,
                 err_type: error_type,
-                return_enum_name: return_name.clone(),
+                return_enum_name,
                 enum_name: instance_name,
                 ok_tag: ok.tag,
                 err_tag: err.tag,
@@ -6186,6 +6190,7 @@ fn specialize_expr(
             value,
             ok_type,
             err_type,
+            ..
         } => {
             specialize_expr(value, substitutions, queue);
             *ok_type = substitute_type(ok_type, substitutions);
