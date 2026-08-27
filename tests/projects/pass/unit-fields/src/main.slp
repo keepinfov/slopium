@@ -15,9 +15,6 @@
 
 (struct Marked ((note unit) (weight i64)))
 
-(fn weight ((marked &Marked)) -> i64
-  (. marked weight))
-
 ; The library's own generic shape with nothing to carry: this is the instance
 ; whose construction used to reach MIR short by one field.
 (fn stamp () -> (Result unit String)
@@ -41,7 +38,7 @@
 
 (fn main () -> i32
   (let marked (Marked :note () :weight 7))
-  (println-i64 (weight &marked))
+  (println-i64 (. marked weight))
   (let stamped (stamp))
   (println-i64 (describe &stamped))
   (let failed (forward false))
@@ -51,7 +48,9 @@
   0)
 
 (test "a unit field round-trips"
-  (= (weight &(Marked :note () :weight 3)) 3))
+  (do
+    (let marked (Marked :note () :weight 3))
+    (= (. marked weight) 3)))
 
 (test "the ok arm answers one"
   (= (describe &(stamp)) 1))
@@ -67,4 +66,7 @@
     (let failed (forward false))
     (match failed
       ((Result:Ok _) false)
-      ((Result:Err reason) (equals reason "no marker"|)
+      ((Result:Err reason)
+        (do
+          (let want "no marker")
+          (equals &reason &want|)

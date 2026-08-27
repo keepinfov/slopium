@@ -2694,10 +2694,9 @@ mod tests {
     fn a_unit_field_is_built_with_a_word() {
         let source = r#"
             (struct Marked ((note unit) (weight i64)))
-            (fn weight ((marked &Marked)) -> i64 (. marked weight))
             (fn main () -> i32
               (let marked (Marked :note () :weight 7))
-              (weight (& marked))
+              (. marked weight)
               0)
         "#;
         let mir = compile_to_mir("test.slp", source, &CompileOptions::default()).unwrap();
