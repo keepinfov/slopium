@@ -2831,10 +2831,12 @@ mod tests {
                 (Result:Ok "ready")))
             (fn main () -> i32 0)
         "#;
-        let mut items = crate::LanguageItems::default();
-        items.result = Some("Result".to_owned());
-        items.result_ok = Some("Result:Ok".to_owned());
-        items.result_err = Some("Result:Err".to_owned());
+        let items = crate::LanguageItems {
+            result: Some("Result".to_owned()),
+            result_ok: Some("Result:Ok".to_owned()),
+            result_err: Some("Result:Err".to_owned()),
+            ..crate::LanguageItems::default()
+        };
         // As lowering produced it, and again after the optimizer has rewritten
         // around it.
         for optimize in [false, true] {
