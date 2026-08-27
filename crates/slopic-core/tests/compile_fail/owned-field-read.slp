@@ -1,0 +1,8 @@
+; `.` copies a field out of a struct binding, and a field that owns
+; something is not copied: taking it out is what a pattern is for.
+(struct Point ((x i64) (label String)))
+
+(fn main () -> i32
+  (let point (Point :x 42 :label "answer"))
+  (let label (. point label))
+  0)
