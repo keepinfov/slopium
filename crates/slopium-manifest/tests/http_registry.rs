@@ -196,6 +196,19 @@ fn a_fetched_index_is_cached_and_then_read_offline() {
     assert!(error.contains("SL1011"), "{error}");
     assert!(error.contains(&cached.display().to_string()), "{error}");
 
+    // A cache that is there but cannot be read is another matter: nothing
+    // somebody wrote or asked for is wrong, so the operating system's own
+    // explanation goes out as prose, with no code in front of it (`D-071`).
+    // A directory where the file should be is the one unreadable state a
+    // test can set up without touching permissions.
+    fs::create_dir_all(&cached).unwrap();
+    let error = published(Access::Offline).unwrap_err();
+    assert!(
+        error.starts_with(&format!("cannot read `{}`:", cached.display())),
+        "{error}"
+    );
+    assert!(!error.contains("SL1011"), "{error}");
+
     let _ = fs::remove_dir_all(&served);
     let _ = fs::remove_dir_all(&home);
 }
