@@ -33,7 +33,7 @@
     ((Result:Ok _) 1)
     ((Result:Err reason)
       (do
-        (println &reason)
+        (println reason)
         0|)
 
 (fn main () -> i32
