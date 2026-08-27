@@ -118,16 +118,169 @@ local reserved = {
   ["f32"] = true,
 }
 
-local function add(items, seen, label, kind, detail)
+local function add(items, seen, label, kind, detail, documentation)
   if not label or label == "" or seen[label] or reserved[label] then
     return
   end
   seen[label] = true
-  table.insert(items, {
+  local item = {
     label = label,
     kind = kind,
     detail = detail,
-  })
+  }
+  if documentation then
+    item.documentation = documentation
+  end
+  table.insert(items, item)
+end
+
+-- Everything below reads a declaration apart, far enough to say its shape,
+-- and stops wherever it cannot follow: a type the scanner guesses is worse
+-- than a type the scanner never mentions.
+
+local function skip_space(text, index)
+  while text:sub(index, index):match("%s") do
+    index = index + 1
+  end
+  return index
+end
+
+local function balanced_close(text, open_index)
+  local depth = 0
+  for index = open_index, #text do
+    local character = text:sub(index, index)
+    if character == "(" then
+      depth = depth + 1
+    elseif character == ")" then
+      depth = depth - 1
+      if depth == 0 then
+        return index
+      end
+    end
+  end
+  return nil
+end
+
+-- One type as written: a word such as `i64`, a borrow marker in front of it,
+-- or a balanced form such as `(Ptr u8)`.
+local function read_type(text, index)
+  local marker = ""
+  if text:find("^&mut%s", index) then
+    marker = "&mut "
+    index = index + #"&mut"
+  elseif text:sub(index, index) == "&" then
+    marker = "&"
+    index = index + 1
+  end
+  index = skip_space(text, index)
+  if text:sub(index, index) == "(" then
+    local close = balanced_close(text, index)
+    if not close then
+      return nil
+    end
+    return marker .. text:sub(index, close)
+  end
+  local start = index
+  while index <= #text and not text:sub(index, index):match("[%s()]") do
+    index = index + 1
+  end
+  if index == start then
+    return nil
+  end
+  return marker .. text:sub(start, index - 1)
+end
+
+-- The parameter types inside a declaration's header group. Every pair must
+-- carry a name and a written type; one it cannot read spoils the whole list,
+-- and the group only ever holds such pairs.
+local function read_types(group)
+  local types = {}
+  local index = 1
+  while true do
+    index = skip_space(group, index)
+    if index > #group then
+      break
+    end
+    if group:sub(index, index) ~= "(" then
+      return nil
+    end
+    local close = balanced_close(group, index)
+    if not close then
+      return nil
+    end
+    -- A declaration may lay its pairs out over several lines, so the pair is
+    -- flattened before anything reads out of it.
+    local pair = group:sub(index + 1, close - 1):gsub("%s+", " ")
+    local written = pair:match("^[%a_][%w_-]*%s+(.+)")
+    if not written or written == "" then
+      return nil
+    end
+    types[#types + 1] = written
+    index = close + 1
+  end
+  return types
+end
+
+-- The run of `;;` lines immediately above the declaration, read the way the
+-- compiler reads one: each line stripped, a blank line ending the run, so a
+-- comment across one belongs to the file rather than to what follows.
+local function doc_above(lines, line_number)
+  local block = {}
+  local line = line_number - 1
+  while line >= 1 do
+    local comment = lines[line]:match("^%s*;;(.*)$")
+    if not comment then
+      break
+    end
+    table.insert(block, 1, comment)
+    line = line - 1
+  end
+  if #block == 0 then
+    return nil
+  end
+  for index, comment in ipairs(block) do
+    block[index] = comment:match("^%s*(.-)%s*$")
+  end
+  return table.concat(block, "\n")
+end
+
+-- What one `fn` offers when only the buffer is watching: the shape its own
+-- header spells, and the sentence written above it. When the header does not
+-- come apart cleanly the scan keeps quiet and leaves the signature unsaid,
+-- which is why nothing here looks like an invention.
+local function scanned_function(source, name_at, name)
+  local group_open = source:find("%(", name_at + #name)
+  if not group_open then
+    return nil, nil
+  end
+  local group_close = balanced_close(source, group_open)
+  if not group_close then
+    return nil, nil
+  end
+  local types = read_types(source:sub(group_open + 1, group_close - 1))
+  -- The header ends at a close paren, so an anchored search begins on the
+  -- character after it: matching from the paren itself could only ever fail.
+  local _, arrow_end = source:find("^%s*%->", group_close + 1)
+  local return_type = arrow_end and read_type(source, arrow_end + 1)
+  if not types or not return_type then
+    return nil, nil
+  end
+
+  local signature =
+    "fn " .. name .. "(" .. table.concat(types, ", ") .. ") -> " .. return_type
+  local lines = {}
+  for line in source:gmatch("([^\n]*)\n?") do
+    lines[#lines + 1] = line
+  end
+  local newlines_before = select(2, source:sub(1, name_at - 1):gsub("\n", ""))
+  local doc = doc_above(lines, newlines_before + 1)
+  if doc then
+    return signature, {
+      kind = "markdown",
+      value = "`" .. name .. "`\n\n" .. doc .. "\n\n" .. signature,
+    }
+  end
+  return signature, nil
 end
 
 function M.items(bufnr)
@@ -139,8 +292,9 @@ function M.items(bufnr)
   end
 
   local source = table.concat(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), "\n")
-  for name in source:gmatch("%(%s*fn%s+([%a_][%w_-]*)") do
-    add(items, seen, name, kinds.Function, "function in this buffer")
+  for name_at, name in source:gmatch("%(%s*fn%s+()([%a_][%w_-]*)") do
+    local signature, documentation = scanned_function(source, name_at, name)
+    add(items, seen, name, kinds.Function, signature or "function in this buffer", documentation)
   end
   for name in source:gmatch("%(%s*struct%s+([%a_][%w_-]*)") do
     add(items, seen, name, kinds.Struct, "struct in this buffer")

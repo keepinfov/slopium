@@ -119,4 +119,176 @@ reindent "$check_dir/cases.slp"
 diff -u "$check_dir/cases.expected" "$check_dir/cases.slp.indented" >/dev/null ||
   fail "the indenter disagrees with the layout on a case it is written for"
 echo "nvim-check: the closer, a body and an aligned call indent as written ... ok"
+
+# Completing a documented function has to reach the popup with what hover
+# already shows: the full signature and the `;;` block above the declaration.
+# Both roads there are held against one fixture — the reply a language server
+# sends, and what the plugin's scanner answers when no server exists.
+version="$(grep -m1 '^version = ' "$workspace_dir/Cargo.toml" | cut -d\" -f2)"
+[ -n "$version" ] || fail "cannot read the workspace version for the fixture"
+
+mkdir -p "$check_dir/completion/src"
+cat >"$check_dir/completion/Slopium.toml" <<TOML
+[package]
+name = "popup"
+version = "$version"
+entry = "src/main.slp"
+source = "src"
+TOML
+cat >"$check_dir/completion/src/main.slp" <<'SLOPIUM'
+;; Doubles a value by adding it to itself.
+(fn twice ((value i64)) -> i64 (+ value value))
+
+(fn main () -> i32 0)
+SLOPIUM
+
+server="${SLOPIUM_LSP:-$workspace_dir/target/debug/slopium-lsp}"
+if [ ! -x "$server" ]; then
+  echo "nvim-check: building slopium-lsp for the completion checks"
+  cargo build -q -p slopium-lsp --manifest-path "$workspace_dir/Cargo.toml"
+fi
+
+# Through a real client over stdio: the reply to `textDocument/completion`
+# carries the typed parameters and, as markdown, the sentence written above
+# the declaration.
+cat >"$check_dir/server-completion.lua" <<'LUA'
+local project = vim.env.SLOPIUM_COMPLETION_PROJECT
+vim.cmd("edit " .. project .. "/src/main.slp")
+assert(vim.bo.filetype == "slopium", "filetype did not become `slopium`")
+local bufnr = vim.api.nvim_get_current_buf()
+
+local published = false
+local client_id = vim.lsp.start({
+  name = "slopium-lsp",
+  cmd = { vim.env.SLOPIUM_LSP_SERVER },
+  root_dir = project,
+  handlers = {
+    ["textDocument/publishDiagnostics"] = function()
+      published = true
+      return true
+    end,
+  },
+}, { bufnr = bufnr })
+assert(client_id, "the language server did not start")
+if not vim.wait(30000, function()
+  return published
+end) then
+  error("the server never published after the buffer was opened")
+end
+
+local client = assert(vim.lsp.get_client_by_id(client_id))
+local response = client:request_sync("textDocument/completion", {
+  textDocument = { uri = vim.uri_from_bufnr(bufnr) },
+  position = { line = 3, character = 8 },
+}, 30000)
+assert(response.err == nil, "completion failed: " .. tostring(response.err))
+
+local twice
+for _, item in ipairs(response.result.items) do
+  if item.label == "twice" then
+    twice = item
+    break
+  end
+end
+assert(twice, "the server did not offer `twice`")
+assert(
+  twice.detail == "fn twice(i64) -> i64",
+  "the server's detail was `" .. tostring(twice.detail) .. "`"
+)
+assert(
+  type(twice.documentation) == "table" and twice.documentation.kind == "markdown",
+  "the server sent no markdown documentation window"
+)
+for _, part in ipairs({ "Doubles a value by adding it to itself.", "fn twice(i64) -> i64" }) do
+  assert(
+    twice.documentation.value:find(part, 1, true),
+    "the documentation window lost `" .. part .. "`:\n" .. twice.documentation.value
+  )
+end
+io.write("nvim-check: the server's reply carries the block and the signature\n")
+vim.cmd("qa!")
+LUA
+
+# No client anywhere: `Source:complete` falls back to the buffer scan, whose
+# items say the same thing about the same declaration, and keep quiet about
+# whatever the header they were read from did not spell out.
+cat >"$check_dir/scanner-completion.lua" <<'LUA'
+local project = vim.env.SLOPIUM_COMPLETION_PROJECT
+vim.cmd("edit " .. project .. "/src/main.slp")
+local bufnr = vim.api.nvim_get_current_buf()
+assert(
+  #vim.lsp.get_clients({ bufnr = bufnr }) == 0,
+  "a language server is attached; the fallback cannot be checked like this"
+)
+
+local items = require("slopium.completion").items(bufnr)
+local found = {}
+for _, item in ipairs(items) do
+  found[item.label] = item
+end
+local twice = assert(found.twice, "the scan did not offer `twice`")
+assert(
+  twice.detail == "fn twice(i64) -> i64",
+  "the scan read the signature as `" .. tostring(twice.detail) .. "`"
+)
+assert(
+  type(twice.documentation) == "table" and twice.documentation.kind == "markdown",
+  "the scan sent no markdown documentation window"
+)
+for _, part in ipairs({ "Doubles a value by adding it to itself.", "fn twice(i64) -> i64" }) do
+  assert(
+    twice.documentation.value:find(part, 1, true),
+    "the fallback lost `" .. part .. "`:\n" .. twice.documentation.value
+  )
+end
+assert(found.main, "the scan did not offer `main`")
+assert(found.main.detail == "fn main() -> i32", "zero parameters still read as a signature")
+assert(
+  found.main.documentation == nil,
+  "the scan wrote prose above a declaration that had none"
+)
+
+-- A header left hanging open says nothing rather than guessing: the name is
+-- still offered, wearing the phrase it always wore.
+local unfinished = vim.api.nvim_create_buf(false, true)
+vim.api.nvim_buf_set_lines(unfinished, 0, -1, false, {
+  ";; Left open, so no type can be said for it.",
+  "(fn hang ((x i64",
+})
+local hang
+for _, item in ipairs(require("slopium.completion").items(unfinished)) do
+  if item.label == "hang" then
+    hang = item
+    break
+  end
+end
+assert(hang, "the scan dropped a declaration it could not finish reading")
+assert(
+  hang.detail == "function in this buffer",
+  "an unreadable header was described as `" .. tostring(hang.detail) .. "`"
+)
+assert(
+  hang.documentation == nil,
+  "the scan documented something it could not read"
+)
+io.write("nvim-check: the scanner alone carries the block and the signature\n")
+vim.cmd("qa!")
+LUA
+
+SLOPIUM_LSP_SERVER="$server" SLOPIUM_COMPLETION_PROJECT="$check_dir/completion" \
+  nvim --headless -u "$check_dir/init.lua" -S "$check_dir/server-completion.lua" \
+  >/dev/null 2>"$check_dir/nvim.server.stderr" ||
+  {
+    cat "$check_dir/nvim.server.stderr" >&2
+    fail "the language-server completion check failed"
+  }
+echo "nvim-check: the server's popup completes with the block and the signature ... ok"
+
+SLOPIUM_COMPLETION_PROJECT="$check_dir/completion" \
+  nvim --headless -u "$check_dir/init.lua" -S "$check_dir/scanner-completion.lua" \
+  >/dev/null 2>"$check_dir/nvim.scanner.stderr" || {
+    cat "$check_dir/nvim.scanner.stderr" >&2
+    fail "the scanner-only completion check failed"
+  }
+
 echo "nvim-check: all editor plugin checks passed"
