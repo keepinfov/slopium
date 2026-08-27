@@ -34,6 +34,7 @@ scripts/project-tests.sh
 | `target-modules` | One module name that is a different file per target across three triples, built and run for both the host and the cross target, with a third file for a target this toolchain cannot build |
 | `composition` | `<<` and `>>` applied and unapplied, both directions, three operands, one operand, and two locals of `Fn` type composed |
 | `fieldless-enums` | An enum with no payload anywhere: copied not moved, compared with `=`, matched, and an `Option` beside it keeping the old representation |
+| `unit-fields` | A `unit` field in a named struct, a variant carrying one, and both arms of a generic `(Result unit String)` met through `try` |
 | `target-selection` | A `fn` and a `const` selected by target across three triples, and an unannotated declaration that every target gets; built and run for both the host and the cross target |
 
 `workspaces/virtual-root` is not a passing project, because its root defines no

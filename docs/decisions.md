@@ -3852,3 +3852,25 @@ the scanner's static table offers is a member of `KEYWORDS`, of
 `analysis::BUILTINS` — which `visible_symbols` always includes — or of the
 sigil list, and the request's `seen` set keeps a word offered as a builtin
 symbol from repeating as a bare keyword.
+
+## D-162 — a `unit` field owns a word like any other field
+
+Status: approved · 2026-08-27
+
+An aggregate's layout counts every field it names, and one word per logical
+field is the representation the whole toolchain already agrees on:
+`struct_size` allocates it, both backends store field `index` at `index * 8`,
+and the clone and drop helpers walk every field the layout carries. MIR
+lowering broke that agreement at one point: a field initializer whose type is
+`unit` answers no value — almost nothing reads a unit value, so lowering
+answers `None` for anything of that type — and the `StructInit` and `EnumInit`
+paths appended only the fields that answered. `(Result:Ok ())` reached
+`EnumNew` with nothing where its variant layout has a payload, and the
+verifier caught the short construction as `SL0700`.
+
+**The rule is: a field that lowers without a value still gets a word.** Its
+initializer runs first — side effects are real whether or not the value exists
+— and when the answer is `None`, the slot receives a defined zero word in a
+local typed `unit`. Construction is the only lowering that needs this: reads,
+clone, drop and verification were already counting every field, which is why
+they caught the disagreement instead of hiding it.

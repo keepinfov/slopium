@@ -852,6 +852,31 @@ impl Builder {
         self.local(ty, None, false)
     }
 
+    /// The one word a construction stores for one of its fields.
+    ///
+    /// A field initializer usually lowers to the value it answers. A `unit`
+    /// initializer answers nothing — almost nothing reads a unit value, which
+    /// is why `expr` hands back `None` for anything whose type is `unit` — but
+    /// a layout counts every field it names: `struct_size` allocates one word
+    /// per field and both backends store field `index` at `index * 8`, so an
+    /// aggregate built without that word was short by one local and tripped
+    /// `SL0700`. The initializer has already run either way, so its side
+    /// effects stand; what the slot wants is a defined zero rather than no
+    /// word at all (`D-162`).
+    fn field_word(&mut self, field: &TExpr) -> LocalId {
+        match self.expr(field) {
+            Some(value) => value.local,
+            None => {
+                let zero = self.temp(Type::Unit);
+                self.emit(Instruction::ConstInt {
+                    dst: zero,
+                    value: 0,
+                });
+                zero
+            }
+        }
+    }
+
     /// The two operands a unary operator turns into.
     ///
     /// `(- x)` is `0 - x` and the order is the whole point; `(not b)` and
@@ -1556,9 +1581,7 @@ impl Builder {
             TExprKind::StructInit { name, fields } => {
                 let mut lowered = Vec::new();
                 for field in fields {
-                    if let Some(value) = self.expr(field) {
-                        lowered.push(value.local);
-                    }
+                    lowered.push(self.field_word(field));
                 }
                 let dst = self.temp(expr.ty.clone());
                 self.emit(Instruction::StructNew {
@@ -1580,9 +1603,7 @@ impl Builder {
             } => {
                 let mut lowered = Vec::new();
                 for field in fields {
-                    if let Some(value) = self.expr(field) {
-                        lowered.push(value.local);
-                    }
+                    lowered.push(self.field_word(field));
                 }
                 let dst = self.temp(expr.ty.clone());
                 // A fieldless enum *is* its tag, so building one is writing a
@@ -2662,6 +2683,93 @@ mod tests {
         assert_eq!(
             folded.span.line, 2,
             "the folded constant keeps the span of the expression it replaced"
+        );
+    }
+
+    /// A `unit` field owns a word like any other. `struct_size` sizes the block
+    /// from the layout's field count and both backends store field `index` at
+    /// `index * 8`, so a construction missing that word was reading an unbound
+    /// index and tripping `SL0700` in the verifier.
+    #[test]
+    fn a_unit_field_is_built_with_a_word() {
+        let source = r#"
+            (struct Marked ((note unit) (weight i64)))
+            (fn weight ((marked &Marked)) -> i64 (. marked weight))
+            (fn main () -> i32
+              (let marked (Marked :note () :weight 7))
+              (weight (& marked))
+              0)
+        "#;
+        let mir = compile_to_mir("test.slp", source, &CompileOptions::default()).unwrap();
+        assert_eq!(crate::verify::verify_module("test.slp", &mir), Vec::new());
+        let layout = &mir
+            .structs
+            .iter()
+            .find(|item| item.name == "Marked")
+            .unwrap()
+            .fields;
+        let built = mir
+            .functions
+            .iter()
+            .filter_map(|function| {
+                function
+                    .blocks
+                    .iter()
+                    .flat_map(|block| block.instructions())
+                    .find_map(|instruction| match instruction {
+                        Instruction::StructNew { name, fields, .. } if name == "Marked" => {
+                            Some((function, fields.clone()))
+                        }
+                        _ => None,
+                    })
+            })
+            .unwrap();
+        assert_eq!(built.1.len(), layout.len());
+        for (field, (_, field_ty)) in built.1.iter().zip(layout) {
+            assert_eq!(&built.0.locals[*field].ty, field_ty);
+        }
+    }
+
+    /// An owned variant with a single `unit` payload reaches `EnumNew` with its
+    /// word present, because `EnumFieldLoad` reads payload `index` at
+    /// `(index + 1) * 8` whether the payload has width or not.
+    #[test]
+    fn a_unit_variant_payload_is_built_with_a_word() {
+        let source = r#"
+            (enum Stamp None (Held ((marker unit))))
+            (fn main () -> i32
+              (let stamp (Stamp:Held ()))
+              0)
+        "#;
+        let mir = compile_to_mir("test.slp", source, &CompileOptions::default()).unwrap();
+        assert_eq!(crate::verify::verify_module("test.slp", &mir), Vec::new());
+        let held_tag = mir.enums[0]
+            .variants
+            .iter()
+            .find(|variant| variant.name == "Held")
+            .map(|variant| variant.tag)
+            .unwrap();
+        let built = mir
+            .functions
+            .iter()
+            .filter_map(|function| {
+                function
+                    .blocks
+                    .iter()
+                    .flat_map(|block| block.instructions())
+                    .find_map(|instruction| match instruction {
+                        Instruction::EnumNew { tag, fields, .. } if *tag == held_tag => {
+                            Some((function, fields.clone()))
+                        }
+                        _ => None,
+                    })
+            })
+            .unwrap();
+        assert_eq!(built.1.len(), 1);
+        assert_eq!(
+            built.0.locals[built.1[0]].ty,
+            Type::Unit,
+            "the payload is a defined unit word, not a gap"
         );
     }
 }

@@ -1,0 +1,67 @@
+; A `unit` field is a field. A layout counts every field it names, so a struct
+; with one and an enum variant carrying one must build the same words they
+; would if any other type sat in that slot — and a generic `(Result unit E)`
+; reaches both of its arms through ordinary combinators and `try`.
+;
+; Everything here reads back exactly what was put in: the note is unobservable
+; by design, the weight beside it is not, and the error arm says its reason out
+; loud so the difference between the arms is on the page. A `unit` cannot be
+; bound to a name, which is why `forward` runs `try` as a statement and then
+; stamps a fresh value: the propagation out of an error happens inside `try`.
+
+(take std:io println println-i64)
+(take std:string equals)
+(take std:prelude Result)
+
+(struct Marked ((note unit) (weight i64)))
+
+(fn weight ((marked &Marked)) -> i64
+  (. marked weight))
+
+; The library's own generic shape with nothing to carry: this is the instance
+; whose construction used to reach MIR short by one field.
+(fn stamp () -> (Result unit String)
+  (Result:Ok ()))
+
+(fn produce ((ok bool)) -> (Result unit String)
+  (if ok (stamp) (Result:Err "no marker")))
+
+(fn forward ((ok bool)) -> (Result unit String)
+  (do
+    (try (produce ok))
+    (stamp)))
+
+(fn describe ((result &(Result unit String))) -> i64
+  (match result
+    ((Result:Ok _) 1)
+    ((Result:Err reason) (do (println &reason) 0))))
+
+(fn main () -> i32
+  (let marked (Marked :note () :weight 7))
+  (println-i64 (weight (& marked)))
+  (let stamped (stamp))
+  (println-i64 (describe (& stamped)))
+  (let failed (forward false))
+  (println-i64 (describe (& failed)))
+  (let sent (forward true))
+  (println-i64 (describe (& sent)))
+  0)
+
+(test "a unit field round-trips"
+  (= (weight (& (Marked :note () :weight 3))) 3))
+
+(test "the ok arm answers one"
+  (= (describe (& (stamp))) 1))
+
+(test "try propagates the err arm"
+  (= (describe (& (forward false))) 0))
+
+(test "try hands back the ok arm"
+  (= (describe (& (forward true))) 1))
+
+(test "the err arm carries its reason after propagation"
+  (do
+    (let failed (forward false))
+    (match failed
+      ((Result:Ok _) false)
+      ((Result:Err reason) (equals reason "no marker")))))
