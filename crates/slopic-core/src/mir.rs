@@ -2880,6 +2880,7 @@ mod tests {
                         enum_name,
                         tag,
                         fields,
+                        ..
                     } if enum_name == &return_enum && *tag == err_tag => Some(fields),
                     _ => None,
                 })
