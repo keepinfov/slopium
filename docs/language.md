@@ -203,6 +203,14 @@ aliases; there are no wildcard imports. A qualified name such as
 `geometry:distance` still obeys privacy. `::` is not a valid separator.
 All module dependency cycles are rejected.
 
+**A program is entered through `main`.** The `fn` named `main` is the entry
+point of an executable: it takes no parameters and no type parameters, and its
+result is `i32`, `i64` or `unit`. Anything else is refused with `SL0401`, and so
+is a program that declares no `main` at all — unless it declares tests, which a
+test build enters through a harness of its own. The value `main` answers is the
+program's exit status, and a `unit` one answers `0`. A library is linked into
+something else rather than run, and asks for no `main` (`D-015`).
+
 ## Declarations and generics
 
 ```lisp
