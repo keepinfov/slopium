@@ -426,10 +426,10 @@ impl Registry {
                     self.index,
                     path.display()
                 )),
-                Err(error) => Err(format!(
-                    "SL1011: cannot read the cached index file `{}`: {error}",
-                    path.display()
-                )),
+                // Any other failure to read is the operating system's to
+                // explain: the copy is there, nothing somebody wrote or asked
+                // for is wrong, so no code fronts the message (`D-071`).
+                Err(error) => Err(format!("cannot read `{}`: {error}", path.display())),
             };
         }
         let fetched = self.read(relative)?;
