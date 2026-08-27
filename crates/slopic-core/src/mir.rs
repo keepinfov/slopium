@@ -2845,43 +2845,47 @@ mod tests {
             };
             let mir = compile_to_mir("test.slp", source, &options).unwrap();
             assert_eq!(crate::verify::verify_module("test.slp", &mir), Vec::new());
-
-            // What `prepare` builds its `Err` from.
-            let from_prepare = mir
-                .functions
-                .iter()
-                .find(|function| function.name.contains("prepare"))
-                .map(|function| {
-                    function
-                        .blocks
-                        .iter()
-                        .flat_map(|block| block.instructions())
-                        .find_map(|instruction| match instruction {
-                            Instruction::EnumNew { enum_name, .. } => Some(enum_name.clone()),
-                            _ => None,
-                        })
-                })
-                .flatten()
-                .expect("prepare builds its result");
-            // And every variant the propagating function builds names a
-            // different instance — its own return type — with one word per
-            // field. Returning the input aggregate would have carried
-            // `from_prepare` out instead.
             let finish = mir
                 .functions
                 .iter()
                 .find(|function| function.name.contains("finish"))
                 .unwrap();
-            for instruction in finish.blocks.iter().flat_map(|block| block.instructions()) {
-                if let Instruction::EnumNew {
-                    enum_name, fields, ..
-                } = instruction
-                {
-                    assert_ne!(enum_name, &from_prepare);
-                    assert_eq!(fields.len(), 1);
-                    assert!(matches!(&finish.locals[fields[0]].ty, Type::String));
-                }
-            }
+
+            // And somewhere in `finish` stands the return instance's own
+            // `Err`, built from one word of the error half. Locating it goes
+            // by variant rather than by exclusion because a run with
+            // `optimize` set is what the exercise asked for too, and then the
+            // inliner has long since folded `prepare` into its caller —
+            // putting the input instance's construction beside it.
+            let return_enum = match &finish.return_type {
+                Type::Named(name) => name.clone(),
+                other => panic!("finish returns `{other:?}`, not a Result"),
+            };
+            let err_tag = mir
+                .enums
+                .iter()
+                .find(|item| item.name == return_enum)
+                .unwrap()
+                .variants
+                .iter()
+                .find(|variant| variant.name == "Err")
+                .map(|variant| variant.tag)
+                .unwrap();
+            let rebuilt = finish
+                .blocks
+                .iter()
+                .flat_map(|block| block.instructions())
+                .find_map(|instruction| match instruction {
+                    Instruction::EnumNew {
+                        enum_name,
+                        tag,
+                        fields,
+                    } if enum_name == &return_enum && *tag == err_tag => Some(fields),
+                    _ => None,
+                })
+                .expect("an error arm built for the return instance never reached MIR");
+            assert_eq!(rebuilt.len(), 1);
+            assert!(matches!(&finish.locals[rebuilt[0]].ty, Type::String));
         }
     }
 }
