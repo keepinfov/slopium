@@ -2711,7 +2711,7 @@ mod tests {
         let built = mir
             .functions
             .iter()
-            .filter_map(|function| {
+            .find_map(|function| {
                 function
                     .blocks
                     .iter()
@@ -2752,7 +2752,7 @@ mod tests {
         let built = mir
             .functions
             .iter()
-            .filter_map(|function| {
+            .find_map(|function| {
                 function
                     .blocks
                     .iter()

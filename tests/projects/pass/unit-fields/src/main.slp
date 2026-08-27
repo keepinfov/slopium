@@ -34,34 +34,37 @@
 (fn describe ((result &(Result unit String))) -> i64
   (match result
     ((Result:Ok _) 1)
-    ((Result:Err reason) (do (println &reason) 0))))
+    ((Result:Err reason)
+      (do
+        (println &reason)
+        0|)
 
 (fn main () -> i32
   (let marked (Marked :note () :weight 7))
-  (println-i64 (weight (& marked)))
+  (println-i64 (weight &marked))
   (let stamped (stamp))
-  (println-i64 (describe (& stamped)))
+  (println-i64 (describe &stamped))
   (let failed (forward false))
-  (println-i64 (describe (& failed)))
+  (println-i64 (describe &failed))
   (let sent (forward true))
-  (println-i64 (describe (& sent)))
+  (println-i64 (describe &sent))
   0)
 
 (test "a unit field round-trips"
-  (= (weight (& (Marked :note () :weight 3))) 3))
+  (= (weight &(Marked :note () :weight 3)) 3))
 
 (test "the ok arm answers one"
-  (= (describe (& (stamp))) 1))
+  (= (describe &(stamp)) 1))
 
 (test "try propagates the err arm"
-  (= (describe (& (forward false))) 0))
+  (= (describe &(forward false)) 0))
 
 (test "try hands back the ok arm"
-  (= (describe (& (forward true))) 1))
+  (= (describe &(forward true)) 1))
 
 (test "the err arm carries its reason after propagation"
   (do
     (let failed (forward false))
     (match failed
       ((Result:Ok _) false)
-      ((Result:Err reason) (equals reason "no marker")))))
+      ((Result:Err reason) (equals reason "no marker"|)
