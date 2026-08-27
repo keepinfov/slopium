@@ -128,6 +128,47 @@ fn hover_markdown(name: &str, doc: Option<&str>, detail: &str) -> String {
     }
 }
 
+/// The documentation window a completion item carries, drawn from the same
+/// well hover draws from (`D-134`): the sentence a person wrote, then the type.
+///
+/// Completion and hover show one name two ways, so both render through
+/// `hover_markdown`. Letting each grow its own renderer is how a popup and a
+/// hover drift apart on the same declaration.
+fn documentation_markdown(name: &str, doc: Option<&str>, detail: &str) -> Value {
+    json!({
+        "kind": "markdown",
+        "value": hover_markdown(name, doc, detail),
+    })
+}
+
+/// A function's signature as written, with every parameter typed.
+///
+/// The index builds a symbol's detail before checking has run, when a
+/// parameter may carry no type at all, and drops them rather than invent one:
+/// its detail says `fn f -> T` where the declaration names a parameter's type.
+/// Once a file parses, `program` holds the types as they were written, and the
+/// word someone is about to call is exactly where those belong.
+fn written_function_detail(analysis: &Analysis, name: &str) -> Option<String> {
+    let program = analysis.program.as_ref()?;
+    if let Some(item) = program.functions.iter().find(|item| item.name == name) {
+        let params = item
+            .params
+            .iter()
+            .map(|parameter| parameter.ty.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Some(format!("fn {name}({params}) -> {}", item.return_type));
+    }
+    let item = program.externs.iter().find(|item| item.name == name)?;
+    let params = item
+        .params
+        .iter()
+        .map(Type::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!("fn {name}({params}) -> {}", item.result))
+}
+
 struct WorkspaceSymbol {
     name: String,
     kind: AnalysisSymbolKind,
@@ -530,11 +571,23 @@ impl Server {
         let mut items = Vec::new();
         for symbol in document.analysis.visible_symbols(offset) {
             if seen.insert(symbol.name.clone()) {
-                items.push(json!({
+                let detail = match symbol.kind {
+                    AnalysisSymbolKind::Function => {
+                        written_function_detail(&document.analysis, &symbol.name)
+                            .unwrap_or_else(|| symbol.detail.clone())
+                    }
+                    _ => symbol.detail.clone(),
+                };
+                let mut item = json!({
                     "label": symbol.name,
                     "kind": completion_kind(symbol.kind),
-                    "detail": symbol.detail
-                }));
+                    "detail": detail
+                });
+                if let Some(doc) = &symbol.doc {
+                    item["documentation"] =
+                        documentation_markdown(&symbol.name, Some(doc), &detail);
+                }
+                items.push(item);
             }
         }
         if let Some(workspace) = &self.workspace {
@@ -543,11 +596,19 @@ impl Server {
                     continue;
                 };
                 if seen.insert(label.clone()) {
-                    items.push(json!({
+                    // The heading carries the word that was completed: an
+                    // alias is spelled as it was taken, even when the
+                    // declaration spells its own name differently.
+                    let mut item = json!({
                         "label": label,
                         "kind": completion_kind(symbol.kind),
                         "detail": symbol.detail
-                    }));
+                    });
+                    if let Some(doc) = &symbol.doc {
+                        item["documentation"] =
+                            documentation_markdown(label, Some(doc), &symbol.detail);
+                    }
+                    items.push(item);
                 }
             }
         }
@@ -1111,6 +1172,24 @@ fn declaration_detail(program: &Program, name: &str, kind: AnalysisSymbolKind) -
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!("fn {name}({params}) -> {}", item.return_type)
+            })
+            // An `extern` is a function this package calls rather than one it
+            // defines, so the popup owes its name the same signature a call
+            // site needs.
+            .or_else(|| {
+                program
+                    .externs
+                    .iter()
+                    .find(|item| item.name == name)
+                    .map(|item| {
+                        let params = item
+                            .params
+                            .iter()
+                            .map(|parameter| parameter.ty.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!("fn {name}({params}) -> {}", item.return_type)
+                    })
             })
             .unwrap_or_else(|| format!("fn {name}")),
         AnalysisSymbolKind::Struct => format!("struct {name}"),
@@ -1929,6 +2008,111 @@ mod tests {
             !rendered.contains("belongs to the file"),
             "a comment across a blank line was taken as documentation: {rendered}"
         );
+    }
+
+    #[test]
+    fn completion_shows_the_block_above_the_declaration_it_offers() {
+        let uri = "file:///doc.slp";
+        let source = concat!(
+            ";; Doubles a value, and says what that is good for.\n",
+            "(fn twice ((value i64)) -> i64 (+ value value))\n",
+            "\n",
+            "(fn main () -> i32 0)\n",
+        );
+        let mut server = Server::default();
+        assert!(server.update(uri.into(), 1, source.into()));
+
+        let position = offset_position(source, source.len());
+        let completion = server
+            .completion(&json!({ "textDocument": { "uri": uri }, "position": position }))
+            .unwrap();
+        let items = completion["items"].as_array().unwrap();
+
+        let twice = items
+            .iter()
+            .find(|item| item["label"] == "twice")
+            .expect("a declared function is offered");
+        assert_eq!(twice["detail"], "fn twice(i64) -> i64");
+        assert_eq!(twice["documentation"]["kind"], "markdown");
+        let rendered = twice["documentation"]["value"].as_str().unwrap();
+        assert!(
+            rendered.contains("Doubles a value, and says what that is good for."),
+            "the popup lost the `;;` block: {rendered}"
+        );
+        assert!(
+            rendered.contains("fn twice(i64) -> i64"),
+            "the documentation window did not carry the signature: {rendered}"
+        );
+
+        // Nothing was written above `main`, so there is nothing to say.
+        let main_item = items
+            .iter()
+            .find(|item| item["label"] == "main")
+            .expect("the entry point is offered");
+        assert!(main_item["documentation"].is_null());
+    }
+
+    #[test]
+    fn workspace_completion_shows_the_block_in_the_file_it_points_at() {
+        let id = NEXT_WORKSPACE.fetch_add(1, Ordering::Relaxed);
+        let root =
+            std::env::temp_dir().join(format!("slopium-lsp-doc-item-{}-{id}", std::process::id()));
+        if root.exists() {
+            fs::remove_dir_all(&root).unwrap();
+        }
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(
+            root.join("Slopium.toml"),
+            "[package]\nname = \"docs\"\nversion = \"0.2.4\"\nentry = \"src/main.slp\"\nsource = \"src\"\n",
+        )
+        .unwrap();
+        let library = concat!(
+            "(export distance read-byte)\n",
+            ";; Distance from zero, measured up.\n",
+            "(fn distance ((n i64)) -> i64 (+ n 1))\n",
+            ";; A C function this module calls but does not define.\n",
+            "(extern \"external-read\" (read-byte (fd i32)) -> u8)\n",
+        );
+        fs::write(root.join("src/lib.slp"), library).unwrap();
+        let main = "(take lib (distance :as step) (read-byte :as peek))\n\
+                    (fn main () -> i32 (do (let seen (step 4)) 0))\n";
+        fs::write(root.join("src/main.slp"), main).unwrap();
+        let main_uri = path_file_uri(&root.join("src/main.slp").canonicalize().unwrap());
+
+        let mut server = Server::default();
+        assert!(server.update(main_uri.clone(), 1, main.into()));
+        assert!(server.workspace.is_some());
+
+        let position = offset_position(main, main.rfind("step 4").unwrap());
+        let completion = server
+            .completion(&json!({ "textDocument": { "uri": main_uri }, "position": position }))
+            .unwrap();
+
+        // The heading is the alias, the sentence and the signature belong to
+        // the declaration the alias reaches.
+        let step = completion["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["label"] == "step")
+            .expect("an imported function is offered under its alias");
+        assert_eq!(step["detail"], "fn distance(i64) -> i64");
+        let rendered = step["documentation"]["value"].as_str().unwrap();
+        assert!(
+            rendered.contains("Distance from zero, measured up."),
+            "an aliased popup lost the block written where the name is declared: {rendered}"
+        );
+        assert!(rendered.contains("fn distance(i64) -> i64"));
+
+        let peek = completion["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["label"] == "peek")
+            .expect("an imported extern is offered under its alias");
+        assert_eq!(peek["detail"], "fn read-byte(i32) -> u8");
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
