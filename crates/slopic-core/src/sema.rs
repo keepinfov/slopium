@@ -235,6 +235,16 @@ pub enum TExprKind {
     Try {
         value: Box<TExpr>,
         ok_type: Type,
+        /// The payload the error branch carries out of the aggregate it leaves.
+        ///
+        /// Sema has matched this against the error half of
+        /// `return_enum_name`, so what is read out of the input aggregate fits
+        /// the rebuilt variant word for word and only the instance differs.
+        err_type: Type,
+        /// The `Result` instance whose `Err` the error branch rebuilds, which
+        /// is the enclosing function's return type and not necessarily the
+        /// instance the tried call produced.
+        return_enum_name: String,
         enum_name: String,
         ok_tag: usize,
         err_tag: usize,
@@ -2718,6 +2728,8 @@ impl<'a> Analyzer<'a> {
             TExprKind::Try {
                 value: Box::new(value),
                 ok_type,
+                err_type: error_type,
+                return_enum_name: return_name.clone(),
                 enum_name: instance_name,
                 ok_tag: ok.tag,
                 err_tag: err.tag,
@@ -4976,11 +4988,13 @@ impl<'a> Analyzer<'a> {
             TExprKind::Try {
                 value,
                 ok_type,
+                err_type,
                 enum_name,
                 ..
             } => {
                 self.materialize_typed_expr(value);
                 *ok_type = self.normalize_type(ok_type, expression.span);
+                *err_type = self.normalize_type(err_type, expression.span);
                 if let Type::Named(name) = &value.ty {
                     *enum_name = name.clone();
                 }
@@ -6168,9 +6182,14 @@ fn specialize_expr(
             };
         }
         TExprKind::Convert { value } => specialize_expr(value, substitutions, queue),
-        TExprKind::Try { value, ok_type, .. } => {
+        TExprKind::Try {
+            value,
+            ok_type,
+            err_type,
+        } => {
             specialize_expr(value, substitutions, queue);
             *ok_type = substitute_type(ok_type, substitutions);
+            *err_type = substitute_type(err_type, substitutions);
         }
         TExprKind::Break(value) => {
             if let Some(value) = value {

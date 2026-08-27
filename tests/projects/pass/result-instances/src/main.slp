@@ -1,0 +1,61 @@
+; An error out of `try` belongs to the `Result` the enclosing function
+; returns, which need not be the instance the tried call produced. The two
+; here share their error half, so `finish` takes its success from one
+; instance and its failure from another, and what comes back is always the
+; return type's own variant carrying the original reason.
+;
+; Both arms end the same scopes, so each prints both deferred effects once,
+; while the note beside the `try` is still owned. A missing or doubled line
+; would mean an unwind ran twice, and a crash between the pairs would mean
+; the payload moved out of an aggregate that was freed under it.
+
+(take std:io println)
+(take std:string concat equals)
+(take std:prelude Result)
+
+; The tried call carries nothing on success.
+(fn prepare ((ok bool)) -> (Result unit String)
+  (if ok (Result:Ok ()) (Result:Err "disk full")))
+
+(fn finish ((ok bool)) -> (Result String String)
+  (let note (concat &"note survives: " &"one owner beside the try"))
+  (defer (println &note))
+  (defer (println &"the scopes ended"))
+  (do
+    (try (prepare ok))
+    (Result:Ok "ready")))
+
+(fn report ((result &(Result String String))) -> i64
+  (match result
+    ((Result:Ok message)
+      (do
+        (println message)
+        0))
+    ((Result:Err reason)
+      (do
+        (println reason)
+        1))))
+
+(fn main () -> i32
+  (let failed (finish false))
+  (report &failed)
+  (let ready (finish true))
+  (report &ready)
+  0)
+
+(test "an err out of try reaches the return type's instance"
+  (do
+    (let failed (finish false))
+    (match failed
+      ((Result:Ok _) false)
+      ((Result:Err reason)
+        (do
+          (let want "disk full")
+          (equals &reason &want))))))
+
+(test "the success half still flows through try"
+  (do
+    (let ready (finish true))
+    (match ready
+      ((Result:Ok message) (equals &message &"ready"))
+      ((Result:Err _) false))))
