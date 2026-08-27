@@ -1,0 +1,9 @@
+borrow-undefined-name.slp:7:15: error[SL0200]: undefined variable `message`
+  |
+ 7 |   (measure (& message))
+  |               ^^^^^^^
+
+borrow-undefined-name.slp:7:12: error[SL0200]: expected `&String`, found `unit`
+  |
+ 7 |   (measure (& message))
+  |            ^^^^^^^^^^^

@@ -1,0 +1,8 @@
+; A borrow resolves its operand like any other use: a name that is neither
+; a local nor a constant is undefined, whatever position it is borrowed in.
+(fn measure ((text (& String))) -> i64
+  (len text))
+
+(fn main () -> i32
+  (measure (& message))
+  0)

@@ -1,0 +1,8 @@
+; A constant inlines to its literal, so borrowing its name outside a call
+; argument keeps the `D-126` refusal: the temporary the inlined literal is
+; has nowhere to be released.
+(const greeting "hello")
+
+(fn main () -> i32
+  (let text (& greeting))
+  0)

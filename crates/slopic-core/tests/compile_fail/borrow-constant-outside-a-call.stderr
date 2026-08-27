@@ -1,0 +1,6 @@
+borrow-constant-outside-a-call.slp:7:16: error[SL0200]: only a binding can be borrowed here
+  |
+ 7 |   (let text (& greeting))
+  |                ^^^^^^^^
+  = help: give the value a name with `let`, or borrow it where a call takes it
+  = note: a borrowed temporary dies when the call it was passed to returns, so there is nowhere to release one that is not an argument

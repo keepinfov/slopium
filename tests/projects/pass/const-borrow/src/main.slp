@@ -1,0 +1,35 @@
+; A `const` is a name for a literal, inlined wherever it is used (`D-121`), so
+; a borrow of the name is a borrow of the literal: the `D-126` temporary, which
+; lives until the call taking it returns. Nothing here needs the `let` that was
+; until now the only way to give a constant's value an owner.
+;
+; The scalar constant owns nothing, so its borrow drops nothing, and both
+; constants are inlined inside a larger borrowed expression exactly where the
+; literal would have been written.
+
+(const greeting "hello")
+(const answer 42)
+
+(take std:io println println-i64)
+(take std:string concat equals)
+
+(fn main () -> i32
+  ; The shape that used to be refused as an undefined variable: the constant
+  ; handed to a call the way a binding would be.
+  (println &greeting)
+  ; A scalar constant, read through its borrow the only way there is.
+  (println-i64 (clone &answer))
+  ; Constants inside another borrowed temporary, dropped with it.
+  (println &(concat &greeting &(concat &" " &greeting)))
+  ; A borrowed constant is a borrow like any other, so it reaches anything
+  ; that takes one.
+  (println-i64 (len &greeting))
+  (let same (equals &greeting &"hello"))
+  (if same (println &"still the literal it names") (println &"something moved"))
+  0)
+
+(test "a borrowed string constant is the literal it names"
+  (= (len &greeting) 5))
+
+(test "a borrowed scalar constant reads through the borrow"
+  (= (clone &answer) 42))
