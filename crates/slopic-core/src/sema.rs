@@ -1733,6 +1733,38 @@ impl<'a> Analyzer<'a> {
         }
     }
 
+    /// The typed expression a use of a module-level `const` stands for
+    /// (`D-121`): the constant's literal, stamped with the span of the use.
+    ///
+    /// `resolved` is what `package.rs` says the name means as a top-level
+    /// item, and it comes first because it is the one that accounts for
+    /// imports. The bare name is tried after it for the sources that never
+    /// went through the resolver. The two tables cannot hold one name, so the
+    /// order between them decides nothing.
+    fn const_use(&mut self, name: &str, resolved: Option<&str>, span: Span) -> Option<TExpr> {
+        let constant = resolved
+            .filter(|candidate| self.consts.contains_key(*candidate))
+            .map(str::to_owned)
+            .or_else(|| self.consts.contains_key(name).then(|| name.to_owned()))?;
+        if let Some(deprecation) = self.deprecated_consts.get(&constant).cloned() {
+            self.deprecated_use(name, span, &deprecation);
+        }
+        let mut value = self.consts[&constant].clone();
+        // The literal is stamped with the span of the *use*, not of the
+        // declaration. A line table that sent a debugger to the `const`
+        // is the classic inlining confusion, and the use is where the
+        // program is.
+        value.span = span;
+        Some(TExpr {
+            ty: value.ty.clone(),
+            span,
+            kind: TExprKind::Const {
+                name: constant,
+                value: Box::new(value),
+            },
+        })
+    }
+
     fn variable(
         &mut self,
         expr: &Expr,
@@ -1744,38 +1776,10 @@ impl<'a> Analyzer<'a> {
         let Some(id) = self.env.lookup_id(name) else {
             // A fallback, never a namespace merge (`D-092`): the environment is
             // consulted first, so no program that already compiles changes
-            // meaning, and a name that was a variable stays one.
-            //
-            // `resolved` is what `package.rs` says the name means as a
-            // top-level item, and it comes first because it is the one that
-            // accounts for imports. The bare name is tried after it for the
-            // sources that never went through the resolver.
-            // A `const` is looked for the same way and first (`D-121`): the
-            // two tables cannot hold one name, so the order between them
-            // decides nothing, and putting the cheaper one in front keeps the
-            // fallback readable.
-            let constant = resolved
-                .filter(|candidate| self.consts.contains_key(*candidate))
-                .map(str::to_owned)
-                .or_else(|| self.consts.contains_key(name).then(|| name.to_owned()));
-            if let Some(constant) = constant {
-                if let Some(deprecation) = self.deprecated_consts.get(&constant).cloned() {
-                    self.deprecated_use(name, expr.span, &deprecation);
-                }
-                let mut value = self.consts[&constant].clone();
-                // The literal is stamped with the span of the *use*, not of the
-                // declaration. A line table that sent a debugger to the `const`
-                // is the classic inlining confusion, and the use is where the
-                // program is.
-                value.span = expr.span;
-                return TExpr {
-                    ty: value.ty.clone(),
-                    span: expr.span,
-                    kind: TExprKind::Const {
-                        name: constant,
-                        value: Box::new(value),
-                    },
-                };
+            // meaning, and a name that was a variable stays one. A `const` is
+            // looked for the same way and first (`D-121`).
+            if let Some(constant) = self.const_use(name, resolved, expr.span) {
+                return constant;
             }
             let candidate = resolved
                 .filter(|candidate| self.signatures.contains_key(*candidate))
@@ -2473,10 +2477,17 @@ impl<'a> Analyzer<'a> {
     }
 
     fn borrow(&mut self, expr: &Expr, mutable: bool, value: &Expr) -> TExpr {
-        let ExprKind::Var { name, .. } = &value.kind else {
+        let ExprKind::Var { name, resolved } = &value.kind else {
             return self.borrow_temporary(expr, mutable, value);
         };
         let Some(id) = self.env.lookup_id(name) else {
+            // A `const` is inlined at every use (`D-121`), so borrowing its
+            // name is borrowing the literal — which is the `D-126` temporary,
+            // legal where a call takes it as an argument and nowhere else,
+            // exactly as if the literal had been written out.
+            if let Some(inner) = self.const_use(name, resolved.as_deref(), value.span) {
+                return self.borrow_typed_temporary(expr, mutable, value.span, inner);
+            }
             self.error(value.span, format!("undefined variable `{name}`"));
             return self.typed(expr, Type::Unit, TExprKind::Unit);
         };
@@ -2556,12 +2567,29 @@ impl<'a> Analyzer<'a> {
     /// with a sentence saying where it would have worked.
     fn borrow_temporary(&mut self, expr: &Expr, mutable: bool, value: &Expr) -> TExpr {
         let inner = self.expr(value, None);
+        self.borrow_typed_temporary(expr, mutable, value.span, inner)
+    }
+
+    /// The tail every borrow of a value nothing owns shares (`D-126`): the
+    /// argument-position rule, the refusal of a borrow of a borrow, and the
+    /// `BorrowTemporary` itself. A borrowed `const` reaches this with its
+    /// literal already typed, because inlining the literal is what a use of a
+    /// `const` always is (`D-121`) — the name changes nothing about the
+    /// lifetime, which is why it rides the temporary's rules rather than
+    /// getting any of its own.
+    fn borrow_typed_temporary(
+        &mut self,
+        expr: &Expr,
+        mutable: bool,
+        span: Span,
+        inner: TExpr,
+    ) -> TExpr {
         if self.argument_depth == 0 {
             self.diagnostics.push(
                 Diagnostic::error(
                     codes::NAME_OR_TYPE,
                     self.file,
-                    value.span,
+                    span,
                     "only a binding can be borrowed here",
                 )
                 .with_help("give the value a name with `let`, or borrow it where a call takes it")
@@ -2586,7 +2614,7 @@ impl<'a> Analyzer<'a> {
         }
         if matches!(inner.ty, Type::Ref { .. }) {
             self.diagnostics.push(crate::ast::cannot_borrow_a_borrow(
-                self.file, value.span, &inner.ty,
+                self.file, span, &inner.ty,
             ));
             return self.typed(expr, Type::Unit, TExprKind::Unit);
         }
@@ -6346,6 +6374,52 @@ mod tests {
               0)
         "#;
         analyze_source(source).unwrap();
+    }
+
+    #[test]
+    fn accepts_a_borrowed_string_constant() {
+        // A `const` is inlined at every use (`D-121`), so borrowing its name
+        // is borrowing the literal, and the literal is the `D-126` temporary:
+        // legal where a call takes it, dropped when that call returns.
+        let source = r#"
+            (const greeting "hello")
+            (fn show ((text (& String))) -> unit ())
+            (fn main () -> i32
+              (show (& greeting))
+              0)
+        "#;
+        analyze_source(source).unwrap();
+    }
+
+    #[test]
+    fn refuses_a_borrowed_constant_outside_a_call() {
+        // Inlining changes nothing about the lifetime: a temporary dies when
+        // the call it was passed to returns, so the argument-position refusal
+        // stands for a name exactly as for a written-out literal.
+        let source = r#"
+            (const greeting "hello")
+            (fn main () -> i32
+              (let text (& greeting))
+              0)
+        "#;
+        let errors = analyze_source(source).unwrap_err();
+        assert!(errors.iter().any(|error| error
+            .message
+            .contains("only a binding can be borrowed here")));
+    }
+
+    #[test]
+    fn refuses_a_borrow_of_an_undefined_name() {
+        let source = r#"
+            (fn show ((text (& String))) -> unit ())
+            (fn main () -> i32
+              (show (& missing))
+              0)
+        "#;
+        let errors = analyze_source(source).unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|error| error.message.contains("undefined variable `missing`")));
     }
 
     #[test]
