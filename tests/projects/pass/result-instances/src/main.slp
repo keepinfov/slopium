@@ -34,7 +34,7 @@
     ((Result:Err reason)
       (do
         (println reason)
-        1))))
+        1|)
 
 (fn main () -> i32
   (let failed (finish false))
@@ -51,11 +51,11 @@
       ((Result:Err reason)
         (do
           (let want "disk full")
-          (equals &reason &want))))))
+          (equals &reason &want|)
 
 (test "the success half still flows through try"
   (do
     (let ready (finish true))
     (match ready
       ((Result:Ok message) (equals &message &"ready"))
-      ((Result:Err _) false))))
+      ((Result:Err _) false|)
