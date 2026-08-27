@@ -203,6 +203,14 @@ aliases; there are no wildcard imports. A qualified name such as
 `geometry:distance` still obeys privacy. `::` is not a valid separator.
 All module dependency cycles are rejected.
 
+**A program is entered through `main`.** The `fn` named `main` is the entry
+point of an executable: it takes no parameters and no type parameters, and its
+result is `i32`, `i64` or `unit`. Anything else is refused with `SL0401`, and so
+is a program that declares no `main` at all — unless it declares tests, which a
+test build enters through a harness of its own. The value `main` answers is the
+program's exit status, and a `unit` one answers `0`. A library is linked into
+something else rather than run, and asks for no `main` (`D-015`).
+
 ## Declarations and generics
 
 ```lisp
@@ -816,6 +824,19 @@ Patterns can nest enum and named struct patterns. A bare name binds and moves
 the matched value; `_` discards it. Boolean and enum matches must be
 exhaustive or contain an irrefutable arm. Integer matches require a final
 irrefutable arm.
+
+**`.` reads a field, and only one that is copied.** `(. point x)` is the
+field `x` of the struct the binding `point` names — the base is a name, not
+an expression — and the read is a copy: a scalar, a `(Ptr T)` or a fieldless
+enum (`D-140`) comes out and the struct keeps every field it had. A field that
+owns something, like `label` above, is refused with `SL0300`, because moving
+one field out of an aggregate is what a pattern is for. `.` never borrows: a
+borrow of a struct is not a struct, so a value reached as `(& point)` is read
+by matching through the borrow (`D-099`) and cloning what the pattern bound
+(`D-100`). The read is a value and not a place — `set` assigns to a name, and
+the field that can be assigned is the one a `&mut` pattern bound (`D-120`) —
+though it may be borrowed where a call takes it, like any temporary
+(`D-126`).
 
 **A `match` is not only for aggregates.** An integer, a byte read out of a
 string, a `bool` — anything a literal pattern can name — is matched the same

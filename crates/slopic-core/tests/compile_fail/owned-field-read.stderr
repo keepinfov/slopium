@@ -1,0 +1,5 @@
+owned-field-read.slp:7:14: error[SL0300]: moving owned field `label` requires pattern destructuring
+  |
+ 7 |   (let label (. point label))
+  |              ^^^^^^^^^^^^^^^
+  = help: store a Copy field or pass the whole struct by ownership
