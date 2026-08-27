@@ -152,60 +152,71 @@ fi
 # carries the typed parameters and, as markdown, the sentence written above
 # the declaration.
 cat >"$check_dir/server-completion.lua" <<'LUA'
-local project = vim.env.SLOPIUM_COMPLETION_PROJECT
-vim.cmd("edit " .. project .. "/src/main.slp")
-assert(vim.bo.filetype == "slopium", "filetype did not become `slopium`")
-local bufnr = vim.api.nvim_get_current_buf()
+-- A lua chunk that dies under `nvim -S` never leaves the editor: headless
+-- Neovim reports the error and stays in its event loop, so the harness would
+-- wait on a process that is no longer doing anything. Every run therefore
+-- leaves through `qa!` or `cquit` on every path, and the invocation itself is
+-- bounded by `timeout` in the shell.
+local body = function()
+  local project = vim.env.SLOPIUM_COMPLETION_PROJECT
+  vim.cmd("edit " .. project .. "/src/main.slp")
+  assert(vim.bo.filetype == "slopium", "filetype did not become `slopium`")
+  local bufnr = vim.api.nvim_get_current_buf()
 
-local published = false
-local client_id = vim.lsp.start({
-  name = "slopium-lsp",
-  cmd = { vim.env.SLOPIUM_LSP_SERVER },
-  root_dir = project,
-  handlers = {
-    ["textDocument/publishDiagnostics"] = function()
-      published = true
-      return true
-    end,
-  },
-}, { bufnr = bufnr })
-assert(client_id, "the language server did not start")
-if not vim.wait(30000, function()
-  return published
-end) then
-  error("the server never published after the buffer was opened")
-end
-
-local client = assert(vim.lsp.get_client_by_id(client_id))
-local response = client:request_sync("textDocument/completion", {
-  textDocument = { uri = vim.uri_from_bufnr(bufnr) },
-  position = { line = 3, character = 8 },
-}, 30000)
-assert(response.err == nil, "completion failed: " .. tostring(response.err))
-
-local twice
-for _, item in ipairs(response.result.items) do
-  if item.label == "twice" then
-    twice = item
-    break
+  local client_id = vim.lsp.start({
+    name = "slopium-lsp",
+    cmd = { vim.env.SLOPIUM_LSP_SERVER },
+    root_dir = project,
+  }, { bufnr = bufnr })
+  assert(client_id, "the language server did not start")
+  -- Readiness is the initialize handshake, not a notification: diagnostics
+  -- say something about the document, and a server is ready to answer before
+  -- it has anything to publish.
+  if not vim.wait(30000, function()
+    local client = vim.lsp.get_client_by_id(client_id)
+    return client ~= nil and client.initialized
+  end) then
+    error("the language server never finished initializing")
   end
-end
-assert(twice, "the server did not offer `twice`")
-assert(
-  twice.detail == "fn twice(i64) -> i64",
-  "the server's detail was `" .. tostring(twice.detail) .. "`"
-)
-assert(
-  type(twice.documentation) == "table" and twice.documentation.kind == "markdown",
-  "the server sent no markdown documentation window"
-)
-for _, part in ipairs({ "Doubles a value by adding it to itself.", "fn twice(i64) -> i64" }) do
+
+  local client = assert(vim.lsp.get_client_by_id(client_id))
+  local response = client:request_sync("textDocument/completion", {
+    textDocument = { uri = vim.uri_from_bufnr(bufnr) },
+    position = { line = 3, character = 8 },
+  }, 30000)
+  assert(response ~= nil, "the completion request timed out")
+  assert(response.err == nil, "completion failed: " .. tostring(response.err))
+
+  local twice
+  for _, item in ipairs(response.result.items) do
+    if item.label == "twice" then
+      twice = item
+      break
+    end
+  end
+  assert(twice, "the server did not offer `twice`")
   assert(
-    twice.documentation.value:find(part, 1, true),
-    "the documentation window lost `" .. part .. "`:\n" .. twice.documentation.value
+    twice.detail == "fn twice(i64) -> i64",
+    "the server's detail was `" .. tostring(twice.detail) .. "`"
   )
+  assert(
+    type(twice.documentation) == "table" and twice.documentation.kind == "markdown",
+    "the server sent no markdown documentation window"
+  )
+  for _, part in ipairs({ "Doubles a value by adding it to itself.", "fn twice(i64) -> i64" }) do
+    assert(
+      twice.documentation.value:find(part, 1, true),
+      "the documentation window lost `" .. part .. "`:\n" .. twice.documentation.value
+    )
+  end
+  io.write("nvim-check: the server's reply carries the block and the signature\n")
 end
-io.write("nvim-check: the server's reply carries the block and the signature\n")
+
+local ok, err = pcall(body)
+if not ok then
+  io.stderr:write(tostring(err) .. "\n")
+  vim.cmd("cquit 1")
+end
 vim.cmd("qa!")
 LUA
 
@@ -213,70 +224,83 @@ LUA
 # items say the same thing about the same declaration, and keep quiet about
 # whatever the header they were read from did not spell out.
 cat >"$check_dir/scanner-completion.lua" <<'LUA'
-local project = vim.env.SLOPIUM_COMPLETION_PROJECT
-vim.cmd("edit " .. project .. "/src/main.slp")
-local bufnr = vim.api.nvim_get_current_buf()
-assert(
-  #vim.lsp.get_clients({ bufnr = bufnr }) == 0,
-  "a language server is attached; the fallback cannot be checked like this"
-)
-
-local items = require("slopium.completion").items(bufnr)
-local found = {}
-for _, item in ipairs(items) do
-  found[item.label] = item
-end
-local twice = assert(found.twice, "the scan did not offer `twice`")
-assert(
-  twice.detail == "fn twice(i64) -> i64",
-  "the scan read the signature as `" .. tostring(twice.detail) .. "`"
-)
-assert(
-  type(twice.documentation) == "table" and twice.documentation.kind == "markdown",
-  "the scan sent no markdown documentation window"
-)
-for _, part in ipairs({ "Doubles a value by adding it to itself.", "fn twice(i64) -> i64" }) do
+-- The same leaving rule as the server run: a failing chunk must still exit
+-- the editor, or the harness waits on a process that has stopped working.
+local body = function()
+  local project = vim.env.SLOPIUM_COMPLETION_PROJECT
+  vim.cmd("edit " .. project .. "/src/main.slp")
+  local bufnr = vim.api.nvim_get_current_buf()
   assert(
-    twice.documentation.value:find(part, 1, true),
-    "the fallback lost `" .. part .. "`:\n" .. twice.documentation.value
+    #vim.lsp.get_clients({ bufnr = bufnr }) == 0,
+    "a language server is attached; the fallback cannot be checked like this"
   )
-end
-assert(found.main, "the scan did not offer `main`")
-assert(found.main.detail == "fn main() -> i32", "zero parameters still read as a signature")
-assert(
-  found.main.documentation == nil,
-  "the scan wrote prose above a declaration that had none"
-)
 
--- A header left hanging open says nothing rather than guessing: the name is
--- still offered, wearing the phrase it always wore.
-local unfinished = vim.api.nvim_create_buf(false, true)
-vim.api.nvim_buf_set_lines(unfinished, 0, -1, false, {
-  ";; Left open, so no type can be said for it.",
-  "(fn hang ((x i64",
-})
-local hang
-for _, item in ipairs(require("slopium.completion").items(unfinished)) do
-  if item.label == "hang" then
-    hang = item
-    break
+  local items = require("slopium.completion").items(bufnr)
+  local found = {}
+  for _, item in ipairs(items) do
+    found[item.label] = item
   end
+  local twice = assert(found.twice, "the scan did not offer `twice`")
+  assert(
+    twice.detail == "fn twice(i64) -> i64",
+    "the scan read the signature as `" .. tostring(twice.detail) .. "`"
+  )
+  assert(
+    type(twice.documentation) == "table" and twice.documentation.kind == "markdown",
+    "the scan sent no markdown documentation window"
+  )
+  for _, part in ipairs({ "Doubles a value by adding it to itself.", "fn twice(i64) -> i64" }) do
+    assert(
+      twice.documentation.value:find(part, 1, true),
+      "the fallback lost `" .. part .. "`:\n" .. twice.documentation.value
+    )
+  end
+  assert(found.main, "the scan did not offer `main`")
+  assert(found.main.detail == "fn main() -> i32", "zero parameters still read as a signature")
+  assert(
+    found.main.documentation == nil,
+    "the scan wrote prose above a declaration that had none"
+  )
+
+  -- A header left hanging open says nothing rather than guessing: the name is
+  -- still offered, wearing the phrase it always wore.
+  local unfinished = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_lines(unfinished, 0, -1, false, {
+    ";; Left open, so no type can be said for it.",
+    "(fn hang ((x i64",
+  })
+  local hang
+  for _, item in ipairs(require("slopium.completion").items(unfinished)) do
+    if item.label == "hang" then
+      hang = item
+      break
+    end
+  end
+  assert(hang, "the scan dropped a declaration it could not finish reading")
+  assert(
+    hang.detail == "function in this buffer",
+    "an unreadable header was described as `" .. tostring(hang.detail) .. "`"
+  )
+  assert(
+    hang.documentation == nil,
+    "the scan documented something it could not read"
+  )
+  io.write("nvim-check: the scanner alone carries the block and the signature\n")
 end
-assert(hang, "the scan dropped a declaration it could not finish reading")
-assert(
-  hang.detail == "function in this buffer",
-  "an unreadable header was described as `" .. tostring(hang.detail) .. "`"
-)
-assert(
-  hang.documentation == nil,
-  "the scan documented something it could not read"
-)
-io.write("nvim-check: the scanner alone carries the block and the signature\n")
+
+local ok, err = pcall(body)
+if not ok then
+  io.stderr:write(tostring(err) .. "\n")
+  vim.cmd("cquit 1")
+end
 vim.cmd("qa!")
 LUA
 
+# Both runs are bounded: `timeout` turns any run that forgot to leave — or
+# left something behind that keeps the editor alive — into a fast failure
+# instead of a hung check.
 SLOPIUM_LSP_SERVER="$server" SLOPIUM_COMPLETION_PROJECT="$check_dir/completion" \
-  nvim --headless -u "$check_dir/init.lua" -S "$check_dir/server-completion.lua" \
+  timeout 180 nvim --headless -u "$check_dir/init.lua" -S "$check_dir/server-completion.lua" \
   >/dev/null 2>"$check_dir/nvim.server.stderr" ||
   {
     cat "$check_dir/nvim.server.stderr" >&2
@@ -285,7 +309,7 @@ SLOPIUM_LSP_SERVER="$server" SLOPIUM_COMPLETION_PROJECT="$check_dir/completion" 
 echo "nvim-check: the server's popup completes with the block and the signature ... ok"
 
 SLOPIUM_COMPLETION_PROJECT="$check_dir/completion" \
-  nvim --headless -u "$check_dir/init.lua" -S "$check_dir/scanner-completion.lua" \
+  timeout 180 nvim --headless -u "$check_dir/init.lua" -S "$check_dir/scanner-completion.lua" \
   >/dev/null 2>"$check_dir/nvim.scanner.stderr" || {
     cat "$check_dir/nvim.scanner.stderr" >&2
     fail "the scanner-only completion check failed"
