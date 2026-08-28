@@ -1235,6 +1235,15 @@ five and never by scaling the float itself.
 `println-i64`, `print-u64`, `println-u64`, `print-bool` and `println-bool`,
 `read-line` returning `(Option String)` without LF/CRLF, and `read-i64`
 returning `(Option i64)`.
+**A printed `bool` is a digit** — `1` for `true`, `0` for `false`, from
+`print-bool` and `println-bool` alike — so `(println-bool true)` writes `1`
+and `(println-bool false)` writes `0`, the line break being all that the
+second name of the pair adds. The words `true` and `false` are the language's
+spelling of the two values in source and they stay there: both bodies are
+Slopium over `print-i64` and `println-i64`, with `(if flag 1 0)` the whole of
+what either adds, so a bool's printed form is an integer's printed form, and
+a program that wants the word on the page writes the string:
+`(println &"true")`.
 There are no traits and none are planned (`D-088`), so one name cannot print
 every printable type (`D-078`); the widths are separate functions, and their
 bodies are Slopium over `from-i64`. There is no `println-i32` and there will

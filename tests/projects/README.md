@@ -38,6 +38,7 @@ scripts/project-tests.sh
 | `result-instances` | An error out of `try` rebuilt as the return type's own `Err`, with both deferred effects and an owned value beside it proving each arm ends its scopes once |
 | `target-selection` | A `fn` and a `const` selected by target across three triples, and an unannotated declaration that every target gets; built and run for both the host and the cross target |
 | `const-borrow` | A `const` borrowed where a call takes it, as the inlined literal itself: a string and a scalar constant, constants inside a larger borrowed expression, and reads through the borrow (`D-121`, `D-126`) |
+| `print-bool` | The digit a printed `bool` is — `1` for `true` and `0` for `false` — from both `print-bool` and `println-bool`, over literals and a computed value, with words beside the digits the non-breaking pair writes |
 
 `workspaces/virtual-root` is not a passing project, because its root defines no
 package to run: it has its own phase in the runner, which asserts that a command
