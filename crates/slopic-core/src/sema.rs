@@ -620,8 +620,28 @@ pub fn analyze(file: &str, program: &Program) -> CompileResult<TypedProgram> {
         program,
         &crate::LanguageItems::default(),
         true,
+        &ModuleFunctions::new(),
         &mut Vec::new(),
     )
+}
+
+/// The `fn` a bare name reaches in each module of a package, by that name.
+///
+/// Package analysis rewrites every top-level name to its `module:name`
+/// canonical, so the signature table holds no bare name for a local to be
+/// checked against. This is the table's other half: per module, every bare
+/// name a call written there resolves to a function by — the module's own
+/// declarations and the aliases it takes — pointing at the canonical the call
+/// would reach. The entry module answers under `""`, because its `main` is the
+/// one top-level name the merge leaves unprefixed. A lone file needs none of
+/// this: its signatures are bare already, and the empty map says so.
+pub type ModuleFunctions = HashMap<String, HashMap<String, String>>;
+
+/// The module a merged top-level item belongs to: the prefix of its canonical
+/// name, or the entry module for the one item that carries none.
+fn module_of(item: &str) -> String {
+    item.split_once(':')
+        .map_or_else(String::new, |(module, _)| module.to_owned())
 }
 
 /// Checks a program, appending to `warnings` what it has to say about one that
@@ -636,14 +656,30 @@ pub fn analyze_with_options(
     program: &Program,
     language_items: &crate::LanguageItems,
     validate_entry_point: bool,
+    module_functions: &ModuleFunctions,
     warnings: &mut Vec<Diagnostic>,
 ) -> CompileResult<TypedProgram> {
-    Analyzer::new(file, program, language_items, validate_entry_point).analyze(program, warnings)
+    Analyzer::new(
+        file,
+        program,
+        language_items,
+        validate_entry_point,
+        module_functions,
+    )
+    .analyze(program, warnings)
 }
 
 struct Analyzer<'a> {
     file: &'a str,
     signatures: HashMap<String, Signature>,
+    /// The `fn` each bare name reaches per module, which is where a local of
+    /// `Fn` type is checked against the function namespace: the signature
+    /// table a package build fills is keyed by canonical names, and a local
+    /// binds a bare one. Empty for a lone file, whose signatures are bare.
+    module_functions: ModuleFunctions,
+    /// The module whose names the item being typed is checked against, from
+    /// the prefix of its canonical name (`""` for the entry module's `main`).
+    current_module: String,
     structs: HashMap<String, Vec<(String, Type)>>,
     generic_structs: HashMap<String, GenericStructInfo>,
     generic_enums: HashMap<String, GenericEnumInfo>,
@@ -764,6 +800,7 @@ impl<'a> Analyzer<'a> {
         program: &Program,
         language_items: &crate::LanguageItems,
         validate_entry_point: bool,
+        module_functions: &ModuleFunctions,
     ) -> Self {
         let mut declared_types = HashSet::new();
         declared_types.extend(program.structs.iter().map(|item| item.name.clone()));
@@ -863,6 +900,8 @@ impl<'a> Analyzer<'a> {
         Self {
             file,
             signatures: HashMap::new(),
+            module_functions: module_functions.clone(),
+            current_module: String::new(),
             structs,
             generic_structs,
             generic_enums,
@@ -969,6 +1008,7 @@ impl<'a> Analyzer<'a> {
         }
         let mut tests = Vec::new();
         for test in &program.tests {
+            self.current_module = module_of(&test.name);
             self.env = Environment::default();
             self.env.push();
             let body = self.expr(&test.body, Some(&Type::Bool));
@@ -1479,6 +1519,7 @@ impl<'a> Analyzer<'a> {
     }
 
     fn function(&mut self, function: &Function) -> Option<TypedFunction> {
+        self.current_module = module_of(&function.name);
         self.active_type_params = function.type_params.iter().cloned().collect();
         self.env = Environment::default();
         self.env.push();
@@ -5288,8 +5329,22 @@ impl<'a> Analyzer<'a> {
     /// be the thing called. `STATUS.md` carries "a `fn` may silently shadow a
     /// builtin" as a standing debt, and `D-092` says this must not become a
     /// second one of the same shape — so it is named rather than resolved.
+    ///
+    /// A package build keeps its signature table under `module:name`
+    /// canonicals, so the bare name a local binds is looked up in what that
+    /// name reaches *there* instead — a `fn` of the same name only counts when
+    /// the module being typed can call it by that name, which is what makes a
+    /// local in one module beside a private `fn` of another legal.
     fn refuse_function_shadow(&mut self, name: &str, ty: &Type, span: Span) {
-        if !matches!(ty, Type::Fn { .. }) || !self.signatures.contains_key(name) {
+        if !matches!(ty, Type::Fn { .. }) {
+            return;
+        }
+        let reaches_function = self.signatures.contains_key(name)
+            || self
+                .module_functions
+                .get(&self.current_module)
+                .is_some_and(|names| names.contains_key(name));
+        if !reaches_function {
             return;
         }
         self.diagnostics.push(
@@ -6267,6 +6322,65 @@ mod tests {
         let forms = parser::parse("test.slp", &tokens)?;
         let program = ast::build_program("test.slp", &forms)?;
         analyze("test.slp", &program)
+    }
+
+    /// The same analysis over what a package build hands sema: canonical
+    /// `module:name` declarations and the per-module table of bare names that
+    /// reach a function, with no entry point to validate (`main` is prefixed).
+    fn analyze_module(
+        source: &str,
+        module_functions: &ModuleFunctions,
+    ) -> CompileResult<TypedProgram> {
+        let tokens = reader::expand("test.slp", &lexer::lex("test.slp", source)?)?;
+        let forms = parser::parse("test.slp", &tokens)?;
+        let program = ast::build_program("test.slp", &forms)?;
+        analyze_with_options(
+            "test.slp",
+            &program,
+            &crate::LanguageItems::default(),
+            false,
+            module_functions,
+            &mut Vec::new(),
+        )
+    }
+
+    /// A local of `Fn` type beside a `fn` of the same name is refused where
+    /// the local is bound, in a package build as anywhere else: the call would
+    /// reach the `fn`, so the local could never be the thing called.
+    #[test]
+    fn refuses_a_fn_valued_local_beside_a_module_fn() {
+        let source = r#"
+            (fn m:f ((v i64)) -> i64 v)
+            (fn m:main () -> i32
+              (let f (lambda () ((v i64)) -> i64 (* v 2)))
+              (f 10)
+              0)
+        "#;
+        let module_functions = ModuleFunctions::from([(
+            "m".to_owned(),
+            HashMap::from([("f".to_owned(), "m:f".to_owned())]),
+        )]);
+        let errors = analyze_module(source, &module_functions).unwrap_err();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].code, "SL0200");
+        assert!(errors[0]
+            .message
+            .contains("`f` is already a function, so it cannot also name a function value"));
+    }
+
+    /// The refusal follows what the name reaches, not what exists: a `fn` of
+    /// the same name in a module this one never takes cannot be called by it,
+    /// so the local is an ordinary binding and every call reaches it.
+    #[test]
+    fn allows_a_fn_valued_local_no_module_fn_reaches() {
+        let source = r#"
+            (fn m:f ((v i64)) -> i64 v)
+            (fn m:main () -> i32
+              (let f (lambda () ((v i64)) -> i64 (* v 2)))
+              (f 10)
+              0)
+        "#;
+        analyze_module(source, &ModuleFunctions::new()).unwrap();
     }
 
     #[test]

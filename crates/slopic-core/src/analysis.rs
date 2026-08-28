@@ -145,11 +145,15 @@ pub fn analyze_source(file: &str, source: &str, options: &CompileOptions) -> Ana
     // file could be (`D-136`).
     ast::select_for_target(&mut ast, &options.target);
     let mut warnings = Vec::new();
+    // A lone file's signatures are bare names, so the per-module table a
+    // package's canonical names need is nothing here.
+    let module_functions = sema::ModuleFunctions::new();
     match sema::analyze_with_options(
         file,
         &ast,
         &options.language_items,
         options.validate_entry_point,
+        &module_functions,
         &mut warnings,
     ) {
         Ok(program) => {
