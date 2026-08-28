@@ -208,6 +208,7 @@ pub fn analyze_package(input: &PackageInput, options: &CompileOptions) -> Packag
     reject_cycles(&units, &edges, &mut diagnostics);
     let exports = resolve_exports(&units, &module_indices, &mut diagnostics);
     resolve_imports(&mut units, &module_indices, &exports, &mut diagnostics);
+    let module_functions = visible_functions(&units, &input.entry_module);
     if !diagnostics.is_empty() {
         return PackageAnalysis {
             diagnostics,
@@ -288,6 +289,7 @@ pub fn analyze_package(input: &PackageInput, options: &CompileOptions) -> Packag
         &merged,
         &language_items,
         options.validate_entry_point,
+        &module_functions,
         &mut warnings,
     ) {
         Ok(program) => PackageAnalysis {
@@ -304,6 +306,51 @@ pub fn analyze_package(input: &PackageInput, options: &CompileOptions) -> Packag
             modules: summaries(&units, &exports),
         },
     }
+}
+
+/// The `fn` a bare name reaches in each module, for the shadow check a local
+/// of `Fn` type is refused by (`D-092`).
+///
+/// The merge keys every top-level name by its canonical `module:name`, so a
+/// local — which binds a bare name — has nothing to be checked against in the
+/// signature table. What decides a call written in a module is what the name
+/// reaches *there*: the module's own `fn` and `extern` declarations, and the
+/// aliases it `take`s one under. Both are recorded, pointing at the canonical
+/// a call by that name would reach. The entry module answers under `""`,
+/// because its `main` is the one top-level name left unprefixed.
+fn visible_functions(units: &[ModuleUnit], entry_module: &str) -> sema::ModuleFunctions {
+    let mut functions = HashSet::new();
+    for unit in units {
+        for decl in unit.declarations.values() {
+            if matches!(
+                decl.kind,
+                DeclarationKind::Function | DeclarationKind::Extern
+            ) {
+                functions.insert(decl.canonical.clone());
+            }
+        }
+    }
+    let mut table = HashMap::new();
+    for unit in units {
+        let mut names = HashMap::new();
+        for (name, decl) in &unit.declarations {
+            if functions.contains(&decl.canonical) {
+                names.insert(name.clone(), decl.canonical.clone());
+            }
+        }
+        for (alias, canonical) in &unit.imports {
+            if functions.contains(canonical) {
+                names.insert(alias.clone(), canonical.clone());
+            }
+        }
+        let module = if unit.module == entry_module {
+            String::new()
+        } else {
+            unit.module.clone()
+        };
+        table.insert(module, names);
+    }
+    table
 }
 
 fn resolved_language_items(
@@ -1477,6 +1524,63 @@ mod tests {
             .functions
             .iter()
             .any(|function| function.name == "geometry:distance"));
+    }
+
+    /// A local of `Fn` type beside a `fn` of the same name is refused in a
+    /// package build too, where the collision is between a bare binding name
+    /// and a canonical signature: the call reaches the `fn` either way, so the
+    /// local is told so where it is bound.
+    #[test]
+    fn refuses_a_fn_valued_local_beside_a_fn_of_the_same_name() {
+        let input = PackageInput {
+            name: "demo".into(),
+            entry_module: "main".into(),
+            files: vec![source(
+                "main",
+                "(fn f ((v i64)) -> i64 v)\n(fn main () -> i32\n  (let f (lambda () ((v i64)) -> i64 (* v 2)))\n  (f 10)\n  0)\n",
+            )],
+        };
+        let analysis = analyze_package(&input, &CompileOptions::default());
+        assert!(
+            analysis
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "SL0200"
+                    && diagnostic.message.contains("`f` is already a function")),
+            "{:?}",
+            analysis.diagnostics
+        );
+    }
+
+    /// The same refusal under a `take`n alias: an imported `fn` answers a call
+    /// by its alias, so a local of `Fn` type bound under the alias loses every
+    /// call to it exactly as beside a local declaration.
+    #[test]
+    fn refuses_a_fn_valued_local_under_an_imported_fns_alias() {
+        let input = PackageInput {
+            name: "demo".into(),
+            entry_module: "main".into(),
+            files: vec![
+                source(
+                    "geometry",
+                    "(export scale)\n(fn scale ((n i64)) -> i64 (* n 2))",
+                ),
+                source(
+                    "main",
+                    "(take geometry (scale :as f))\n(fn main () -> i32\n  (let f (lambda () ((v i64)) -> i64 (* v 2)))\n  (f 10)\n  0)\n",
+                ),
+            ],
+        };
+        let analysis = analyze_package(&input, &CompileOptions::default());
+        assert!(
+            analysis
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "SL0200"
+                    && diagnostic.message.contains("`f` is already a function")),
+            "{:?}",
+            analysis.diagnostics
+        );
     }
 
     #[test]

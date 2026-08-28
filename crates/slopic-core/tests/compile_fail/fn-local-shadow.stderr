@@ -1,0 +1,5 @@
+fn-local-shadow.slp:8:3: error[SL0200]: `f` is already a function, so it cannot also name a function value
+  |
+ 8 |   (let f (lambda () ((v i64)) -> i64 (* v 2)))
+  |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  = help: rename the binding: `(f ...)` would call the `fn`, not this value
