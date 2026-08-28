@@ -1,0 +1,10 @@
+; The function namespace is consulted first, so a call `(f v)` means the
+; `fn` whenever there is one. A local of `Fn` type bound under the same
+; name beside one is refused at the binding: it could never be the thing
+; called.
+(fn f ((v i64)) -> i64 v)
+
+(fn main () -> i32
+  (let f (lambda () ((v i64)) -> i64 (* v 2)))
+  (f 10)
+  0)
