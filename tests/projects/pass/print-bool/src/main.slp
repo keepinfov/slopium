@@ -1,0 +1,24 @@
+; The printed form of a `bool` is a digit: `1` for `true` and `0` for
+; `false`, from `print-bool` and `println-bool` alike. The words are the
+; language's spelling of the values in source and they stay there — the two
+; bodies are `print-i64` and `println-i64` over `(if flag 1 0)` — so what
+; leaves for a bool is what leaves for the integer the body chose, and a
+; program that wants the word on the page writes the string itself.
+
+(take std:io print println print-bool println-bool)
+
+(fn main () -> i32
+  ; Each value through the pair that breaks the line.
+  (println-bool true)
+  (println-bool false)
+  ; Each value through the pair that does not, with words around the digits,
+  ; so a digit is seen where a program reads it back rather than alone.
+  (print &"true is ")
+  (print-bool true)
+  (print &", false is ")
+  (print-bool false)
+  (println &"")
+  ; A computed bool, since a literal is the rare case.
+  (println-bool (= (- 7 4) 3))
+  (println-bool (= (- 7 4) 4))
+  0)
