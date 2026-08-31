@@ -426,7 +426,13 @@ borrow has a trap in it. `shr` is arithmetic on a signed type and logical on an
 unsigned one, which is what the two words mean and needs no second operator.
 **A shift by a negative amount, or by the width of the type or more, traps** — the two
 architectures disagree about what such a shift would otherwise mean, and
-neither answer is one a program asked for. **A shift does not trap when bits
+neither answer is one a program asked for. A literal amount never reaches that
+trap: the compiler reads it where the program is written, and one that leaves
+nothing of the type — negative, or the width or more — is refused with `SL0200`
+in the refusal's own words, `` `shl` by 64 leaves nothing of `i64` ``, and
+`shr` says the same. Every other amount is a value like any other, and keeps
+the trap.
+**A shift does not trap when bits
 leave the top**: `(shl 1 63)` is the smallest `i64` and that is the answer, not
 an overflow, because a shift describes a pattern of bits rather than a
 magnitude. Both rules read the *type's* width, so a `u8` shifted by 8 traps and
