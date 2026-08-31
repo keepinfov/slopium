@@ -1,4 +1,5 @@
 pub mod archive;
+pub mod codes;
 pub mod git;
 pub mod lock;
 pub mod manifest;

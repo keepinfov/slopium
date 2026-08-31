@@ -18,6 +18,7 @@
 //! are checked against its manifest once the graph settles (`D-055`).
 
 use crate::archive::prefix_for;
+use crate::codes;
 use crate::manifest::{validate_package_name, Project, MANIFEST_FILE};
 use crate::registry::{IndexEntry, IndexSource};
 use crate::sha256::Digest;
@@ -128,14 +129,16 @@ pub fn resolve_workspace(
                 Some(existing) if existing.id.version == package.id.version => {
                     let first = &reached_by[&package.id.name];
                     return Err(format!(
-                        "SL1031: `{}` is required from two sources in one workspace: `{}` through `{first}` and `{}` through `{name}`. One lockfile cannot record both",
+                        "{}: `{}` is required from two sources in one workspace: `{}` through `{first}` and `{}` through `{name}`. One lockfile cannot record both",
+                        codes::TWO_SOURCES,
                         package.id.name, existing.id.source, package.id.source
                     ));
                 }
                 Some(existing) => {
                     let first = &reached_by[&package.id.name];
                     return Err(format!(
-                        "SL1072: `{}` is required at two versions in one workspace: {} through `{first}` and {} through `{name}`. One lockfile cannot record both",
+                        "{}: `{}` is required at two versions in one workspace: {} through `{first}` and {} through `{name}`. One lockfile cannot record both",
+                        codes::TWO_VERSIONS,
                         package.id.name, existing.id.version, package.id.version
                     ));
                 }
@@ -518,7 +521,8 @@ impl Context<'_> {
         // that differed from it would give one package two names.
         if project.name != need.name {
             return Err(format!(
-                "SL1071: `{}` declares dependency `{}`, but the package at `{}` is named `{}`; the key in `[dependencies]` must be the package name",
+                "{}: `{}` declares dependency `{}`, but the package at `{}` is named `{}`; the key in `[dependencies]` must be the package name",
+                codes::WRONG_NAME,
                 need.dependent,
                 need.name,
                 project.root.display(),
@@ -547,7 +551,8 @@ impl Context<'_> {
                 .map(|package| package.name)
                 .collect();
             return Err(format!(
-                "SL1077: dependency `{}` cannot use the toolchain source; the bundled packages are {}",
+                "{}: dependency `{}` cannot use the toolchain source; the bundled packages are {}",
+                codes::TOOLCHAIN_SOURCE,
                 need.name,
                 names.join(" and ")
             ));
@@ -602,8 +607,11 @@ impl Context<'_> {
         let project = self.materialize(&id, &pin.checksum)?;
         if project.name != id.name || project.version != id.version {
             return Err(format!(
-                "SL1071: `{url}` at {} is `{} v{}`, but it was resolved as `{id}`",
-                pin.source, project.name, project.version
+                "{}: `{url}` at {} is `{} v{}`, but it was resolved as `{id}`",
+                codes::WRONG_NAME,
+                pin.source,
+                project.name,
+                project.version
             ));
         }
         let needs = self.needs_of(&project, &id)?;
@@ -625,7 +633,8 @@ impl Context<'_> {
     fn registry_package_from_lock(&self, need: &Need, pin: &Pin) -> Result<Chosen, String> {
         let checksum = pin.checksum.ok_or_else(|| {
             format!(
-                "SL1078: `{}` records `{}` as a registry package with no checksum; delete it and resolve again",
+                "{}: `{}` records `{}` as a registry package with no checksum; delete it and resolve again",
+                codes::NO_CHECKSUM,
                 crate::lock::LOCK_FILE,
                 need.name
             )
@@ -713,8 +722,11 @@ impl Context<'_> {
                 let project = self.materialize(&package.id, &checksum)?;
                 if project.name != package.id.name || project.version != package.id.version {
                     return Err(format!(
-                        "SL1033: the index offered `{}`, but the archive it points at is `{} v{}`",
-                        package.id, project.name, project.version
+                        "{}: the index offered `{}`, but the archive it points at is `{} v{}`",
+                        codes::INDEX_DISAGREEMENT,
+                        package.id,
+                        project.name,
+                        project.version
                     ));
                 }
                 let declared = self.needs_of(&project, &package.id)?;
@@ -759,17 +771,20 @@ impl Context<'_> {
                 // directory whose absolute path a lock must not record. Both
                 // have answers; neither is in this release.
                 SourceId::Git { .. } => Err(format!(
-                    "SL1076: `{dependent}` comes from git and declares the `path` dependency `{declared}`; a package fetched from a repository cannot have one yet, because there is no way to write where it lives into a lockfile that another machine could read"
+                    "{}: `{dependent}` comes from git and declares the `path` dependency `{declared}`; a package fetched from a repository cannot have one yet, because there is no way to write where it lives into a lockfile that another machine could read",
+                    codes::GIT_PATH_DEPENDENCY
                 )),
                 SourceId::Registry { .. } => Err(format!(
-                    "SL1032: `{dependent} v{}` came from a registry and declares the `path` dependency `{declared}`; a published package depends only on its own registry and the toolchain (`D-054`)",
+                    "{}: `{dependent} v{}` came from a registry and declares the `path` dependency `{declared}`; a published package depends only on its own registry and the toolchain (`D-054`)",
+                    codes::UNPUBLISHABLE,
                     id.version
                 )),
                 _ => Ok(Want::Path(project.root.join(relative))),
             },
             SourceSpec::Git { url, reference } => match &id.source {
                 SourceId::Registry { .. } => Err(format!(
-                    "SL1032: `{dependent} v{}` came from a registry and declares the `git` dependency `{declared}`; a published package depends only on its own registry and the toolchain (`D-054`)",
+                    "{}: `{dependent} v{}` came from a registry and declares the `git` dependency `{declared}`; a published package depends only on its own registry and the toolchain (`D-054`)",
+                    codes::UNPUBLISHABLE,
                     id.version
                 )),
                 _ => Ok(Want::Git { url, reference }),
@@ -784,7 +799,8 @@ impl Context<'_> {
                     })
                 }
                 SourceId::Registry { .. } => Err(format!(
-                    "SL1032: `{dependent} v{}` came from a registry and takes `{declared}` from the registry it calls `{registry}`; a name written in a published manifest means nothing on the machine that fetched it (`D-054`)",
+                    "{}: `{dependent} v{}` came from a registry and takes `{declared}` from the registry it calls `{registry}`; a name written in a published manifest means nothing on the machine that fetched it (`D-054`)",
+                    codes::UNPUBLISHABLE,
                     id.version
                 )),
                 _ => Ok(Want::Registry {
@@ -826,12 +842,14 @@ impl Context<'_> {
         };
         if best.id.source != existing.id.source {
             return Ok(format!(
-                "SL1031: `{}` is required from two sources: `{}` and {}. A package name resolves from one source in a graph (`D-038`)",
+                "{}: `{}` is required from two sources: `{}` and {}. A package name resolves from one source in a graph (`D-038`)",
+                codes::TWO_SOURCES,
                 need.name, existing.id.source, need.want
             ));
         }
         Ok(format!(
-            "SL1072: `{}` is required at two versions: {} and {}. Two incompatible versions of one package cannot coexist in a graph",
+            "{}: `{}` is required at two versions: {} and {}. Two incompatible versions of one package cannot coexist in a graph",
+            codes::TWO_VERSIONS,
             need.name, existing.id.version, best.id.version
         ))
     }
@@ -839,8 +857,11 @@ impl Context<'_> {
     /// Why nothing a source offers satisfies a requirement.
     fn no_candidate(&self, need: &Need, options: &Options) -> String {
         let asked = format!(
-            "SL1073: cannot select a version of `{}`: `{}` requires {}",
-            need.name, need.dependent, need.requirement
+            "{}: cannot select a version of `{}`: `{}` requires {}",
+            codes::NO_VERSION,
+            need.name,
+            need.dependent,
+            need.requirement
         );
         // A yanked version that would otherwise have been the answer is the
         // useful thing to say — "the only candidate is 1.0.0" hides it.
@@ -852,7 +873,8 @@ impl Context<'_> {
             .collect();
         if !withdrawn.is_empty() {
             return format!(
-                "SL1035: {asked}, and every version that would satisfy it is yanked ({})",
+                "{}: {asked}, and every version that would satisfy it is yanked ({})",
+                codes::ALL_YANKED,
                 versions(&withdrawn)
             );
         }
@@ -913,7 +935,8 @@ fn check_against_index(package: &Chosen, declared: &[Need]) -> Result<(), String
         }
     };
     Err(format!(
-        "SL1033: the index says `{}` requires {}, but its manifest requires {}. The index is what selected it, so the two have to agree",
+        "{}: the index says `{}` requires {}, but its manifest requires {}. The index is what selected it, so the two have to agree",
+        codes::INDEX_DISAGREEMENT,
         package.id,
         render(&published),
         render(&actual)
@@ -939,7 +962,8 @@ fn replacement(
     let root = directory.join(&id.name);
     if !root.is_dir() {
         return Err(format!(
-            "SL1075: `{source}` is replaced by the vendored packages in `{}`, but `{}` is not there; run `slopium vendor`",
+            "{}: `{source}` is replaced by the vendored packages in `{}`, but `{}` is not there; run `slopium vendor`",
+            codes::VENDOR_MISSING,
             directory.display(),
             id.name
         ));
@@ -953,7 +977,8 @@ fn replacement(
     let project = load_project(Some(root.join(MANIFEST_FILE)))?;
     if project.name != id.name || project.version != id.version {
         return Err(format!(
-            "SL1075: the vendored copy at `{}` is `{} v{}`, but it stands in for `{id}`",
+            "{}: the vendored copy at `{}` is `{} v{}`, but it stands in for `{id}`",
+            codes::VENDOR_MISSING,
             root.display(),
             project.name,
             project.version
@@ -995,7 +1020,8 @@ fn collect_language_items(
     }
     if let Some(previous) = source {
         return Err(format!(
-            "SL1074: `{previous}` and `{declared}` both define `[language-items]`; a package graph has one standard library"
+            "{}: `{previous}` and `{declared}` both define `[language-items]`; a package graph has one standard library",
+            codes::TWO_STDLIBS
         ));
     }
     *source = Some(declared.to_owned());
@@ -1029,7 +1055,8 @@ fn reject_cycles(packages: &BTreeMap<String, ResolvedPackage>, root: &str) -> Re
                 let mut cycle = path[start..].to_vec();
                 cycle.push(name.to_owned());
                 return Err(format!(
-                    "SL1070: package dependency cycle: {}",
+                    "{}: package dependency cycle: {}",
+                    codes::CYCLE,
                     cycle.join(" -> ")
                 ));
             }

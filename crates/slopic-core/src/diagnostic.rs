@@ -405,9 +405,9 @@ mod tests {
         // The codes are frozen, and `docs/diagnostics.md` is the registry: it
         // lists exactly the compiler's codes, so a code raised and never
         // documented fails here the same way a code documented and never
-        // raised does. The manager's `SL1xxx` half has no table in code to
-        // hold the document against, which is why the comparison stops at
-        // `SL0`.
+        // raised does. The manager's `SL1xxx` half is held to the same
+        // document by its own table in `crates/slopium-manifest/src/codes.rs`,
+        // which is why the comparison stops at `SL0`.
         let contract = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/diagnostics.md");
         let contract =
             std::fs::read_to_string(contract).expect("docs/diagnostics.md is part of the clone");

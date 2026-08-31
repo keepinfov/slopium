@@ -21,6 +21,7 @@
 //! that is a directory needs none of this — it is already local, and reading it
 //! was never a network operation.
 
+use crate::codes;
 use crate::manifest::{validate_package_name, LocalConfig};
 use crate::sha256::{sha256, Digest};
 use crate::signature::{PublicKey, Signature, SIGNATURE_EXTENSION};
@@ -128,9 +129,12 @@ impl IndexEntry {
 
     fn parse(line: &str, file: &str) -> Result<Self, String> {
         let raw: RawEntry = serde_json::from_str(line).map_err(|error| {
-            format!("SL1036: `{file}` holds a line that is not an index entry: {error}")
+            format!(
+                "{}: `{file}` holds a line that is not an index entry: {error}",
+                codes::INDEX_MALFORMED
+            )
         })?;
-        let malformed = |what: String| format!("SL1036: `{file}`: {what}");
+        let malformed = |what: String| format!("{}: `{file}`: {what}", codes::INDEX_MALFORMED);
         let mut dependencies = Vec::new();
         for dependency in raw.dependencies {
             dependencies.push(IndexDependency {
@@ -256,12 +260,14 @@ impl Registry {
             Some(("http", rest)) if is_loopback(rest) => Transport::Url,
             Some(("http", _)) => {
                 return Err(format!(
-                    "SL1030: registry `{name}` has the plaintext index `{index}`; use `https://`, or `http://` only for a loopback address"
+                    "{}: registry `{name}` has the plaintext index `{index}`; use `https://`, or `http://` only for a loopback address",
+                    codes::REGISTRY
                 ))
             }
             Some((scheme, _)) => {
                 return Err(format!(
-                    "SL1030: registry `{name}` has the index `{index}`, and `{scheme}` is not a transport this toolchain has"
+                    "{}: registry `{name}` has the index `{index}`, and `{scheme}` is not a transport this toolchain has",
+                    codes::REGISTRY
                 ))
             }
         };
@@ -340,13 +346,18 @@ impl Registry {
         let cached_at = self.cache.as_ref().map(|root| root.join(&within_index));
         let mut entries = Vec::new();
         if let Some(bytes) = self.index_file(name, cached_at.as_deref(), &relative)? {
-            let text = String::from_utf8(bytes)
-                .map_err(|_| format!("SL1036: `{file}` is not UTF-8, so it is not an index"))?;
+            let text = String::from_utf8(bytes).map_err(|_| {
+                format!(
+                    "{}: `{file}` is not UTF-8, so it is not an index",
+                    codes::INDEX_MALFORMED
+                )
+            })?;
             for line in text.lines().filter(|line| !line.trim().is_empty()) {
                 let entry = IndexEntry::parse(line, &file)?;
                 if entry.name != name {
                     return Err(format!(
-                        "SL1036: `{file}` holds an entry for `{}`, but it is the index file of `{name}`",
+                        "{}: `{file}` holds an entry for `{}`, but it is the index file of `{name}`",
+                        codes::INDEX_MALFORMED,
                         entry.name
                     ));
                 }
@@ -367,7 +378,8 @@ impl Registry {
         let relative = archive_path(name, version);
         self.read(&relative)?.ok_or_else(|| {
             format!(
-                "SL1037: registry `{}` has no `{relative}`, though its index publishes {name} v{version}",
+                "{}: registry `{}` has no `{relative}`, though its index publishes {name} v{version}",
+                codes::FETCH_FAILED,
                 self.name
             )
         })
@@ -386,7 +398,7 @@ impl Registry {
                 .map_err(|_| format!("`{relative}` is not text, so it is not a signature"))?;
             return Signature::parse(text.trim())
                 .map(Some)
-                .map_err(|error| format!("SL1036: `{relative}`: {error}"));
+                .map_err(|error| format!("{}: `{relative}`: {error}", codes::INDEX_MALFORMED));
         }
         Ok(self
             .versions(name)?
@@ -415,14 +427,16 @@ impl Registry {
         if self.access == Access::Offline {
             let Some(path) = cached_at else {
                 return Err(format!(
-                    "SL1011: `--offline` forbids reading the index of `{}`, and this run has no index cache to read instead",
+                    "{}: `--offline` forbids reading the index of `{}`, and this run has no index cache to read instead",
+                    codes::NOT_LOCAL,
                     self.index
                 ));
             };
             return match std::fs::read(path) {
                 Ok(bytes) => Ok(Some(bytes)),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(format!(
-                    "SL1011: `--offline` forbids reading the index of `{}`, and no copy of `{name}`'s index file is cached at `{}`. Resolve once without `--offline` to put one there",
+                    "{}: `--offline` forbids reading the index of `{}`, and no copy of `{name}`'s index file is cached at `{}`. Resolve once without `--offline` to put one there",
+                    codes::NOT_LOCAL,
                     self.index,
                     path.display()
                 )),
@@ -490,14 +504,16 @@ impl Registry {
                         Ok(None)
                     } else {
                         Err(format!(
-                            "SL1030: registry `{}` is the directory `{}`, and there is no such directory",
+                            "{}: registry `{}` is the directory `{}`, and there is no such directory",
+                            codes::REGISTRY,
                             self.name,
                             root.display()
                         ))
                     }
                 }
                 Err(error) => Err(format!(
-                    "SL1037: cannot read `{}` from registry `{}`: {error}",
+                    "{}: cannot read `{}` from registry `{}`: {error}",
+                    codes::FETCH_FAILED,
                     root.join(relative).display(),
                     self.name
                 )),
@@ -519,7 +535,8 @@ impl Registry {
         // running `curl` behind `--offline`.
         if self.access == Access::Offline {
             return Err(format!(
-                "SL1011: `--offline` forbids fetching `{url}` from registry `{}`",
+                "{}: `--offline` forbids fetching `{url}` from registry `{}`",
+                codes::NOT_LOCAL,
                 self.name
             ));
         }
@@ -560,27 +577,37 @@ impl Registry {
         let output = match output {
             Ok(output) => output,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(
-                    "SL1037: `curl` is not on PATH, and it is how this toolchain fetches over the network"
-                        .to_owned(),
-                )
+                return Err(format!(
+                "{}: `curl` is not on PATH, and it is how this toolchain fetches over the network",
+                codes::FETCH_FAILED
+            ))
             }
-            Err(error) => return Err(format!("SL1037: cannot run `curl`: {error}")),
+            Err(error) => {
+                return Err(format!(
+                    "{}: cannot run `curl`: {error}",
+                    codes::FETCH_FAILED
+                ))
+            }
         };
         if !output.status.success() {
             return Err(format!(
-                "SL1037: cannot fetch `{url}`: {}",
+                "{}: cannot fetch `{url}`: {}",
+                codes::FETCH_FAILED,
                 String::from_utf8_lossy(&output.stderr).trim()
             ));
         }
         let code = String::from_utf8_lossy(&output.stdout).trim().to_owned();
         match code.as_str() {
             "200" => Ok(Some(std::fs::read(body).map_err(|error| {
-                format!("SL1037: cannot read what was fetched from `{url}`: {error}")
+                format!(
+                    "{}: cannot read what was fetched from `{url}`: {error}",
+                    codes::FETCH_FAILED
+                )
             })?)),
             "404" | "410" => Ok(None),
             other => Err(format!(
-                "SL1037: registry `{}` answered `{other}` for `{url}`",
+                "{}: registry `{}` answered `{other}` for `{url}`",
+                codes::FETCH_FAILED,
                 self.name
             )),
         }
@@ -671,7 +698,8 @@ impl Registries {
                 format!("configured: {}", configured.join(", "))
             };
             format!(
-                "SL1030: registry `{name}` is not configured; add `[registry.{name}] index = \"...\"` to `.slopium/config.toml`. This toolchain ships no registry URL, so every one of them is a choice somebody made ({known})"
+                "{}: registry `{name}` is not configured; add `[registry.{name}] index = \"...\"` to `.slopium/config.toml`. This toolchain ships no registry URL, so every one of them is a choice somebody made ({known})",
+                codes::REGISTRY
             )
         })
     }
@@ -684,7 +712,8 @@ impl Registries {
             .find(|registry| registry.index == index)
             .ok_or_else(|| {
                 format!(
-                    "SL1030: `{}` pins a package to the registry `{index}`, which is not configured here; add it to `.slopium/config.toml` or resolve again",
+                    "{}: `{}` pins a package to the registry `{index}`, which is not configured here; add it to `.slopium/config.toml` or resolve again",
+                    codes::REGISTRY,
                     crate::lock::LOCK_FILE
                 )
             })

@@ -17,12 +17,12 @@ gets a new code, and a retired check's code is not reused, so what a reader
 once learned a code meant stays true. The freeze binds codes rather than
 ranges — the families are how the codes read, and a family that runs out of
 numbers continues in a fresh range written down here, because a stable code
-that moves is not stable (`D-071`). This document is the registry. The
-compiler's half is also `codes::ALL` in `crates/slopic-core/src/diagnostic.rs`,
-and a test holds that table and the codes listed here to exactly the same set,
-so a code raised and never documented fails it the same way a code documented
-and never raised does. The manager's codes have no table in code, so for them
-the list here is the only registry there is.
+that moves is not stable (`D-071`). This document is the registry. Each half
+is also a table in code — `codes::ALL` in `crates/slopic-core/src/diagnostic.rs`
+for the compiler, `codes::ALL` in `crates/slopium-manifest/src/codes.rs` for
+the manager — and a test holds each table and the codes listed here to exactly
+the same set, so a code raised and never documented fails it the same way a
+code documented and never raised does.
 
 Code families are stable:
 

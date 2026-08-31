@@ -15,6 +15,7 @@
 //! write outside the directory it is unpacked into is the oldest bug in the
 //! format.
 
+use crate::codes;
 use crate::manifest::{Project, MANIFEST_FILE};
 use crate::sha256::{sha256, Digest};
 use crate::version::Version;
@@ -92,7 +93,8 @@ pub fn write(entries: &[Entry]) -> Result<Vec<u8>, String> {
         match &prefix {
             Some(existing) if *existing != root => {
                 return Err(format!(
-                    "SL1003: an archive holds one package, but `{existing}` and `{root}` are both at its top level"
+                    "{}: an archive holds one package, but `{existing}` and `{root}` are both at its top level",
+                    codes::ARCHIVE_TWO_PACKAGES
                 ))
             }
             Some(_) => {}
@@ -146,7 +148,8 @@ pub fn write(entries: &[Entry]) -> Result<Vec<u8>, String> {
 pub fn read(bytes: &[u8]) -> Result<Vec<Entry>, String> {
     if !bytes.len().is_multiple_of(BLOCK) || bytes.is_empty() {
         return Err(format!(
-            "SL1004: an archive is a whole number of {BLOCK}-byte blocks, and this one is {} bytes",
+            "{}: an archive is a whole number of {BLOCK}-byte blocks, and this one is {} bytes",
+            codes::ARCHIVE_MALFORMED,
             bytes.len()
         ));
     }
@@ -160,7 +163,7 @@ pub fn read(bytes: &[u8]) -> Result<Vec<Entry>, String> {
             break;
         }
         if &block[257..262] != b"ustar" {
-            return Err("SL1004: not a ustar archive".to_owned());
+            return Err(format!("{}: not a ustar archive", codes::ARCHIVE_MALFORMED));
         }
         verify_checksum(block)?;
 
@@ -183,7 +186,8 @@ pub fn read(bytes: &[u8]) -> Result<Vec<Entry>, String> {
                     _ => "an extension header",
                 };
                 return Err(format!(
-                    "SL1002: `{joined}` is {described}; a package holds files and directories only"
+                    "{}: `{joined}` is {described}; a package holds files and directories only",
+                    codes::ARCHIVE_ENTRY
                 ));
             }
         };
@@ -196,7 +200,8 @@ pub fn read(bytes: &[u8]) -> Result<Vec<Entry>, String> {
         match &prefix {
             Some(existing) if *existing != root => {
                 return Err(format!(
-                    "SL1003: an archive holds one package, but `{existing}` and `{root}` are both at its top level"
+                    "{}: an archive holds one package, but `{existing}` and `{root}` are both at its top level",
+                    codes::ARCHIVE_TWO_PACKAGES
                 ))
             }
             Some(_) => {}
@@ -205,12 +210,20 @@ pub fn read(bytes: &[u8]) -> Result<Vec<Entry>, String> {
 
         let size = octal(block, 124, 12)? as usize;
         if kind == EntryKind::Directory && size != 0 {
-            return Err(format!("SL1004: directory `{path}` has a size"));
+            return Err(format!(
+                "{}: directory `{path}` has a size",
+                codes::ARCHIVE_MALFORMED
+            ));
         }
         let end = offset
             .checked_add(size)
             .filter(|end| *end <= bytes.len())
-            .ok_or_else(|| format!("SL1004: `{path}` runs past the end of the archive"))?;
+            .ok_or_else(|| {
+                format!(
+                    "{}: `{path}` runs past the end of the archive",
+                    codes::ARCHIVE_MALFORMED
+                )
+            })?;
         entries.push(Entry {
             path: path.to_owned(),
             kind,
@@ -219,7 +232,10 @@ pub fn read(bytes: &[u8]) -> Result<Vec<Entry>, String> {
         offset += size.div_ceil(BLOCK) * BLOCK;
     }
     if entries.is_empty() {
-        return Err("SL1004: the archive holds no entries".to_owned());
+        return Err(format!(
+            "{}: the archive holds no entries",
+            codes::ARCHIVE_MALFORMED
+        ));
     }
     Ok(entries)
 }
@@ -239,7 +255,8 @@ pub fn read(bytes: &[u8]) -> Result<Vec<Entry>, String> {
 pub fn read_exported(bytes: &[u8]) -> Result<Vec<Entry>, String> {
     if !bytes.len().is_multiple_of(BLOCK) || bytes.is_empty() {
         return Err(format!(
-            "SL1004: an archive is a whole number of {BLOCK}-byte blocks, and this one is {} bytes",
+            "{}: an archive is a whole number of {BLOCK}-byte blocks, and this one is {} bytes",
+            codes::ARCHIVE_MALFORMED,
             bytes.len()
         ));
     }
@@ -255,7 +272,7 @@ pub fn read_exported(bytes: &[u8]) -> Result<Vec<Entry>, String> {
             break;
         }
         if &block[257..262] != b"ustar" {
-            return Err("SL1004: not a ustar archive".to_owned());
+            return Err(format!("{}: not a ustar archive", codes::ARCHIVE_MALFORMED));
         }
         verify_checksum(block)?;
 
@@ -263,7 +280,12 @@ pub fn read_exported(bytes: &[u8]) -> Result<Vec<Entry>, String> {
         let end = offset
             .checked_add(size)
             .filter(|end| *end <= bytes.len())
-            .ok_or_else(|| "SL1004: an archive entry runs past the end".to_owned())?;
+            .ok_or_else(|| {
+                format!(
+                    "{}: an archive entry runs past the end",
+                    codes::ARCHIVE_MALFORMED
+                )
+            })?;
         let content = &bytes[offset..end];
         offset += size.div_ceil(BLOCK) * BLOCK;
 
@@ -297,7 +319,8 @@ pub fn read_exported(bytes: &[u8]) -> Result<Vec<Entry>, String> {
                     _ => "an entry this format cannot hold",
                 };
                 return Err(format!(
-                    "SL1002: `{joined}` is {described}; a package holds files and directories only"
+                    "{}: `{joined}` is {described}; a package holds files and directories only",
+                    codes::ARCHIVE_ENTRY
                 ));
             }
         };
@@ -313,7 +336,10 @@ pub fn read_exported(bytes: &[u8]) -> Result<Vec<Entry>, String> {
         });
     }
     if entries.is_empty() {
-        return Err("SL1004: the archive holds no entries".to_owned());
+        return Err(format!(
+            "{}: the archive holds no entries",
+            codes::ARCHIVE_MALFORMED
+        ));
     }
     Ok(entries)
 }
@@ -324,20 +350,33 @@ pub fn read_exported(bytes: &[u8]) -> Result<Vec<Entry>, String> {
 /// length counts its own digits. Only `path` is understood here; anything else
 /// describes a property a package archive does not have.
 fn pax_path(content: &[u8]) -> Result<Option<String>, String> {
-    let text = std::str::from_utf8(content)
-        .map_err(|_| "SL1004: an extended archive header is not text".to_owned())?;
+    let text = std::str::from_utf8(content).map_err(|_| {
+        format!(
+            "{}: an extended archive header is not text",
+            codes::ARCHIVE_MALFORMED
+        )
+    })?;
     let mut rest = text;
     while !rest.is_empty() {
-        let (length, tail) = rest
-            .split_once(' ')
-            .ok_or_else(|| "SL1004: a malformed extended archive header".to_owned())?;
-        let length: usize = length
-            .parse()
-            .map_err(|_| "SL1004: a malformed extended archive header".to_owned())?;
+        let (length, tail) = rest.split_once(' ').ok_or_else(|| {
+            format!(
+                "{}: a malformed extended archive header",
+                codes::ARCHIVE_MALFORMED
+            )
+        })?;
+        let length: usize = length.parse().map_err(|_| {
+            format!(
+                "{}: a malformed extended archive header",
+                codes::ARCHIVE_MALFORMED
+            )
+        })?;
         let consumed = rest.len() - tail.len();
-        let record = rest
-            .get(consumed..length)
-            .ok_or_else(|| "SL1004: a malformed extended archive header".to_owned())?;
+        let record = rest.get(consumed..length).ok_or_else(|| {
+            format!(
+                "{}: a malformed extended archive header",
+                codes::ARCHIVE_MALFORMED
+            )
+        })?;
         if let Some(path) = record.trim_end_matches('\n').strip_prefix("path=") {
             return Ok(Some(path.to_owned()));
         }
@@ -535,7 +574,8 @@ fn collect(
                 continue;
             }
             return Err(format!(
-                "SL1002: `{relative}` is a symbolic link; a package holds files and directories only. Exclude it or replace it with the file itself"
+                "{}: `{relative}` is a symbolic link; a package holds files and directories only. Exclude it or replace it with the file itself",
+                codes::ARCHIVE_ENTRY
             ));
         }
         if metadata.is_dir() {
@@ -553,7 +593,8 @@ fn collect(
         }
         if !metadata.is_file() {
             return Err(format!(
-                "SL1002: `{relative}` is neither a file nor a directory; a package holds source, not devices"
+                "{}: `{relative}` is neither a file nor a directory; a package holds source, not devices",
+                codes::ARCHIVE_ENTRY
             ));
         }
         if !filter.admits(&relative) {
@@ -628,18 +669,25 @@ fn glob(pattern: &str, text: &str) -> bool {
 /// an opinion about it.
 fn check_portable_path(path: &str) -> Result<&str, String> {
     if path.is_empty() {
-        return Err("SL1001: an archive entry has an empty path".to_owned());
+        return Err(format!(
+            "{}: an archive entry has an empty path",
+            codes::ARCHIVE_PATH
+        ));
     }
     if path.starts_with('/') {
-        return Err(format!("SL1001: `{path}` is absolute"));
+        return Err(format!("{}: `{path}` is absolute", codes::ARCHIVE_PATH));
     }
     if path.contains('\\') || path.contains('\0') {
-        return Err(format!("SL1001: `{path}` is not a portable path"));
+        return Err(format!(
+            "{}: `{path}` is not a portable path",
+            codes::ARCHIVE_PATH
+        ));
     }
     for component in path.split('/') {
         if component.is_empty() || component == "." || component == ".." {
             return Err(format!(
-                "SL1001: `{path}` escapes the package it is packed under"
+                "{}: `{path}` escapes the package it is packed under",
+                codes::ARCHIVE_PATH
             ));
         }
     }
@@ -652,7 +700,8 @@ fn check_path(path: &str, kind: EntryKind) -> Result<&str, String> {
     // The one entry allowed a single component is the prefix directory itself.
     if path.split('/').count() < 2 && kind == EntryKind::File {
         return Err(format!(
-            "SL1001: `{path}` is a file at the archive's top level; everything sits under one `<name>-<version>/` directory"
+            "{}: `{path}` is a file at the archive's top level; everything sits under one `<name>-<version>/` directory",
+            codes::ARCHIVE_PATH
         ));
     }
     Ok(path)
@@ -725,7 +774,10 @@ fn verify_checksum(block: &[u8]) -> Result<(), String> {
     if u64::from(sum) == stored {
         Ok(())
     } else {
-        Err("SL1004: an archive header fails its own checksum".to_owned())
+        Err(format!(
+            "{}: an archive header fails its own checksum",
+            codes::ARCHIVE_MALFORMED
+        ))
     }
 }
 
@@ -734,7 +786,12 @@ fn field(block: &[u8], start: usize, length: usize) -> Result<String, String> {
     let end = bytes.iter().position(|byte| *byte == 0).unwrap_or(length);
     std::str::from_utf8(&bytes[..end])
         .map(str::to_owned)
-        .map_err(|_| "SL1004: an archive header is not text".to_owned())
+        .map_err(|_| {
+            format!(
+                "{}: an archive header is not text",
+                codes::ARCHIVE_MALFORMED
+            )
+        })
 }
 
 fn octal(block: &[u8], start: usize, length: usize) -> Result<u64, String> {
@@ -743,8 +800,12 @@ fn octal(block: &[u8], start: usize, length: usize) -> Result<u64, String> {
     if text.is_empty() {
         return Ok(0);
     }
-    u64::from_str_radix(text, 8)
-        .map_err(|_| format!("SL1004: `{text}` is not an octal header field"))
+    u64::from_str_radix(text, 8).map_err(|_| {
+        format!(
+            "{}: `{text}` is not an octal header field",
+            codes::ARCHIVE_MALFORMED
+        )
+    })
 }
 
 #[cfg(test)]
