@@ -13,6 +13,79 @@ rather than everything it touched.
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-08-31
+
+### Added
+- The reference says what a program's entry point is: a `fn` named `main`,
+  taking no parameters and answering `i32`, `i64` or `unit`, with the value
+  it answers the program's exit status. Anything else is refused as `SL0401`,
+  as a program with no `main` is — unless it declares tests.
+- The reference defines `.` field access, which its examples had used from
+  the first one on: `(. point x)` copies a field out of a struct binding,
+  refuses a field that owns something with `SL0300`, and never borrows — a
+  struct reached through a borrow is read by matching through it and cloning
+  what the pattern bound.
+
+### Changed
+- The manager's diagnostic codes live in one table in code, `codes::ALL` in
+  `crates/slopium-manifest/src/codes.rs`, and every refusal quotes its code
+  from it. A test holds the table and `docs/diagnostics.md` to exactly the
+  same set in both directions, the way the compiler's half has been held, so
+  a code the document lists and nothing raises fails the suite the moment it
+  appears.
+
+### Fixed
+- A constant can be borrowed where a call takes it: `&name` on a
+  `(const name "text")` is the borrowed literal itself, inlined at the use
+  and dropped when the call returns, instead of being refused as an
+  undefined variable with `SL0200` about a name that is defined.
+- A local of `Fn` type bound beside a `fn` of the same name is refused
+  where it is bound (`SL0200`), instead of compiling and silently losing
+  every call to the `fn` — the rule the language reference already states,
+  which a package build's canonical names kept from ever firing.
+- An index cache file that exists but cannot be read is reported as prose
+  rather than under `SL1011`: a code marks a refusal about something somebody
+  wrote, and an I/O failure the operating system already explains stays
+  uncoded (`D-071`). `SL1011` keeps meaning that a package or an index is not
+  held locally and may not be fetched.
+- The reference says what a printed `bool` is: `1` for `true` and `0` for
+  `false`, from `print-bool` and `println-bool` alike, the words staying in
+  source as the spelling of the values. The digits were always what the two
+  wrote; a fixture under `tests/projects` pins them now, both functions over
+  a literal and a computed value.
+- The reference says when a shift is refused rather than trapped: a literal
+  amount that leaves nothing of the operand's type — negative, or the width
+  or more — is an `SL0200` where the program is written, and a computed
+  amount keeps the run-time trap. Both halves were already what the compiler
+  did, pinned by the `shift-negative` and `shift-too-wide` fixtures; the
+  reference now agrees with them.
+- The Neovim plugin completes from `slopium-lsp` when the server is attached:
+  `nvim-cmp` gains the `nvim_lsp` source above the plugin's own, which then
+  offers only its snippets, and `omnifunc` routes to `vim.lsp.omnifunc`. The
+  server offers every keyword of the language, and without a server the
+  buffer scanner completes exactly as before.
+- Completing a documented function reaches the popup with what hover already
+  shows: its `;;` block beside its full signature (`fn name(T, U) -> R`) in
+  the documentation window, from the language server when one is attached
+  — whose single-file detail carries every parameter's type again — and from
+  the plugin's buffer scan otherwise, which stays silent about any type the
+  declaration line does not spell out.
+- A workspace member directory that exists but cannot be read is reported as
+  prose rather than under `SL1063`: a code marks a refusal about something
+  somebody wrote, and an I/O failure the operating system already explains
+  stays uncoded (`D-071`). `SL1063` keeps meaning that a `members` entry is
+  malformed, names a directory that is not there, or collides with another
+  member.
+- An aggregate whose field type is `unit` reaches MIR with every field present
+  again: `(Result:Ok ())` builds its variant payload as a defined zero word,
+  so a generic result with nothing to carry verifies and runs instead of
+  stopping at `SL0700`.
+- An error out of `try` is rebuilt as the enclosing function's own `Err`
+  again: a call that answers one instance of `Result` may be tried where
+  another with the same error half is returned, instead of stopping at
+  `SL0700`.
+
+
 ## [0.16.0] - 2026-08-24
 
 ### Added
@@ -614,6 +687,7 @@ package manager, the language server and the Neovim plugin as they stood when
 tagging began.
 
 [Unreleased]: https://github.com/keepinfov/slopium/compare/v0.11.0...HEAD
+[0.17.0]: https://github.com/keepinfov/slopium/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/keepinfov/slopium/compare/v0.15.2...v0.16.0
 [0.15.2]: https://github.com/keepinfov/slopium/compare/v0.15.1...v0.15.2
 [0.15.1]: https://github.com/keepinfov/slopium/compare/v0.15.0...v0.15.1
