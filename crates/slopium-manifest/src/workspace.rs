@@ -358,6 +358,23 @@ fn excluded_directories(root: &Path, section: &WorkspaceSection) -> Vec<PathBuf>
         .collect()
 }
 
+/// The message for a member directory the walk could not resolve or open.
+///
+/// A directory that is not there is the refusal `SL1063` documents: the
+/// pattern somebody wrote names nothing. Any other failure is the operating
+/// system's to explain — a directory that exists but cannot be read says
+/// nothing about what was written — so no code fronts the message, the way
+/// the per-entry reads in `expand_member` already answer (`D-071`).
+fn member_read_error(pattern: &str, directory: &Path, error: std::io::Error) -> String {
+    match error.kind() {
+        std::io::ErrorKind::NotFound => format!(
+            "SL1063: workspace member `{pattern}` names a directory that is not there: `{}`",
+            directory.display()
+        ),
+        _ => format!("cannot read `{}`: {error}", directory.display()),
+    }
+}
+
 /// Expand one `members` pattern.
 ///
 /// A final `*` component stands for every subdirectory holding a manifest,
@@ -384,20 +401,13 @@ fn expand_member(root: &Path, pattern: &str) -> Result<Vec<PathBuf>, String> {
         root.join(prefix)
     };
     if !wildcard {
-        let canonical = directory.canonicalize().map_err(|error| {
-            format!(
-                "SL1063: workspace member `{pattern}`: cannot read `{}`: {error}",
-                directory.display()
-            )
-        })?;
+        let canonical = directory
+            .canonicalize()
+            .map_err(|error| member_read_error(pattern, &directory, error))?;
         return Ok(vec![canonical]);
     }
-    let entries = std::fs::read_dir(&directory).map_err(|error| {
-        format!(
-            "SL1063: workspace member `{pattern}`: cannot read `{}`: {error}",
-            directory.display()
-        )
-    })?;
+    let entries = std::fs::read_dir(&directory)
+        .map_err(|error| member_read_error(pattern, &directory, error))?;
     let mut matched = Vec::new();
     for entry in entries {
         let entry =
@@ -626,5 +636,57 @@ mod tests {
         assert_eq!(workspace.select(Some("two"), false).unwrap().len(), 1);
         assert_eq!(workspace.select(None, true).unwrap().len(), 2);
         assert!(workspace.select(Some("three"), false).is_err());
+    }
+
+    #[test]
+    fn a_member_directory_that_is_not_there_is_refused() {
+        // Both walks through a member pattern — the plain name and the
+        // trailing `*` — meet the same refusal when nothing is there.
+        let tree = Tree::new("missing-member");
+        workspace_root(&tree, "[workspace]\nmembers = [\"ghost\"]\n");
+        let error = load_workspace(Some(tree.root.join(MANIFEST_FILE))).unwrap_err();
+        assert!(error.contains("SL1063"), "{error}");
+        assert!(
+            error.contains("names a directory that is not there"),
+            "{error}"
+        );
+        assert!(error.contains("ghost"), "{error}");
+
+        workspace_root(&tree, "[workspace]\nmembers = [\"crates/*\"]\n");
+        let error = load_workspace(Some(tree.root.join(MANIFEST_FILE))).unwrap_err();
+        assert!(error.contains("SL1063"), "{error}");
+        assert!(error.contains("crates"), "{error}");
+    }
+
+    #[test]
+    fn a_member_directory_that_cannot_be_read_is_prose() {
+        // A file where the pattern expects a directory is the one
+        // unreadable state a test can set up without touching permissions:
+        // the path is there, and the operating system explains why it
+        // cannot be read. Nothing somebody wrote is being refused, so the
+        // message carries no code (`D-071`).
+        let tree = Tree::new("unreadable-member");
+        tree.write("blocker", "not a directory\n");
+        workspace_root(&tree, "[workspace]\nmembers = [\"blocker/inner\"]\n");
+        let error = load_workspace(Some(tree.root.join(MANIFEST_FILE))).unwrap_err();
+        assert!(
+            error.starts_with(&format!(
+                "cannot read `{}`:",
+                tree.root.join("blocker/inner").display()
+            )),
+            "{error}"
+        );
+        assert!(!error.contains("SL1063"), "{error}");
+
+        workspace_root(&tree, "[workspace]\nmembers = [\"blocker/*\"]\n");
+        let error = load_workspace(Some(tree.root.join(MANIFEST_FILE))).unwrap_err();
+        assert!(
+            error.starts_with(&format!(
+                "cannot read `{}`:",
+                tree.root.join("blocker").display()
+            )),
+            "{error}"
+        );
+        assert!(!error.contains("SL1063"), "{error}");
     }
 }
