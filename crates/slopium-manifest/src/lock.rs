@@ -11,6 +11,7 @@
 //! it is a working tree, and hashing one would rewrite the lock on every
 //! keystroke.
 
+use crate::codes;
 use crate::resolve::ResolvedPackage;
 use crate::sha256::Digest;
 use crate::source::SourceId;
@@ -113,15 +114,25 @@ impl Lockfile {
     /// error rather than something to guess at — a lock that is half believed
     /// is worse than no lock.
     pub fn parse(text: &str) -> Result<Self, String> {
-        let document: toml::Value = toml::from_str(text)
-            .map_err(|error| format!("SL1080: cannot parse `{LOCK_FILE}`: {error}"))?;
+        let document: toml::Value = toml::from_str(text).map_err(|error| {
+            format!(
+                "{}: cannot parse `{LOCK_FILE}`: {error}",
+                codes::LOCK_MALFORMED
+            )
+        })?;
         let format = document
             .get("version")
             .and_then(toml::Value::as_integer)
-            .ok_or_else(|| format!("SL1080: `{LOCK_FILE}` has no `version` field"))?;
+            .ok_or_else(|| {
+                format!(
+                    "{}: `{LOCK_FILE}` has no `version` field",
+                    codes::LOCK_MALFORMED
+                )
+            })?;
         if format != i64::from(LOCK_FORMAT) {
             return Err(format!(
-                "SL1081: `{LOCK_FILE}` is version {format} and this slopium writes version {LOCK_FORMAT}"
+                "{}: `{LOCK_FILE}` is version {format} and this slopium writes version {LOCK_FORMAT}",
+                codes::LOCK_FORMAT
             ));
         }
 
@@ -137,13 +148,22 @@ impl Lockfile {
                     .get(name)
                     .and_then(toml::Value::as_str)
                     .map(str::to_owned)
-                    .ok_or_else(|| format!("SL1080: `{LOCK_FILE}` has a package without `{name}`"))
+                    .ok_or_else(|| {
+                        format!(
+                            "{}: `{LOCK_FILE}` has a package without `{name}`",
+                            codes::LOCK_MALFORMED
+                        )
+                    })
             };
             let name = field("name")?;
             let version = Version::parse(&field("version")?)?;
             let source = field("source")?;
-            SourceId::from_lock_field(&source)
-                .map_err(|error| format!("SL1080: `{LOCK_FILE}`: package `{name}`: {error}"))?;
+            SourceId::from_lock_field(&source).map_err(|error| {
+                format!(
+                    "{}: `{LOCK_FILE}`: package `{name}`: {error}",
+                    codes::LOCK_MALFORMED
+                )
+            })?;
             let dependencies = entry
                 .get("dependencies")
                 .and_then(toml::Value::as_array)
@@ -160,11 +180,17 @@ impl Lockfile {
                     value
                         .as_str()
                         .ok_or_else(|| {
-                            format!("SL1080: `{LOCK_FILE}`: package `{name}` has a non-string `checksum`")
+                            format!(
+                                "{}: `{LOCK_FILE}`: package `{name}` has a non-string `checksum`",
+                                codes::LOCK_MALFORMED
+                            )
                         })
                         .and_then(|text| {
                             Digest::parse(text).map_err(|error| {
-                                format!("SL1080: `{LOCK_FILE}`: package `{name}`: {error}")
+                                format!(
+                                    "{}: `{LOCK_FILE}`: package `{name}`: {error}",
+                                    codes::LOCK_MALFORMED
+                                )
                             })
                         })?,
                 ),

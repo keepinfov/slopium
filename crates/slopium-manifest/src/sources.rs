@@ -12,6 +12,7 @@
 //! network only for a dependency nothing has pinned yet.
 
 use crate::archive::{self, prefix_for};
+use crate::codes;
 use crate::git;
 use crate::lock::Lockfile;
 use crate::manifest::{Manifest, MANIFEST_FILE};
@@ -199,13 +200,15 @@ impl Sources {
         }
         if self.locked {
             return Err(format!(
-                "SL1082: `{declared}` is not pinned by `{}` and --locked was given; run without it to resolve {reference} of `{url}`",
+                "{}: `{declared}` is not pinned by `{}` and --locked was given; run without it to resolve {reference} of `{url}`",
+                codes::LOCKED,
                 crate::lock::LOCK_FILE
             ));
         }
         if self.access == Access::Offline {
             return Err(format!(
-                "SL1011: `{declared}` is not pinned by `{}`, and `--offline` forbids running git to find {reference} of `{url}`",
+                "{}: `{declared}` is not pinned by `{}`, and `--offline` forbids running git to find {reference} of `{url}`",
+                codes::NOT_LOCAL,
                 crate::lock::LOCK_FILE
             ));
         }
@@ -241,7 +244,8 @@ impl Sources {
     pub fn published(&self, declared: &str, index: &str) -> Result<Vec<IndexEntry>, String> {
         if self.locked {
             return Err(format!(
-                "SL1082: `{declared}` is not pinned by `{}` and --locked was given; run without it to select a version from `{index}`",
+                "{}: `{declared}` is not pinned by `{}` and --locked was given; run without it to select a version from `{index}`",
+                codes::LOCKED,
                 crate::lock::LOCK_FILE
             ));
         }
@@ -299,14 +303,20 @@ impl Sources {
             let bytes = match &id.source {
                 SourceId::Toolchain => {
                     let package = crate::std_library::toolchain_package(&id.name).ok_or_else(
-                        || format!("SL1077: `{described}` is not a bundled package"),
+                        || {
+                            format!(
+                                "{}: `{described}` is not a bundled package",
+                                codes::TOOLCHAIN_SOURCE
+                            )
+                        },
                     )?;
                     std_archive(package, &id.version)?.0
                 }
                 SourceId::Git { .. } => {
                     if self.access == Access::Offline {
                         return Err(format!(
-                            "SL1011: `{described}` is not in the package store — it needs {checksum} — and `--offline` forbids fetching it"
+                            "{}: `{described}` is not in the package store — it needs {checksum} — and `--offline` forbids fetching it",
+                            codes::NOT_LOCAL
                         ));
                     }
                     self.archive_from_git(&id.name, &id.source)?.0
@@ -314,7 +324,8 @@ impl Sources {
                 SourceId::Registry { index } => {
                     if self.access == Access::Offline {
                         return Err(format!(
-                            "SL1011: `{described}` is not in the package store — it needs {checksum} — and `--offline` forbids downloading it from `{index}`"
+                            "{}: `{described}` is not in the package store — it needs {checksum} — and `--offline` forbids downloading it from `{index}`",
+                            codes::NOT_LOCAL
                         ));
                     }
                     self.registries
@@ -336,10 +347,12 @@ impl Sources {
             if digest != *checksum {
                 return Err(match &id.source {
                     SourceId::Registry { index } => format!(
-                        "SL1034: `{index}` served a `{described}` that hashes to {digest}, but {checksum} is what was published for it. The bytes are not the ones this graph resolved"
+                        "{}: `{index}` served a `{described}` that hashes to {digest}, but {checksum} is what was published for it. The bytes are not the ones this graph resolved",
+                        codes::SERVED_MISMATCH
                     ),
                     _ => format!(
-                        "SL1022: `{described}` now archives to {digest}, but the lock records {checksum}. The source has changed underneath a pinned commit"
+                        "{}: `{described}` now archives to {digest}, but the lock records {checksum}. The source has changed underneath a pinned commit",
+                        codes::PIN_MOVED
                     ),
                 });
             }
@@ -375,7 +388,8 @@ impl Sources {
         let described = id.to_string();
         let unsigned = |what: &str| {
             format!(
-                "SL1040: `{described}` {what}, and `[registry.{}] trusted-keys` says packages from `{index}` must be signed",
+                "{}: `{described}` {what}, and `[registry.{}] trusted-keys` says packages from `{index}` must be signed",
+                codes::UNSIGNED,
                 registry.name()
             )
         };
@@ -404,12 +418,14 @@ impl Sources {
         ) {
             Trust::Signed => Ok(()),
             Trust::UnknownKey => Err(format!(
-                "SL1042: `{described}` is signed by `{}`, which is not in `[registry.{}] trusted-keys`. If that key is the publisher's new one, add it; if it is not, this is not their package",
+                "{}: `{described}` is signed by `{}`, which is not in `[registry.{}] trusted-keys`. If that key is the publisher's new one, add it; if it is not, this is not their package",
+                codes::UNTRUSTED_KEY,
                 signature.claimed_key(),
                 registry.name()
             )),
             Trust::Forged => Err(format!(
-                "SL1041: `{described}` carries a signature by `{}` that does not verify. The key is trusted and the bytes hash to {checksum}, so what is wrong is the signature itself",
+                "{}: `{described}` carries a signature by `{}` that does not verify. The key is trusted and the bytes hash to {checksum}, so what is wrong is the signature itself",
+                codes::FORGED_SIGNATURE,
                 signature.claimed_key()
             )),
         }

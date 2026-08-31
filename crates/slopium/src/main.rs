@@ -11,6 +11,7 @@ use slopic_core::syntax::{
 };
 use slopic_core::{lexer, parser, reader};
 use slopium_manifest::archive::{package_archive, ARCHIVE_EXTENSION};
+use slopium_manifest::codes;
 use slopium_manifest::lock::{Lockfile, LOCK_FILE};
 use slopium_manifest::manifest::{
     load_local_config, validate_package_name, LocalConfig, Profile, Project, EDITIONS,
@@ -285,7 +286,8 @@ impl SelectArgs {
     fn one<'a>(&self, workspace: &'a Workspace, action: &str) -> Result<&'a Project, String> {
         if self.workspace {
             return Err(format!(
-                "SL1060: `{action}` acts on one package, but `--workspace` names every member"
+                "{}: `{action}` acts on one package, but `--workspace` names every member",
+                codes::SELECTION
             ));
         }
         workspace.select_one(self.package.as_deref(), action)
@@ -528,7 +530,8 @@ fn open_workspace(manifest_path: Option<PathBuf>) -> Result<Workspace, String> {
     let workspace = load_workspace(manifest_path)?;
     for (path, key) in &workspace.unknown_keys {
         eprintln!(
-            "slopium: warning[SL1200]: `{}` sets `{key}`, which this toolchain does not know; it is ignored",
+            "slopium: warning[{}]: `{}` sets `{key}`, which this toolchain does not know; it is ignored",
+            codes::UNKNOWN_KEY,
             path.display()
         );
     }
@@ -671,9 +674,10 @@ fn fix_project(project: &Project, check: bool) -> Result<FixOutcome, String> {
             .find(|name| MOVED_WITHOUT_A_SPELLING.contains(&name.as_str()))
         {
             outcome.refusals.push(format!(
-                "SL1110: cannot fix `{file}`: `{orphan}` has no current spelling — \
+                "{}: cannot fix `{file}`: `{orphan}` has no current spelling — \
                  `std:string:to-i64` answers with an `(Option i64)` where the builtin \
-                 aborted, and what a non-number now means is the program's decision"
+                 aborted, and what a non-number now means is the program's decision",
+                codes::UNFIXABLE
             ));
             continue;
         }
@@ -684,8 +688,9 @@ fn fix_project(project: &Project, check: bool) -> Result<FixOutcome, String> {
                 .collect::<Vec<_>>()
                 .join(", ");
             outcome.refusals.push(format!(
-                "SL1110: cannot fix `{file}`: {names} would be taken from `std`, \
-                 and the package does not depend on it"
+                "{}: cannot fix `{file}`: {names} would be taken from `std`, \
+                 and the package does not depend on it",
+                codes::UNFIXABLE
             ));
             continue;
         }
@@ -1962,10 +1967,10 @@ fn update(
     args: ResolveArgs,
 ) -> Result<(), String> {
     if args.locked() {
-        return Err(
-            "SL1082: `update` is what moves the lockfile, and `--locked` forbids moving it"
-                .to_owned(),
-        );
+        return Err(format!(
+            "{}: `update` is what moves the lockfile, and `--locked` forbids moving it",
+            codes::LOCKED
+        ));
     }
     if precise.is_some() && packages.len() != 1 {
         return Err(
@@ -2505,8 +2510,9 @@ fn target_selection(project: &Project, target: &str) -> Result<TargetSelection, 
             let absolute = project.root.join(path);
             if !absolute.is_file() {
                 return Err(format!(
-                    "SL1102: `target.{triple}` module `{module}` of package `{}` names no file \
+                    "{}: `target.{triple}` module `{module}` of package `{}` names no file \
                      at `{}`",
+                    codes::TARGET_MODULE,
                     project.name,
                     path.display()
                 ));
@@ -2516,8 +2522,9 @@ fn target_selection(project: &Project, target: &str) -> Result<TargetSelection, 
                 .map_err(|error| format!("cannot resolve `{}`: {error}", absolute.display()))?;
             if !absolute.starts_with(&source_root) {
                 return Err(format!(
-                    "SL1102: `target.{triple}` module `{module}` of package `{}` is not under \
+                    "{}: `target.{triple}` module `{module}` of package `{}` is not under \
                      its source root",
+                    codes::TARGET_MODULE,
                     project.name
                 ));
             }
@@ -2623,7 +2630,8 @@ fn publish(
         .any(|published| published.version == project.version)
     {
         return Err(format!(
-            "SL1043: `{}` already publishes {} v{}. An index line is append-only, because somebody's lock may already name that version and a republished one is the change no lock can notice; publish {} instead",
+            "{}: `{}` already publishes {} v{}. An index line is append-only, because somebody's lock may already name that version and a republished one is the change no lock can notice; publish {} instead",
+            codes::ALREADY_PUBLISHED,
             registry.index(),
             project.name,
             project.version,
@@ -2677,7 +2685,8 @@ fn round_trips(bytes: &[u8], digest: &Digest) -> Result<(), String> {
         return Ok(());
     }
     Err(format!(
-        "SL1004: the archive of this package does not reproduce itself: unpacking {digest} and packing it again gives {}. It would be signed as one thing and arrive as another",
+        "{}: the archive of this package does not reproduce itself: unpacking {digest} and packing it again gives {}. It would be signed as one thing and arrive as another",
+        codes::ARCHIVE_MALFORMED,
         slopium_manifest::sha256::sha256(&again)
     ))
 }
@@ -2741,7 +2750,8 @@ fn published_entry(project: &Project, checksum: Digest) -> Result<IndexEntry, St
     for (name, spec) in &project.dependencies {
         let unpublishable = |what: &str| {
             Err(format!(
-                "SL1032: `{}` depends on `{name}` through {what}; a published package depends only on its own registry and the toolchain (`D-054`)",
+                "{}: `{}` depends on `{name}` through {what}; a published package depends only on its own registry and the toolchain (`D-054`)",
+                codes::UNPUBLISHABLE,
                 project.name
             ))
         };
@@ -3085,9 +3095,13 @@ fn synchronize_lock(
     if args.locked() {
         return Err(match existing {
             Some(_) => format!(
-                "SL1082: `{LOCK_FILE}` is out of date and --locked was given; run without it to update"
+                "{}: `{LOCK_FILE}` is out of date and --locked was given; run without it to update",
+                codes::LOCKED
             ),
-            None => format!("SL1082: `{LOCK_FILE}` is missing and --locked was given"),
+            None => format!(
+                "{}: `{LOCK_FILE}` is missing and --locked was given",
+                codes::LOCKED
+            ),
         });
     }
     fs::write(&path, resolved.render())
@@ -3382,7 +3396,8 @@ fn verify_compiler(path: &Path, target: &str) -> Result<(), String> {
     })?;
     if info.protocol != slopic_core::COMPILER_PROTOCOL {
         return Err(format!(
-            "SL1090: incompatible slopic protocol {}; slopium requires {}",
+            "{}: incompatible slopic protocol {}; slopium requires {}",
+            codes::PROTOCOL,
             info.protocol,
             slopic_core::COMPILER_PROTOCOL
         ));

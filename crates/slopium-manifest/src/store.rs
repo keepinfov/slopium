@@ -16,6 +16,7 @@
 //! tree, and never a directory missing half its modules.
 
 use crate::archive::{self, EntryKind};
+use crate::codes;
 use crate::sha256::{sha256, Digest};
 use crate::signature::Signature;
 use std::fs;
@@ -178,10 +179,12 @@ impl Store {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Err(match access {
                     Access::Offline => format!(
-                        "SL1011: `{described}` is not in the package store — it needs {digest} — and `--offline` forbids fetching it"
+                        "{}: `{described}` is not in the package store — it needs {digest} — and `--offline` forbids fetching it",
+                        codes::NOT_LOCAL
                     ),
                     Access::Online => format!(
-                        "SL1011: `{described}` is not in the package store and needs {digest}, but no source in this toolchain can fetch it"
+                        "{}: `{described}` is not in the package store and needs {digest}, but no source in this toolchain can fetch it",
+                        codes::NOT_LOCAL
                     ),
                 })
             }
@@ -194,7 +197,8 @@ impl Store {
         };
         if sha256(&bytes) != *digest {
             return Err(format!(
-                "SL1010: the stored archive for `{described}` is not the one it is filed under. Expected {digest}; delete `{}` and fetch it again",
+                "{}: the stored archive for `{described}` is not the one it is filed under. Expected {digest}; delete `{}` and fetch it again",
+                codes::STORE_MISMATCH,
                 archive_path.display()
             ));
         }
@@ -281,7 +285,8 @@ pub fn verify_tree(
         return Ok(());
     }
     Err(format!(
-        "SL1012: `{described}` at `{}` does not match its checksum. Expected {expected}, found {digest}; the copy has been edited since it was written",
+        "{}: `{described}` at `{}` does not match its checksum. Expected {expected}, found {digest}; the copy has been edited since it was written",
+        codes::VENDOR_MISMATCH,
         root.display()
     ))
 }

@@ -7,6 +7,7 @@
 //! Having one shape means `-p`, the lock path and the target directory are
 //! written once rather than twice with a branch between them.
 
+use crate::codes;
 use crate::manifest::{
     find_manifest, load_local_config, read_manifest, starting_manifest, Inheritance, LocalConfig,
     Project, RawManifest, WorkspaceSection, MANIFEST_FILE,
@@ -63,7 +64,8 @@ impl Workspace {
     pub fn member(&self, name: &str) -> Result<&Project, String> {
         self.members.get(name).ok_or_else(|| {
             format!(
-                "SL1061: no package named `{name}` in this workspace; it has {}",
+                "{}: no package named `{name}` in this workspace; it has {}",
+                codes::NOT_A_MEMBER,
                 self.member_list()
             )
         })
@@ -91,7 +93,8 @@ impl Workspace {
         if all {
             if let Some(name) = package {
                 return Err(format!(
-                    "SL1060: `--workspace` and `--package {name}` disagree about what to act on"
+                    "{}: `--workspace` and `--package {name}` disagree about what to act on",
+                    codes::SELECTION
                 ));
             }
             return Ok(self.members.values().collect());
@@ -106,7 +109,8 @@ impl Workspace {
             return Ok(self.members.values().collect());
         }
         Err(format!(
-            "SL1060: this workspace defines several packages ({}); name one with `--package` or act on all of them with `--workspace`",
+            "{}: this workspace defines several packages ({}); name one with `--package` or act on all of them with `--workspace`",
+            codes::SELECTION,
             self.member_list()
         ))
     }
@@ -117,7 +121,8 @@ impl Workspace {
         match selected.len() {
             1 => Ok(selected[0]),
             _ => Err(format!(
-                "SL1060: `{action}` acts on one package; name it with `--package`"
+                "{}: `{action}` acts on one package; name it with `--package`",
+                codes::SELECTION
             )),
         }
     }
@@ -187,7 +192,8 @@ pub fn load_workspace(manifest_path: Option<PathBuf>) -> Result<Workspace, Strin
         }))?;
         if let Some(previous) = members.insert(member.name.clone(), member) {
             return Err(format!(
-                "SL1063: two members of this workspace are named `{}`: `{}` and one more",
+                "{}: two members of this workspace are named `{}`: `{}` and one more",
+                codes::MEMBERS,
                 previous.name,
                 previous.root.display()
             ));
@@ -201,7 +207,8 @@ pub fn load_workspace(manifest_path: Option<PathBuf>) -> Result<Workspace, Strin
     if let Some(name) = &current {
         if !members.contains_key(name) {
             return Err(format!(
-                "SL1062: `{name}` is not a member of the workspace at `{}`; add it to `[workspace] members` or move it out",
+                "{}: `{name}` is not a member of the workspace at `{}`; add it to `[workspace] members` or move it out",
+                codes::UNLISTED_MEMBER,
                 root.root.display()
             ));
         }
@@ -368,7 +375,8 @@ fn excluded_directories(root: &Path, section: &WorkspaceSection) -> Vec<PathBuf>
 fn member_read_error(pattern: &str, directory: &Path, error: std::io::Error) -> String {
     match error.kind() {
         std::io::ErrorKind::NotFound => format!(
-            "SL1063: workspace member `{pattern}` names a directory that is not there: `{}`",
+            "{}: workspace member `{pattern}` names a directory that is not there: `{}`",
+            codes::MEMBERS,
             directory.display()
         ),
         _ => format!("cannot read `{}`: {error}", directory.display()),
@@ -392,7 +400,8 @@ fn expand_member(root: &Path, pattern: &str) -> Result<Vec<PathBuf>, String> {
     };
     if prefix.contains('*') {
         return Err(format!(
-            "SL1063: workspace member `{pattern}` uses `*` outside the final component; only a trailing `/*` is understood"
+            "{}: workspace member `{pattern}` uses `*` outside the final component; only a trailing `/*` is understood",
+            codes::MEMBERS
         ));
     }
     let directory = if prefix.is_empty() {

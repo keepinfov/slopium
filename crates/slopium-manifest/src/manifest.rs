@@ -5,6 +5,7 @@
 //! file and walked the dependency graph a second time. Anything both of them
 //! must agree about belongs outside both (`D-025`).
 
+use crate::codes;
 use crate::source::{GitReference, SourceSpec, DEFAULT_REGISTRY};
 use crate::version::{Version, VersionReq};
 use serde::de::{self, MapAccess, Visitor};
@@ -195,7 +196,8 @@ impl<T> Inheritable<T> {
             Self::Set(value) => Ok(value),
             Self::FromWorkspace => from_workspace.ok_or_else(|| {
                 format!(
-                    "SL1052: `{field}.workspace = true`, but the workspace sets no `{field}` in `[workspace.package]`"
+                    "{}: `{field}.workspace = true`, but the workspace sets no `{field}` in `[workspace.package]`",
+                    codes::WORKSPACE_INHERITANCE
                 )
             }),
         }
@@ -222,7 +224,8 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for Inheritable<T> {
                 while let Some(key) = map.next_key::<String>()? {
                     if key != "workspace" {
                         return Err(de::Error::custom(format!(
-                            "SL1053: unknown key `{key}`; a field taken from the workspace is written `{}`",
+                            "{}: unknown key `{key}`; a field taken from the workspace is written `{}`",
+                            codes::MANIFEST_FIELD,
                             "<field>.workspace = true"
                         )));
                     }
@@ -411,7 +414,8 @@ impl DependencySpec {
             [("tag", tag)] => Ok(GitReference::Tag((*tag).clone())),
             [("rev", rev)] => Ok(GitReference::Rev((*rev).clone())),
             _ => Err(format!(
-                "SL1051: dependency `{name}` names {}; a git dependency takes one commit",
+                "{}: dependency `{name}` names {}; a git dependency takes one commit",
+                codes::GIT_DEPENDENCY,
                 given
                     .iter()
                     .map(|(key, _)| format!("`{key}`"))
@@ -434,16 +438,21 @@ impl DependencySpec {
         match self.workspace {
             None => Ok(self.clone()),
             Some(false) => Err(format!(
-                "SL1052: dependency `{name}` has `workspace = false`; drop the key or name a source"
+                "{}: dependency `{name}` has `workspace = false`; drop the key or name a source",
+                codes::WORKSPACE_INHERITANCE
             )),
             Some(true) => {
                 if !self.named_sources().is_empty() || self.version.is_some() {
                     return Err(format!(
-                        "SL1052: dependency `{name}` says `workspace = true` and also names a source; the workspace entry is taken whole"
+                        "{}: dependency `{name}` says `workspace = true` and also names a source; the workspace entry is taken whole",
+                        codes::WORKSPACE_INHERITANCE
                     ));
                 }
                 let inheritance = inheritance.ok_or_else(|| {
-                    format!("SL1052: dependency `{name}` says `workspace = true`, but this package is not in a workspace")
+                    format!(
+                        "{}: dependency `{name}` says `workspace = true`, but this package is not in a workspace",
+                        codes::WORKSPACE_INHERITANCE
+                    )
                 })?;
                 let mut spec = inheritance
                     .section
@@ -452,7 +461,8 @@ impl DependencySpec {
                     .cloned()
                     .ok_or_else(|| {
                         format!(
-                            "SL1052: dependency `{name}` says `workspace = true`, but `[workspace.dependencies]` has no `{name}`"
+                            "{}: dependency `{name}` says `workspace = true`, but `[workspace.dependencies]` has no `{name}`",
+                            codes::WORKSPACE_INHERITANCE
                         )
                     })?;
                 spec.path = spec.path.map(|path| inheritance.root.join(path));
@@ -466,7 +476,8 @@ impl DependencySpec {
     pub fn source(&self, name: &str) -> Result<SourceSpec, String> {
         if self.workspace.is_some() {
             return Err(format!(
-                "SL1052: dependency `{name}` still says `workspace = true` after inheritance"
+                "{}: dependency `{name}` still says `workspace = true` after inheritance",
+                codes::WORKSPACE_INHERITANCE
             ));
         }
         // `branch`, `tag` and `rev` refine `git` rather than naming a source of
@@ -478,7 +489,8 @@ impl DependencySpec {
                 .find(|key| self.named_sources().contains(key))
             {
                 return Err(format!(
-                    "SL1051: dependency `{name}` names `{dangling}` without `git`; there is no repository to take it from"
+                    "{}: dependency `{name}` names `{dangling}` without `git`; there is no repository to take it from",
+                    codes::GIT_DEPENDENCY
                 ));
             }
         }
@@ -490,12 +502,14 @@ impl DependencySpec {
                     registry: DEFAULT_REGISTRY.to_owned(),
                 }),
                 None => Err(format!(
-                    "SL1050: dependency `{name}` names no source; give a version requirement, `path`, `git`, or `toolchain = true`{}",
+                    "{}: dependency `{name}` names no source; give a version requirement, `path`, `git`, or `toolchain = true`{}",
+                    codes::DEPENDENCY_SOURCE,
                     self.unknown_note()
                 )),
             },
             (None, Some(false), None, None) => Err(format!(
-                "SL1050: dependency `{name}` has `toolchain = false`; name a `path` or a `git` repository instead"
+                "{}: dependency `{name}` has `toolchain = false`; name a `path` or a `git` repository instead",
+                codes::DEPENDENCY_SOURCE
             )),
             (Some(path), None, None, None) => Ok(SourceSpec::Path(path.clone())),
             (None, Some(true), None, None) => Ok(SourceSpec::Toolchain),
@@ -507,7 +521,8 @@ impl DependencySpec {
                 registry: registry.clone(),
             }),
             _ => Err(format!(
-                "SL1050: dependency `{name}` names {}; pick one",
+                "{}: dependency `{name}` names {}; pick one",
+                codes::DEPENDENCY_SOURCE,
                 self.named_sources()
                     .iter()
                     .filter(|key| matches!(**key, "path" | "toolchain" | "git" | "registry"))
@@ -640,10 +655,16 @@ impl LocalConfig {
             return Ok(None);
         };
         let target = self.source.get(replacement).ok_or_else(|| {
-            format!("SL1054: `[source.{source}]` is replaced with `{replacement}`, which is not configured")
+            format!(
+                "{}: `[source.{source}]` is replaced with `{replacement}`, which is not configured",
+                codes::SOURCE_TABLE
+            )
         })?;
         let directory = target.directory.as_ref().ok_or_else(|| {
-            format!("SL1054: `[source.{replacement}]` names no `directory` to take packages from")
+            format!(
+                "{}: `[source.{replacement}]` names no `directory` to take packages from",
+                codes::SOURCE_TABLE
+            )
         })?;
         Ok(Some(root.join(directory)))
     }
@@ -678,7 +699,8 @@ impl RawManifest {
     pub fn into_project(self, inheritance: Option<Inheritance<'_>>) -> Result<Project, String> {
         let package = self.manifest.package.clone().ok_or_else(|| {
             format!(
-                "SL1053: `{}` defines a workspace and no package of its own",
+                "{}: `{}` defines a workspace and no package of its own",
+                codes::MANIFEST_FIELD,
                 self.manifest_path.display()
             )
         })?;
@@ -688,10 +710,11 @@ impl RawManifest {
             Some(edition) if EDITIONS.contains(&edition) => edition.to_owned(),
             Some(edition) => {
                 return Err(format!(
-                    "SL1055: `{}` names edition `{edition}`, which this toolchain does not have; it has {}",
-                    edition_location(&self.manifest_source, &self.manifest_path),
-                    list_editions(),
-                ))
+                "{}: `{}` names edition `{edition}`, which this toolchain does not have; it has {}",
+                codes::EDITION,
+                edition_location(&self.manifest_source, &self.manifest_path),
+                list_editions(),
+            ))
             }
         };
         let version = package
@@ -796,8 +819,9 @@ fn validate_c_sources(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
         let display = path.display();
         if path.is_absolute() {
             return Err(format!(
-                "SL1100: `c-sources` entry `{display}` is absolute; \
-                 it must be relative to the package root"
+                "{}: `c-sources` entry `{display}` is absolute; \
+                 it must be relative to the package root",
+                codes::C_SOURCES
             ));
         }
         if path
@@ -805,12 +829,16 @@ fn validate_c_sources(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
             .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
         {
             return Err(format!(
-                "SL1100: `c-sources` entry `{display}` leaves the package; \
-                 a package may only compile its own files"
+                "{}: `c-sources` entry `{display}` leaves the package; \
+                 a package may only compile its own files",
+                codes::C_SOURCES
             ));
         }
         if path.as_os_str().is_empty() {
-            return Err("SL1100: `c-sources` holds an empty path".into());
+            return Err(format!(
+                "{}: `c-sources` holds an empty path",
+                codes::C_SOURCES
+            ));
         }
     }
     Ok(paths.to_vec())
@@ -831,12 +859,16 @@ fn validate_target_modules(
     for (module, path) in modules {
         let display = path.display();
         if module.is_empty() {
-            return Err(format!("SL1102: `target.{triple}` names an empty module"));
+            return Err(format!(
+                "{}: `target.{triple}` names an empty module",
+                codes::TARGET_MODULE
+            ));
         }
         if path.is_absolute() {
             return Err(format!(
-                "SL1102: `target.{triple}` module `{display}` is absolute; \
-                 it must be relative to the package root"
+                "{}: `target.{triple}` module `{display}` is absolute; \
+                 it must be relative to the package root",
+                codes::TARGET_MODULE
             ));
         }
         if path
@@ -844,13 +876,15 @@ fn validate_target_modules(
             .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
         {
             return Err(format!(
-                "SL1102: `target.{triple}` module `{display}` leaves the package; \
-                 a package may only select its own files"
+                "{}: `target.{triple}` module `{display}` leaves the package; \
+                 a package may only select its own files",
+                codes::TARGET_MODULE
             ));
         }
         if path.as_os_str().is_empty() {
             return Err(format!(
-                "SL1102: `target.{triple}` module `{module}` names an empty path"
+                "{}: `target.{triple}` module `{module}` names an empty path",
+                codes::TARGET_MODULE
             ));
         }
     }
@@ -871,8 +905,9 @@ fn validate_linker_script(path: Option<&Path>) -> Result<Option<PathBuf>, String
     let display = path.display();
     if path.is_absolute() {
         return Err(format!(
-            "SL1101: `linker-script` `{display}` is absolute; \
-             it must be relative to the package root"
+            "{}: `linker-script` `{display}` is absolute; \
+             it must be relative to the package root",
+            codes::LINKER_SCRIPT
         ));
     }
     if path
@@ -880,12 +915,16 @@ fn validate_linker_script(path: Option<&Path>) -> Result<Option<PathBuf>, String
         .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
     {
         return Err(format!(
-            "SL1101: `linker-script` `{display}` leaves the package; \
-             a package may only link with its own files"
+            "{}: `linker-script` `{display}` leaves the package; \
+             a package may only link with its own files",
+            codes::LINKER_SCRIPT
         ));
     }
     if path.as_os_str().is_empty() {
-        return Err("SL1101: `linker-script` is an empty path".into());
+        return Err(format!(
+            "{}: `linker-script` is an empty path",
+            codes::LINKER_SCRIPT
+        ));
     }
     Ok(Some(path.to_owned()))
 }
@@ -957,7 +996,8 @@ impl Project {
         let implied = self.source_root()?.join(LIBRARY_ENTRY);
         if !implied.is_file() {
             return Err(format!(
-                "SL1053: `{}` declares no `entry`, so it is entered through `{}`, and there is no such file. Write one, or name an `entry`",
+                "{}: `{}` declares no `entry`, so it is entered through `{}`, and there is no such file. Write one, or name an `entry`",
+                codes::MANIFEST_FIELD,
                 self.name,
                 implied.display()
             ));

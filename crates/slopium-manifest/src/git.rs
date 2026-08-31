@@ -15,6 +15,7 @@
 //! published one (`D-050`).
 
 use crate::archive::{self, Entry};
+use crate::codes;
 use crate::sha256::sha256;
 use crate::source::{check_commit, GitReference};
 use std::path::{Path, PathBuf};
@@ -75,7 +76,8 @@ pub fn pin(store_root: &Path, url: &str, reference: &GitReference) -> Result<Str
         }
     }
     fetch(&database, url)?;
-    rev_parse(&database, &wanted).map_err(|_| format!("SL1023: `{url}` has no {reference}"))
+    rev_parse(&database, &wanted)
+        .map_err(|_| format!("{}: `{url}` has no {reference}", codes::GIT_REFERENCE))
 }
 
 /// Whether a commit is already in the local database, so no fetch is needed.
@@ -97,7 +99,10 @@ pub fn export(store_root: &Path, url: &str, rev: &str) -> Result<Vec<Entry>, Str
         initialize(&database, url)?;
         fetch(&database, url)?;
         rev_parse(&database, rev).map_err(|_| {
-            format!("SL1023: `{url}` has no commit {rev}; it may have been rewritten")
+            format!(
+                "{}: `{url}` has no commit {rev}; it may have been rewritten",
+                codes::GIT_REFERENCE
+            )
         })?;
     }
     let output = run(
@@ -110,7 +115,8 @@ pub fn export(store_root: &Path, url: &str, rev: &str) -> Result<Vec<Entry>, Str
     let entries = archive::read_exported(&output.stdout)?;
     if entries.iter().any(|entry| entry.path == ".gitmodules") {
         return Err(format!(
-            "SL1021: the package at `{url}` uses git submodules, which this toolchain does not fetch; its build would be missing whatever they hold"
+            "{}: the package at `{url}` uses git submodules, which this toolchain does not fetch; its build would be missing whatever they hold",
+            codes::GIT_SUBMODULES
         ));
     }
     Ok(entries)
@@ -188,7 +194,8 @@ fn default_branch(url: &str) -> Result<String, String> {
         })
         .ok_or_else(|| {
             format!(
-                "SL1023: `{url}` does not say which branch is its default; name one with `branch`"
+                "{}: `{url}` does not say which branch is its default; name one with `branch`",
+                codes::GIT_REFERENCE
             )
         })
 }
@@ -225,10 +232,12 @@ fn run(command: &mut Command, action: &str) -> Result<Output, String> {
         .output()
         .map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
-                "SL1020: `git` is not on PATH, and a git dependency is fetched by running it"
-                    .to_owned()
+                format!(
+                    "{}: `git` is not on PATH, and a git dependency is fetched by running it",
+                    codes::GIT_COMMAND
+                )
             } else {
-                format!("SL1020: cannot {action}: {error}")
+                format!("{}: cannot {action}: {error}", codes::GIT_COMMAND)
             }
         })?;
     if output.status.success() {
@@ -237,9 +246,9 @@ fn run(command: &mut Command, action: &str) -> Result<Output, String> {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stderr = stderr.trim();
     Err(if stderr.is_empty() {
-        format!("SL1020: cannot {action}")
+        format!("{}: cannot {action}", codes::GIT_COMMAND)
     } else {
-        format!("SL1020: cannot {action}: {stderr}")
+        format!("{}: cannot {action}: {stderr}", codes::GIT_COMMAND)
     })
 }
 
