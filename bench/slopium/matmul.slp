@@ -1,0 +1,55 @@
+; Naive matrix multiply, i-j-k order, flat row-major lists. The second
+; floating-point kernel: it adds memory access patterns to the arithmetic.
+; The order of the three loops and the shape of every expression are the same
+; in every language, down to the association, because the results are
+; compared as floats and last-ulp differences are real differences here.
+;
+; The language has no integer-to-float conversion, so the fill loops run on
+; `f64` counters stepped by `1.0` and the entry values are formulas over
+; them; the multiply loops are integer, over indices into the flat lists.
+;
+; The checksum is the sum of every entry of the product, printed through the
+; language's own float formatter and compared with a tolerance.
+
+(take std:io println)
+(take std:string concat)
+(take std:float from-f64)
+
+(const size 160)
+
+(fn main () -> i32
+  (let n 160.0)
+  (let mut a (list) : (List f64))
+  (let mut b (list) : (List f64))
+  (let mut c (list) : (List f64))
+  (let mut rf 0.0)
+  (while (< rf n)
+    (let mut cf 0.0)
+    (while (< cf n)
+      (push &mut a (* 0.001 (+ (+ (* 3.0 rf) (* 7.0 cf)) 1.0)))
+      (push &mut b (* 0.002 (+ (+ (* 5.0 cf) (* 2.0 rf)) 0.25)))
+      (set cf (+ cf 1.0)))
+    (set rf (+ rf 1.0)))
+  (let mut i 0)
+  (while (< i size)
+    (let mut j 0)
+    (while (< j size)
+      (let mut acc 0.0)
+      (let mut k 0)
+      (while (< k size)
+        (set acc
+          (+ acc
+             (* (clone (get-ref &a (+ (* i size) k)))
+                (clone (get-ref &b (+ (* k size) j))))))
+        (set k (+ k 1)))
+      (push &mut c acc)
+      (set j (+ j 1)))
+    (set i (+ i 1)))
+  (let mut sum 0.0)
+  (let mut index 0)
+  (while (< index (* size size))
+    (set sum (+ sum (clone (get-ref &c index))))
+    (set index (+ index 1)))
+  (let text (concat &"sum = " &(from-f64 sum)))
+  (println &text)
+  0)

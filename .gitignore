@@ -16,3 +16,8 @@
 nvim.log
 /tests/projects/**/Slopium.lock
 /examples/**/Slopium.lock
+# The benchmark suite: sources are committed, everything the harness and the
+# languages' own build tools produce is output.
+/bench/results/
+/bench/rust/Cargo.lock
+/bench/slopium-project/**/Slopium.lock

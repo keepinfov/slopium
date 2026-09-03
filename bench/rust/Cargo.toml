@@ -1,0 +1,39 @@
+[workspace]
+
+[package]
+name = "slopium-bench"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "hello"
+path = "src/bin/hello.rs"
+
+[[bin]]
+name = "fib"
+path = "src/bin/fib.rs"
+
+[[bin]]
+name = "mandelbrot"
+path = "src/bin/mandelbrot.rs"
+
+[[bin]]
+name = "matmul"
+path = "src/bin/matmul.rs"
+
+[[bin]]
+name = "binarytrees"
+path = "src/bin/binarytrees.rs"
+
+[[bin]]
+name = "hashmap"
+path = "src/bin/hashmap.rs"
+
+[[bin]]
+name = "stringbuilder"
+path = "src/bin/stringbuilder.rs"
+
+[dependencies]
+
+[profile.release]
+opt-level = 3

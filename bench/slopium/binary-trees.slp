@@ -1,0 +1,38 @@
+; Binary trees, built and consumed, three repetitions of growing depth. The
+; allocation kernel: every node is one heap block in every language, so the
+; kernel measures the allocator and the drop path -- `malloc`/`free`, a
+; garbage collector, or the Slopium runtime's allocator and its generated
+; drop glue.
+;
+; A leaf carries the path tag it was built under, so the checksum is a real
+; function of the shape rather than a node count.
+
+(take std:io println-i64)
+
+(enum Tree
+  (Leaf ((value i64)))
+  (Node ((left Tree) (right Tree))))
+
+(const first-depth 13)
+(const repetitions 3)
+
+(fn build ((depth i64) (tag i64)) -> Tree
+  (if (= depth 0)
+    (Tree:Leaf tag)
+    (Tree:Node (build (- depth 1) (* tag 2))
+               (build (- depth 1) (+ (* tag 2) 1)))))
+
+(fn sum-tree ((tree Tree)) -> i64
+  (match tree
+    ((Tree:Leaf v) v)
+    ((Tree:Node l r) (+ (sum-tree l) (sum-tree r)))))
+
+(fn main () -> i32
+  (let mut total 0)
+  (let mut rep 0)
+  (while (< rep repetitions)
+    (let tree (build (+ first-depth rep) 1))
+    (set total (+ total (sum-tree tree)))
+    (set rep (+ rep 1)))
+  (println-i64 total)
+  0)
