@@ -1,0 +1,57 @@
+; Hash map workload: 100,000 inserts of key->key, then the same 100,000 keys
+; looked up again. Keys come from a three-shift xorshift64 over a fixed seed,
+; reduced modulo one million, so every language walks the identical key
+; sequence and the collision pattern is identical too.
+;
+; The table itself is what is under test: `std:map`, `HashMap`, `dict`, Java's
+; `HashMap`, and an open-addressing table written for the C entry.
+
+(take std:io println-i64)
+(take std:map Map map-new map-insert map-lookup map-size)
+(take std:option unwrap-or)
+
+(const seed 88172645463325252 : u64)
+(const count 10000)
+(const key-space 1000000 : u64)
+
+(fn xs-next ((state u64)) -> u64
+  (do
+    (let state (bit-xor state (shl state 13)))
+    (let state (bit-xor state (shr state 7)))
+    (bit-xor state (shl state 17))))
+
+(fn key-hash ((key &i64)) -> i64
+  (do
+    (let x (clone key))
+    (let x (bit-xor x (shr x 33)))
+    (let x (bit-xor x (shl x 21)))
+    (bit-xor x (shr x 24))))
+
+(fn key-same ((a &i64) (b &i64)) -> bool
+  (= (clone a) (clone b)))
+
+(fn main () -> i32
+  (let mut state seed : u64)
+  (let mut table (map-new key-hash key-same) : (Map i64 i64))
+  (let mut i 0)
+  (while (< i count)
+    (set state (xs-next state))
+    (let key (as i64 (% state key-space)))
+    (map-insert &mut table key key)
+    (set i (+ i 1)))
+  (let mut found 0)
+  (let mut sum 0)
+  (set state seed)
+  (set i 0)
+  (while (< i count)
+    (set state (xs-next state))
+    (let key (as i64 (% state key-space)))
+    (let v (unwrap-or (map-lookup &table &key) -1))
+    (when (>= v 0)
+      (set found (+ found 1))
+      (set sum (+ sum v)))
+    (set i (+ i 1)))
+  (println-i64 (map-size &table))
+  (println-i64 found)
+  (println-i64 sum)
+  0)

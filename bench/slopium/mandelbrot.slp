@@ -1,0 +1,40 @@
+; Mandelbrot, ASCII PBM. The floating-point kernel: escape-time iteration
+; over the classic window, fifty iterations, one character per pixel.
+;
+; The language has no integer-to-float conversion, so the pixel counters are
+; `f64` stepped by `1.0` everywhere; every value below 2^53 so stepped is
+; exact, and the same loop in every language performs the same operations in
+; the same order, so the image is bit-identical.
+;
+; Output is P1: `1` for a point inside the set, `0` for one outside.
+
+(take std:io println print)
+(take std:builder new write-byte build)
+
+(const width 200.0)
+(const iterations 50)
+
+(fn main () -> i32
+  (print &"P1\n200 200\n")
+  (let step (/ 2.0 width))
+  (let mut py 0.0)
+  (while (< py width)
+    (let ci (- (* step py) 1.0))
+    (let mut row (new))
+    (let mut px 0.0)
+    (while (< px width)
+      (let cr (- (* step px) 1.5))
+      (let mut zr 0.0)
+      (let mut zi 0.0)
+      (let mut i 0)
+      (while (and (< i iterations) (<= (+ (* zr zr) (* zi zi)) 4.0))
+        (let t (+ (- (* zr zr) (* zi zi)) cr))
+        (set zi (+ (* (* 2.0 zr) zi) ci))
+        (set zr t)
+        (set i (+ i 1)))
+      (write-byte &mut row (as u8 (if (= i iterations) 49 48)))
+      (set px (+ px 1.0)))
+    (let text (build row))
+    (println &text)
+    (set py (+ py 1.0)))
+  0)

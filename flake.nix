@@ -393,6 +393,27 @@
               export SLOPIUM_QEMU_SYSTEM_X86_64=qemu-system-x86_64
             '';
           };
+
+          # The benchmark suite: the same kernels in five languages, measured
+          # by `bench/run.py`. Every toolchain comes from one nixpkgs
+          # revision, which is what makes two runs on one machine comparable.
+          bench = pkgs.mkShell {
+            packages = with pkgs; [
+              python3
+              jdk_headless
+              stdenv.cc
+              binutils
+              rustc
+              cargo
+              git
+              util-linux
+            ];
+
+            shellHook = ''
+              echo "Slopium benchmark shell"
+              echo "  python3 bench/run.py"
+            '';
+          };
         });
 
       formatter = forAllSystems (system:

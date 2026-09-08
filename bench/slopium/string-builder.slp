@@ -1,0 +1,32 @@
+; String building, incrementally: 50,000 records of "item " + number + '\n'
+; appended to one growing buffer, then the result measured. The buffer
+; machinery is what is under test: `std:builder`, `StringBuilder`, Rust's
+; `String`, CPython's list-of-parts `join`, and a `realloc`-doubling buffer
+; in C.
+;
+; The checksum is the byte length of the result and the sum of its bytes.
+
+(take std:io println-i64)
+(take std:builder new write-str write-i64 write-byte build)
+(take std:string byte-at)
+
+(const records 50000)
+
+(fn main () -> i32
+  (let mut out (new))
+  (let mut i 0)
+  (while (< i records)
+    (write-str &mut out &"item ")
+    (write-i64 &mut out i)
+    (write-byte &mut out 10)
+    (set i (+ i 1)))
+  (let text (build out))
+  (let width (len &text))
+  (let mut sum 0)
+  (let mut j 0)
+  (while (< j width)
+    (set sum (+ sum (byte-at &text j)))
+    (set j (+ j 1)))
+  (println-i64 width)
+  (println-i64 sum)
+  0)

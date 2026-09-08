@@ -1,0 +1,8 @@
+; Startup: spawn, print one line, exit. This kernel is the cost of the
+; process itself, so it stays as small as it can be.
+
+(take std:io println)
+
+(fn main () -> i32
+  (println &"hello")
+  0)
