@@ -1,0 +1,17 @@
+; An element a builtin hands back crosses the runtime as a machine word, and
+; a double must come out of that word as the double that went in. Each read
+; below prints the stored value through every builtin that returns an element,
+; beside the borrow-and-clone read that was always correct.
+
+(take std:float println-f64)
+
+(fn main () -> i32
+  (let mut values (list 1.5 2.5 3.5))
+  (println-f64 (get &values 1))
+  (println-f64 (clone (get-ref &values 1)))
+  (println-f64 (replace &mut values 1 9.5))
+  (println-f64 (get &values 1))
+  (println-f64 (remove &mut values 2))
+  (let fixed (array 0.5 1.5))
+  (println-f64 (get &fixed 0))
+  0)

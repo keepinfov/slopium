@@ -593,6 +593,12 @@ pub enum Step {
     Restore,
     /// Replace the result with the word it points at.
     Load,
+    /// Move the result's bits into the float result register. Every runtime
+    /// symbol speaks words, so a plan that produces a double leaves its bits
+    /// in the word result register, while both backends read an `f64` result
+    /// out of the float one — the register an `extern` returning `double`
+    /// arrives in.
+    BitsToDouble,
     /// Wrap the destination in the standard `Option`: a zero result becomes a
     /// freshly allocated `None`, anything else a `Some` holding the
     /// destination.
@@ -626,7 +632,7 @@ pub fn builtin(
     };
     let one = |symbol: &str| vec![call(symbol, vec![Argument::Value(args[0])])];
 
-    let steps = match callee {
+    let mut steps = match callee {
         // `clone` crosses a borrow (`D-091`), and a borrow of a pointer-shaped
         // value is that pointer rather than the address of a slot holding it,
         // so the glue to call is the one for what is behind the borrow.
@@ -753,6 +759,14 @@ pub fn builtin(
         )],
         _ => return None,
     };
+    // A builtin's plan ends with its result in the word result register, a
+    // double's bits included, because the runtime is word-typed. The backends
+    // read an `f64` result from the float register instead, so the move
+    // between the two belongs to the plan, which is the one place that knows
+    // the result is a double.
+    if *result == Type::F64 {
+        steps.push(Step::BitsToDouble);
+    }
     Some(steps)
 }
 
@@ -952,6 +966,72 @@ mod tests {
                 none_tag: 0
             })
         );
+    }
+
+    /// A builtin hands an element back as a word, a double's bits included,
+    /// while both backends read an `f64` result out of the float register.
+    /// The plan owns the move between the two, and only an element that is a
+    /// double pays it.
+    #[test]
+    fn a_double_element_moves_into_the_float_result_register() {
+        let borrowed_floats = Type::Ref {
+            inner: Box::new(Type::List(Box::new(Type::F64))),
+            mutable: false,
+        };
+        let get = builtin(
+            &module(),
+            0,
+            "get",
+            &[1, 2],
+            &[borrowed_floats.clone(), Type::I64],
+            &Type::F64,
+        )
+        .unwrap();
+        assert_eq!(
+            get,
+            vec![
+                Step::Invoke {
+                    arguments: vec![Argument::Value(1), Argument::Value(2)],
+                    tail: Tail::Call("sl_rt_list_get".into()),
+                },
+                Step::Load,
+                Step::BitsToDouble,
+            ]
+        );
+        let removed = builtin(
+            &module(),
+            0,
+            "remove",
+            &[1, 2],
+            &[borrowed_floats, Type::I64],
+            &Type::F64,
+        )
+        .unwrap();
+        assert_eq!(
+            removed,
+            vec![
+                Step::Invoke {
+                    arguments: vec![Argument::Value(1), Argument::Value(2)],
+                    tail: Tail::Call("sl_rt_list_remove".into()),
+                },
+                Step::BitsToDouble,
+            ]
+        );
+
+        let borrowed_integers = Type::Ref {
+            inner: Box::new(Type::List(Box::new(Type::I64))),
+            mutable: false,
+        };
+        let get = builtin(
+            &module(),
+            0,
+            "get",
+            &[1, 2],
+            &[borrowed_integers.clone(), Type::I64],
+            &Type::I64,
+        )
+        .unwrap();
+        assert_eq!(get.last(), Some(&Step::Load));
     }
 
     /// `len` picks its entry point from what is being measured. A string is not
