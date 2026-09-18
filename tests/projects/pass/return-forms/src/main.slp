@@ -1,0 +1,63 @@
+; Every exit a function has, taken early: the body's own end, an `if` branch,
+; a match arm, and two nested loops, each through scopes that deferred
+; something observable and each carrying an owned value out (`D-163`). The
+; printed order is the contract: what a scope deferred runs before that scope
+; drops, inner scopes before outer ones, and nothing after the value leaves.
+
+(take std:io println)
+(take std:string concat)
+
+(fn straight ((n i64)) -> String
+  (defer (println &"straight defer"))
+  (when (= n 1)
+    (return (concat &"left " &"early")))
+  (concat &"fell " &"through"))
+
+(fn branched ((n i64)) -> String
+  (defer (println &"branched defer"))
+  (if (= n 1) (return (concat &"branch " &"taken")) (concat &"branch " &"not")))
+
+(fn chosen ((n i64)) -> String
+  (defer (println &"chosen defer"))
+  (match n
+    (1 (return (concat &"the " &"first")))
+    (_ (concat &"the " &"rest"|)
+
+; The binding moves out through the exit on one path and into the result on
+; the other, which is the move a guard around a `return` is allowed to make.
+(fn carried ((n i64)) -> String
+  (let cargo (concat &"carried " &"out"))
+  (defer (println &"carried defer"))
+  (when (= n 1)
+    (return cargo))
+  (let spare cargo)
+  spare)
+
+; Two nested loops, the return inside both, and a defer in every scope the
+; exit crosses.
+(fn deep ((n i64)) -> String
+  (defer (println &"outer defer"))
+  (let mut i 0)
+  (loop
+    (defer (println &"loop defer"))
+    (when (= i 1)
+      (let mut j 0)
+      (loop
+        (defer (println &"inner defer"))
+        (when (= j 1)
+          (return (concat &"found " &"it")))
+        (set j (+ j 1))))
+    (set i (+ i 1)))
+  (concat &"never " &"reached"))
+
+(fn main () -> i32
+  (println &(straight 1))
+  (println &(straight 0))
+  (println &(branched 1))
+  (println &(branched 0))
+  (println &(chosen 1))
+  (println &(chosen 9))
+  (println &(carried 1))
+  (println &(carried 2))
+  (println &(deep 1))
+  0)

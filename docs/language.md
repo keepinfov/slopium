@@ -757,13 +757,38 @@ hand back.
       (break (* counter 2)))))
 ```
 
+`(return expression)` is the function's answer from wherever it stands (`D-163`).
+The expression is typed against the function's own result, and the form itself
+agrees with whatever the position around it expects, because a `return` never
+hands a value to that position: the exit is what it produced. So a `return` can
+end a `loop` body that owes a `unit`, sit in one arm of an `if` whose other arm
+carries the value, and take a binding out of the branch it leaves — the other
+path still owns that binding, and the code after the branch may use it.
+
+```lisp
+(fn first-nonempty ((a &String) (b &String)) -> String
+  (when (> (len a) 0)
+    (return (clone a)))
+  (when (> (len b) 0)
+    (return (clone b)))
+  (concat &"neither " &"held"))
+```
+
+A `return` ends every scope it stands in, and each one runs what it deferred
+before it releases what it owns, inner scopes first — the same order a `break`
+and the error arm of a `try` already leave in. There is one spelling, so a
+function answering `unit` writes `(return ())`, and no bare form exists. A
+`return` may not be written inside a `defer`, for the same reason a `break`
+and a `continue` may not: the scope is already ending. The nearest function is
+the one a `return` leaves, so inside a `lambda` it leaves the `lambda`.
+
 `set` assigns to a `(let mut ...)` binding, and to a field bound by a `(&mut
 ...)` match — see the patterns below. In both cases the value that was there is
 dropped.
 
 `(defer body ...)` runs its body when the enclosing scope ends, whatever ended it:
-falling off the end, a `break`, a `continue`, or the error arm of a `try`
-(`D-133`). Deferred expressions run in the reverse of the order they were
+falling off the end, a `break`, a `continue`, a `return`, or the error arm of a
+`try` (`D-133`). Deferred expressions run in the reverse of the order they were
 written, and all of them run *before* the scope releases what it owns, so a
 deferred expression still finds the values the scope was holding:
 
@@ -783,8 +808,9 @@ everything but its last expression. The body takes as many expressions as it
 needs, like every other body (`D-127`).
 
 Nothing in the body may leave the scope it is running out of: a `try` returns
-from the function and a `break` or a `continue` jumps out of the loop whose exit
-is running the body, and either would ask that exit to run the same body again.
+from the function, and so does a `return`, and a `break` or a `continue` jumps
+out of the loop whose exit is running the body, and either would ask that exit
+to run the same body again.
 A loop the body opened for itself is a different scope, and breaking out of that
 one is ordinary.
 

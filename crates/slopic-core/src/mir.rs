@@ -664,6 +664,15 @@ struct Builder {
     /// and make builds irreproducible. `bindings` stays a `HashMap` because it
     /// is only ever point-queried.
     live: BTreeMap<BindingId, bool>,
+    /// Whether the block sequence being lowered ended by leaving — a `return`,
+    /// a `break` or a `continue` (`D-163`).
+    ///
+    /// The merge points read and reset this, because a path that leaves is not
+    /// a path: its liveness settles nothing, and a binding it moved out is
+    /// gone with the exit rather than dropped somewhere it can be read again.
+    /// A `try` sets nothing — its error block ends the function without going
+    /// through a merge, which is the same thing arrived at from above.
+    left: bool,
     scopes: Vec<BuilderScope>,
     loop_targets: Vec<LoopTarget>,
     /// Source location of the expression currently being lowered.
@@ -748,6 +757,7 @@ impl Builder {
             bindings: HashMap::new(),
             places: HashMap::new(),
             live: BTreeMap::new(),
+            left: false,
             scopes: Vec::new(),
             loop_targets: Vec::new(),
             current_span: span,
@@ -1203,6 +1213,22 @@ impl Builder {
             }
             TExprKind::Continue => {
                 self.lower_loop_jump(true, None);
+                None
+            }
+            // The function's result, from any depth: every scope ends here,
+            // what each deferred runs first and its own drops after, exactly
+            // as the error arm of a `try` ends them (`D-133`, `D-163`). The
+            // value is exempt from that walk the way a `break`'s is, because
+            // it is nobody's to release — it leaves. What follows in the same
+            // block is unreachable, and lowering continues in a fresh one so
+            // the function still seals.
+            TExprKind::Return(value) => {
+                let value = self.expr(value);
+                self.unwind_scopes(0, value.as_ref().map(|value| value.local));
+                self.blocks[self.current].terminator =
+                    Some(Terminator::Return(value.as_ref().map(|value| value.local)));
+                self.left = true;
+                self.current = self.block();
                 None
             }
             TExprKind::Const { value, .. } => self.expr(value),
@@ -1735,6 +1761,7 @@ impl Builder {
         } else {
             target.break_block
         }));
+        self.left = true;
         self.current = self.block();
     }
 
@@ -1854,10 +1881,18 @@ impl Builder {
                 src: value.local,
             });
         }
-        self.drop_scope_except(then_scope, then_value.as_ref().map(|value| value.local));
+        // A branch that left has no cleanup of its own to do — it did that on
+        // the way out — and no edge to the merge: what follows it in the block
+        // it opened is unreachable, and `finish` seals that block as such.
+        let then_left = std::mem::take(&mut self.left);
+        if !then_left {
+            self.drop_scope_except(then_scope, then_value.as_ref().map(|value| value.local));
+        }
         self.scopes.pop();
         let then_live = self.live.clone();
-        self.blocks[self.current].terminator = Some(Terminator::Goto(merge_block));
+        if !then_left {
+            self.blocks[self.current].terminator = Some(Terminator::Goto(merge_block));
+        }
         let then_end = self.current;
 
         self.current = else_block;
@@ -1871,25 +1906,41 @@ impl Builder {
                 src: value.local,
             });
         }
-        self.drop_scope_except(else_scope, else_value.as_ref().map(|value| value.local));
+        let else_left = std::mem::take(&mut self.left);
+        if !else_left {
+            self.drop_scope_except(else_scope, else_value.as_ref().map(|value| value.local));
+        }
         self.scopes.pop();
         let else_live = self.live.clone();
-        self.blocks[self.current].terminator = Some(Terminator::Goto(merge_block));
+        if !else_left {
+            self.blocks[self.current].terminator = Some(Terminator::Goto(merge_block));
+        }
         let else_end = self.current;
 
+        // A branch that always leaves takes nothing with it that the other
+        // path could still want: it is not a path (`D-163`). Without this, a
+        // guard returning early would spend every value it named, and the
+        // move would outlive the branch that never ran.
+
         self.live = base_live;
-        for id in self.live.clone().keys().copied().rev().collect::<Vec<_>>() {
-            let then_has = then_live.get(&id).copied().unwrap_or(false);
-            let else_has = else_live.get(&id).copied().unwrap_or(false);
-            if then_has != else_has {
-                let local = self.bindings[&id];
-                let ty = self.locals[local].ty.clone();
-                if !self.is_copy(&ty) {
-                    let block = if then_has { then_end } else { else_end };
-                    self.emit_in(block, Instruction::Drop { local, ty });
+        if then_left {
+            self.live = else_live;
+        } else if else_left {
+            self.live = then_live;
+        } else {
+            for id in self.live.clone().keys().copied().rev().collect::<Vec<_>>() {
+                let then_has = then_live.get(&id).copied().unwrap_or(false);
+                let else_has = else_live.get(&id).copied().unwrap_or(false);
+                if then_has != else_has {
+                    let local = self.bindings[&id];
+                    let ty = self.locals[local].ty.clone();
+                    if !self.is_copy(&ty) {
+                        let block = if then_has { then_end } else { else_end };
+                        self.emit_in(block, Instruction::Drop { local, ty });
+                    }
                 }
+                self.live.insert(id, then_has && else_has);
             }
-            self.live.insert(id, then_has && else_has);
         }
         self.current = merge_block;
         result.map(|local| Value {
@@ -2254,10 +2305,16 @@ impl Builder {
                     src: value.local,
                 });
             }
-            self.drop_scope_except(scope, arm_value.as_ref().map(|value| value.local));
+            // An arm that left ends itself on the way out; it has no edge to
+            // the merge and no state for the merge to balance against
+            // (`D-163`).
+            let arm_left = std::mem::take(&mut self.left);
+            if !arm_left {
+                self.drop_scope_except(scope, arm_value.as_ref().map(|value| value.local));
+                self.blocks[self.current].terminator = Some(Terminator::Goto(merge_block));
+                arm_states.push((self.current, self.live.clone()));
+            }
             self.scopes.pop();
-            self.blocks[self.current].terminator = Some(Terminator::Goto(merge_block));
-            arm_states.push((self.current, self.live.clone()));
             self.current = next_check;
             if mir_pattern_irrefutable(&arm.pattern) && arm.guard.is_none() {
                 break;
@@ -2462,6 +2519,47 @@ mod tests {
                 )
             });
         assert!(has_drop);
+    }
+
+    /// A branch that returns carries its value out, and the path that answers
+    /// normally must not pay a balancing drop for the move (`D-163`). Before
+    /// this, the fall-through dropped a binding the `return` took with it, and
+    /// the use after the branch read freed memory.
+    #[test]
+    fn a_branch_that_returns_does_not_balance_a_drop() {
+        let source = r#"(fn keep ((n i64)) -> String
+            (let text "hello")
+            (when (= n 1)
+              (return text))
+            text)
+            (fn main () -> i32 0)"#;
+        let mir = compile_to_mir("test.slp", source, &CompileOptions::default()).unwrap();
+        let keep = mir
+            .functions
+            .iter()
+            .find(|function| function.name.ends_with("keep"))
+            .expect("`keep` is lowered");
+        let text = keep
+            .locals
+            .iter()
+            .position(|local| local.name.as_deref() == Some("text"))
+            .expect("`text` is a local");
+        let drops = keep
+            .blocks
+            .iter()
+            .flat_map(|block| block.instructions())
+            .filter(|inst| {
+                matches!(
+                    inst,
+                    Instruction::Drop { local, .. } if *local == text
+                )
+            })
+            .count();
+        // Zero: the branch that returns is exempt as the value's way out, and
+        // the fall-through hands the binding to the function's own result,
+        // which the epilogue exempts in turn. Before the fix the fall-through
+        // carried a balancing drop that freed what the branch took out.
+        assert_eq!(drops, 0);
     }
 
     /// Assigning an owning field is a store and a drop, in that order (`D-120`).

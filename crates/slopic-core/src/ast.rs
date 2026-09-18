@@ -907,6 +907,14 @@ pub enum ExprKind {
     /// back, so a value here belongs to a `loop` alone and `sema` says so.
     Break(Option<Box<Expr>>),
     Continue,
+    /// `(return expression)`: the enclosing function's result, from any depth
+    /// (`D-163`).
+    ///
+    /// There is exactly one spelling, so a unit function writes `(return ())`
+    /// and no bare form exists — an omitted value is a different rule about
+    /// the same word, and one spelling keeps the form out of the position a
+    /// statement's twin would confuse.
+    Return(Box<Expr>),
     Match {
         value: Box<Expr>,
         arms: Vec<MatchArm>,
@@ -2123,6 +2131,13 @@ impl AstBuilder<'_> {
                             return None;
                         }
                         ExprKind::Continue
+                    }
+                    "return" => {
+                        if items.len() != 2 {
+                            self.error(form.span, "`return` expects one expression");
+                            return None;
+                        }
+                        ExprKind::Return(Box::new(self.expr(&items[1])?))
                     }
                     "lambda" => {
                         if items.len() < 6 || atom(&items[3]) != Some("->") {

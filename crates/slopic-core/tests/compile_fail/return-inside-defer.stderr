@@ -1,0 +1,4 @@
+return-inside-defer.slp:4:10: error[SL0200]: `return` cannot be written inside a `defer`; the function is already leaving
+  |
+ 4 |   (defer (return 0))
+  |          ^^^^^^^^^^

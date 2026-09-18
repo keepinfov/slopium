@@ -1,0 +1,5 @@
+; A deferred body runs while its scope is already ending, so a `return` in one
+; asks the exit to happen again from inside (`D-163`).
+(fn main () -> i32
+  (defer (return 0))
+  0)

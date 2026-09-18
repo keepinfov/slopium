@@ -41,6 +41,7 @@ local static_items = {
   { label = "while", kind = kinds.Snippet, detail = "conditional loop", insertText = "while ${1:condition}\n    ${0:body}", insertTextFormat = 2 },
   { label = "break", kind = kinds.Keyword },
   { label = "continue", kind = kinds.Keyword },
+  { label = "return", kind = kinds.Snippet, detail = "leave the function with a value", insertText = "return ${0:value}", insertTextFormat = 2 },
   { label = "try", kind = kinds.Snippet, detail = "propagate Result error", insertText = "try ${0:expression}", insertTextFormat = 2 },
   { label = "unsafe", kind = kinds.Snippet, detail = "raw pointer permission", insertText = "unsafe\n    ${0:body}", insertTextFormat = 2 },
   { label = "as", kind = kinds.Snippet, detail = "widen a number to a named type", insertText = "as ${1:i64} ${0:value}", insertTextFormat = 2 },

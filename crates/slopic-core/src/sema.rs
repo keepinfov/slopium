@@ -157,6 +157,7 @@ pub enum TExprKind {
     },
     Break(Option<Box<TExpr>>),
     Continue,
+    Return(Box<TExpr>),
     Match {
         value: Box<TExpr>,
         arms: Vec<TMatchArm>,
@@ -1011,7 +1012,12 @@ impl<'a> Analyzer<'a> {
             self.current_module = module_of(&test.name);
             self.env = Environment::default();
             self.env.push();
+            // A test lowers as a function whose result is the truth it asserts
+            // (`D-156`), so a `return` inside one leaves the test, with the
+            // same result the last expression would have carried.
+            self.current_return_type = Some(Type::Bool);
             let body = self.expr(&test.body, Some(&Type::Bool));
+            self.current_return_type = None;
             self.env.pop();
             tests.push(TypedTest {
                 name: test.name.clone(),
@@ -1674,6 +1680,7 @@ impl<'a> Analyzer<'a> {
                 self.loop_expr(expr, Some(condition), body, expected)
             }
             ExprKind::Break(value) => self.break_expr(expr, value.as_deref()),
+            ExprKind::Return(value) => self.return_expr(expr, value, expected),
             ExprKind::Continue => {
                 self.refuse_leaving_a_defer(expr.span, "continue");
                 if self.loops.is_empty() {
@@ -2293,21 +2300,46 @@ impl<'a> Analyzer<'a> {
         self.env.pop();
         let then_env = self.env.clone();
 
+        // A branch that always leaves produces nothing, so the other branch
+        // decides the type on its own (`D-163`).
+        let then_leaves = always_returns(&then_expr);
         self.env = base.clone();
         self.env.push();
-        let else_expr = self.expr(else_expr, Some(&then_expr.ty));
+        let else_expected = if then_leaves {
+            expected
+        } else {
+            Some(&then_expr.ty)
+        };
+        let else_expr = self.expr(else_expr, else_expected);
         self.env.pop();
         let else_env = self.env.clone();
+        // A branch that always leaves takes nothing with it that the other
+        // path could still want: it is not a path (`D-163`). Without this, a
+        // guard returning early would spend every value it named, and the
+        // move would outlive the branch that never ran.
+        let else_leaves = always_returns(&else_expr);
 
         self.env = base;
         for (id, binding) in &mut self.env.bindings {
-            let left = then_env.bindings.get(id).map(|b| b.state);
-            let right = else_env.bindings.get(id).map(|b| b.state);
+            let left = then_env
+                .bindings
+                .get(id)
+                .map(|b| b.state)
+                .filter(|_| !then_leaves);
+            let right = else_env
+                .bindings
+                .get(id)
+                .map(|b| b.state)
+                .filter(|_| !else_leaves);
             if left == Some(OwnershipState::Moved) || right == Some(OwnershipState::Moved) {
                 binding.state = OwnershipState::Moved;
             }
         }
-        let ty = then_expr.ty.clone();
+        let ty = if then_leaves {
+            else_expr.ty.clone()
+        } else {
+            then_expr.ty.clone()
+        };
         self.typed(
             expr,
             ty,
@@ -2420,6 +2452,43 @@ impl<'a> Analyzer<'a> {
         self.typed(expr, Type::Unit, TExprKind::Break(Some(Box::new(value))))
     }
 
+    /// `(return expression)`: the function's result, from any depth (`D-163`).
+    ///
+    /// The expression is typed against the function's result, and the form
+    /// itself carries whatever the context around it expects — it produces
+    /// nothing, so any expectation is satisfied by the exit that always
+    /// happens. That is the whole of the coercion an early exit needs: the
+    /// language has no bottom type and is not getting one (`D-130`), and a
+    /// form that never answers does not need one to agree with a `loop` body
+    /// that owes a `unit` or a branch that owes a value.
+    ///
+    /// The nearest function is the one a `return` leaves: a `lambda` body has
+    /// its own result, and a `return` written in one leaves the lambda, not
+    /// the function the lambda was written in, for the same reason a `break`
+    /// leaves the nearest loop.
+    fn return_expr(&mut self, expr: &Expr, value: &Expr, expected: Option<&Type>) -> TExpr {
+        // A deferred body runs while its scope is already ending, whatever
+        // ends it, so a `return` written in one asks the exit to happen again
+        // from inside it. A loop the body opened for itself does not help:
+        // the loop ends with the scope, and a `lambda` written inside a defer
+        // clears the stack, because a function value may be called after the
+        // scope is long gone.
+        if !self.defers.is_empty() {
+            self.error(
+                expr.span,
+                "`return` cannot be written inside a `defer`; the function is already leaving",
+            );
+        }
+        let Some(result) = self.current_return_type.clone() else {
+            self.error(expr.span, "`return` can only be used inside a function");
+            let value = self.expr(value, None);
+            return self.typed(expr, Type::Unit, TExprKind::Return(Box::new(value)));
+        };
+        let value = self.expr(value, Some(&result));
+        let ty = expected.cloned().unwrap_or(result);
+        self.typed(expr, ty, TExprKind::Return(Box::new(value)))
+    }
+
     /// Records what this loop produces, or reports that its breaks disagree.
     ///
     /// The first `break` decides and the rest are typed against it, so the only
@@ -2481,16 +2550,23 @@ impl<'a> Analyzer<'a> {
             frame.result.unwrap_or(Type::Unit)
         };
 
-        let mut escaped = owned_on_entry
-            .into_iter()
-            .filter(|id| {
-                self.env
-                    .bindings
-                    .get(id)
-                    .is_some_and(|binding| binding.state == OwnershipState::Moved)
-            })
-            .filter_map(|id| self.move_sites.get(&id).map(|span| (id, *span)))
-            .collect::<Vec<_>>();
+        // A body that always leaves runs at most once, whatever the loop
+        // around it says: every move in it left with the exit, and there is no
+        // second iteration to refuse on its behalf (`D-163`).
+        let mut escaped = if always_returns(&body) {
+            Vec::new()
+        } else {
+            owned_on_entry
+                .into_iter()
+                .filter(|id| {
+                    self.env
+                        .bindings
+                        .get(id)
+                        .is_some_and(|binding| binding.state == OwnershipState::Moved)
+                })
+                .filter_map(|id| self.move_sites.get(&id).map(|span| (id, *span)))
+                .collect::<Vec<_>>()
+        };
         escaped.sort_by_key(|(_, span)| (span.start, span.end));
         for (id, span) in escaped {
             // Forget the site so an enclosing loop does not report the same
@@ -2897,7 +2973,7 @@ impl<'a> Analyzer<'a> {
             if guarded {
                 let body = self.expr(&arm.body, result_type.as_ref());
                 self.env.pop();
-                if result_type.is_none() {
+                if result_type.is_none() && !always_returns(&body) {
                     result_type = Some(body.ty.clone());
                 }
                 arm_environments.push(self.env.clone());
@@ -2932,7 +3008,9 @@ impl<'a> Analyzer<'a> {
             }
             let body = self.expr(&arm.body, result_type.as_ref());
             self.env.pop();
-            if result_type.is_none() {
+            // An arm that always leaves produces nothing and agrees with
+            // whatever the others produce (`D-163`).
+            if result_type.is_none() && !always_returns(&body) {
                 result_type = Some(body.ty.clone());
             }
             arm_environments.push(self.env.clone());
@@ -2946,12 +3024,24 @@ impl<'a> Analyzer<'a> {
         self.pattern_borrow = outer_borrow;
         self.env = base;
         if !arm_environments.is_empty() {
+            // An arm that always leaves is not a path through the `match`
+            // (`D-163`): what it moved left with it, and an arm that answers
+            // normally may still want the value.
+            let answering: Vec<bool> = typed_arms
+                .iter()
+                .map(|arm| !always_returns(&arm.body))
+                .collect();
             for (id, binding) in &mut self.env.bindings {
-                if arm_environments.iter().any(|env| {
-                    env.bindings
-                        .get(id)
-                        .is_some_and(|item| item.state == OwnershipState::Moved)
-                }) {
+                if arm_environments
+                    .iter()
+                    .zip(answering.iter())
+                    .filter(|(_, answers)| **answers)
+                    .any(|(env, _)| {
+                        env.bindings
+                            .get(id)
+                            .is_some_and(|item| item.state == OwnershipState::Moved)
+                    })
+                {
                     binding.state = OwnershipState::Moved;
                 }
             }
@@ -3600,6 +3690,12 @@ impl<'a> Analyzer<'a> {
         self.enclosing.push(std::mem::take(&mut self.env));
         let outer_pattern_borrow = self.pattern_borrow.take();
         let outer_return_type = self.current_return_type.take();
+        // The scope a `defer` is ending does not cross in either (`D-163`): a
+        // function value may be called long after that scope is gone, so a
+        // `return` written in a `lambda` inside a deferred body leaves the
+        // `lambda`, and is not the re-entrant exit it would be in the body
+        // itself.
+        let outer_defers = std::mem::take(&mut self.defers);
         // The permission does not cross into the body (`D-067`). A `lambda`
         // written inside an `unsafe` block is still a function value that can
         // be called from anywhere, so its body has to ask for the permission
@@ -3695,6 +3791,7 @@ impl<'a> Analyzer<'a> {
         self.env = self.enclosing.pop().unwrap_or_default();
         self.pattern_borrow = outer_pattern_borrow;
         self.current_return_type = outer_return_type;
+        self.defers = outer_defers;
         self.unsafe_depth = outer_unsafe_depth;
 
         let ty = Type::Fn {
@@ -5095,6 +5192,7 @@ impl<'a> Analyzer<'a> {
                     self.materialize_typed_expr(value);
                 }
             }
+            TExprKind::Return(value) => self.materialize_typed_expr(value),
             TExprKind::Const { value, .. } => self.materialize_typed_expr(value),
             TExprKind::Unit
             | TExprKind::Bool(_)
@@ -5699,6 +5797,7 @@ fn collect_variable_names(expr: &Expr, output: &mut HashSet<String>) {
                 collect_variable_names(value, output);
             }
         }
+        ExprKind::Return(value) => collect_variable_names(value, output),
         ExprKind::Unit
         | ExprKind::Bool(_)
         | ExprKind::Int(_)
@@ -5715,6 +5814,31 @@ fn pattern_irrefutable(pattern: &TPattern) -> bool {
             .iter()
             .all(|field| pattern_irrefutable(&field.pattern)),
         TPattern::Bool(_) | TPattern::Int(_) | TPattern::Enum { .. } => false,
+    }
+}
+
+/// Whether evaluating this expression always leaves the function (`D-163`).
+///
+/// A `return` anywhere inside a `do` — not only at its end, because the
+/// expressions after one are unreachable and a `when` puts a `unit` after its
+/// body — makes the whole `do` one that leaves. A branch leaves only when both
+/// of its arms do, and a `match` when every arm does. The merge points use
+/// this to let an early exit agree with whatever the other path produces,
+/// which is the coercion a language without a bottom type (`D-130`) gives an
+/// exit that always happens.
+fn always_returns(expression: &TExpr) -> bool {
+    match &expression.kind {
+        TExprKind::Return(_) => true,
+        TExprKind::Do(items) => items.iter().any(always_returns),
+        TExprKind::If {
+            then_expr,
+            else_expr,
+            ..
+        } => always_returns(then_expr) && always_returns(else_expr),
+        TExprKind::Match { arms, .. } => {
+            !arms.is_empty() && arms.iter().all(|arm| always_returns(&arm.body))
+        }
+        _ => false,
     }
 }
 
@@ -6284,6 +6408,7 @@ fn specialize_expr(
                 specialize_expr(value, substitutions, queue);
             }
         }
+        TExprKind::Return(value) => specialize_expr(value, substitutions, queue),
         TExprKind::Const { value, .. } => specialize_expr(value, substitutions, queue),
         TExprKind::Unit
         | TExprKind::Bool(_)
