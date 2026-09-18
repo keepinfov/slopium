@@ -1786,6 +1786,7 @@ impl<'a> Generator<'a> {
                         disp: None,
                     }),
                 )),
+                Step::BitsToDouble => self.inst(Inst::Movq(Reg("xmm0"), Reg("rax"))),
                 Step::WrapOption { some_tag, none_tag } => {
                     self.inst(Inst::Test(reg("rax"), reg("rax")));
                     self.inst(Inst::Jcc(Cond::Z, Target::Forward(1)));

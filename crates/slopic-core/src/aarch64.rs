@@ -1483,6 +1483,7 @@ impl<'a> Generator<'a> {
                     offset: None,
                     size: AccessSize::Double,
                 }),
+                Step::BitsToDouble => self.inst(Inst::Fmov { dst: D0, src: X0 }),
                 Step::WrapOption { some_tag, none_tag } => {
                     self.inst(Inst::Cbz(RESULT, Target::Forward(1)));
                     self.materialize(X0, enum_size(1) as u64);
