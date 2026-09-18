@@ -825,6 +825,7 @@ impl FreeNames<'_> {
             ExprKind::Defer(inner)
             | ExprKind::Try(inner)
             | ExprKind::Break(Some(inner))
+            | ExprKind::Return(inner)
             | ExprKind::Borrow { value: inner, .. }
             | ExprKind::Convert { value: inner, .. } => self.scoped(inner),
             ExprKind::If {

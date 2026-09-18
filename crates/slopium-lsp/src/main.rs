@@ -82,6 +82,7 @@ const KEYWORDS: &[&str] = &[
     "while",
     "break",
     "continue",
+    "return",
     "export",
     "take",
     "extern",
@@ -1363,6 +1364,9 @@ fn scan_expr_occurrences(
             if let Some(value) = value {
                 scan_expr_occurrences(workspace, modules, summary, file, value);
             }
+        }
+        ExprKind::Return(value) => {
+            scan_expr_occurrences(workspace, modules, summary, file, value);
         }
         ExprKind::Unit
         | ExprKind::Bool(_)

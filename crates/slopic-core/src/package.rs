@@ -925,6 +925,7 @@ impl Resolver<'_> {
                     self.rewrite_expr(value, diagnostics);
                 }
             }
+            ExprKind::Return(value) => self.rewrite_expr(value, diagnostics),
         }
     }
 
@@ -1139,6 +1140,7 @@ fn collect_qualified_names<'a>(program: &'a Program, output: &mut Vec<&'a str>) 
                 }
             }
             ExprKind::Break(Some(value)) => expr(value, output),
+            ExprKind::Return(value) => expr(value, output),
             ExprKind::Borrow { value, .. }
             | ExprKind::Try(value)
             | ExprKind::Convert { value, .. } => expr(value, output),
@@ -1354,6 +1356,7 @@ fn shift_program(program: &mut Program, base: usize) {
                 }
             }
             ExprKind::Break(Some(value)) => shift_expr(value, base),
+            ExprKind::Return(value) => shift_expr(value, base),
             ExprKind::Borrow { value, .. }
             | ExprKind::Try(value)
             | ExprKind::Convert { value, .. } => shift_expr(value, base),
