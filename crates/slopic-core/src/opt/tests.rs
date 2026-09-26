@@ -759,3 +759,83 @@ fn a_call_through_a_value_that_is_not_a_known_block_stays_indirect() {
         instructions(apply)
     );
 }
+
+#[test]
+fn a_closure_called_in_place_leaves_no_allocation_behind() {
+    // The block a no-capture closure is took three code addresses and nothing
+    // else, and once the call is direct and the body spliced in, nothing reads
+    // a word out of it: the allocation and its drop go with the indirect call
+    // that justified them (`#35`).
+    let source = r#"
+        (fn probe () -> i64
+          (let f (lambda () ((x i64)) -> i64 (* x 3)))
+          (f 7))
+        (fn main () -> i32 0)
+    "#;
+    let module = release(source);
+    let probe = function(&module, "probe");
+    assert!(
+        !instructions(probe).iter().any(|instruction| {
+            matches!(
+                instruction,
+                Instruction::StructNew { dst, .. }
+                    if matches!(probe.locals.get(*dst), Some(local) if matches!(local.ty, crate::ast::Type::Fn { .. }))
+            ) || matches!(
+                instruction,
+                Instruction::Drop { ty, .. } if matches!(ty, crate::ast::Type::Fn { .. })
+            )
+        }),
+        "a block nothing reads was allocated or dropped anyway: {:?}",
+        instructions(probe)
+    );
+}
+
+#[test]
+fn a_closure_that_captures_keeps_its_block() {
+    // The body reads its captures out of the block, so the block is a real
+    // value with a real lifetime and neither half of it is the compiler's to
+    // spend.
+    let source = r#"
+        (fn probe ((by i64)) -> i64
+          (let add (lambda (by) ((x i64)) -> i64 (+ x by)))
+          (add 7))
+        (fn main () -> i32 0)
+    "#;
+    let module = release(source);
+    let probe = function(&module, "probe");
+    assert!(
+        instructions(probe).iter().any(|instruction| {
+            matches!(
+                instruction,
+                Instruction::StructNew { dst, .. }
+                    if matches!(probe.locals.get(*dst), Some(local) if matches!(local.ty, crate::ast::Type::Fn { .. }))
+            )
+        }),
+        "a block with captures was taken away from the body that reads them: {:?}",
+        instructions(probe)
+    );
+}
+
+#[test]
+fn a_closure_that_escapes_keeps_its_block() {
+    // Returned is the opposite of called in place: the block leaves with the
+    // value, and the drop that frees it belongs to whoever receives it.
+    let source = r#"
+        (fn probe () -> (Fn (i64) i64)
+          (lambda () ((x i64)) -> i64 (* x 3)))
+        (fn main () -> i32 0)
+    "#;
+    let module = release(source);
+    let probe = function(&module, "probe");
+    assert!(
+        instructions(probe).iter().any(|instruction| {
+            matches!(
+                instruction,
+                Instruction::StructNew { dst, .. }
+                    if matches!(probe.locals.get(*dst), Some(local) if matches!(local.ty, crate::ast::Type::Fn { .. }))
+            )
+        }),
+        "a block that leaves the function was spent inside it: {:?}",
+        instructions(probe)
+    );
+}

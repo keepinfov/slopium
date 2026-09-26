@@ -77,6 +77,11 @@ fn optimize_within(file: &str, module: &mut MirModule, rounds: usize) -> Compile
     inline::run(module);
     check_after(file, module, "inlining")?;
 
+    // What inlining leaves behind is what this pass takes: a closure block
+    // nothing reads any more, its allocation and its drop.
+    eliminate_dead_allocations(module);
+    check_after(file, module, "dead allocation elimination")?;
+
     // The baseline is taken *after* inlining, deliberately: inlining a callee
     // at two call sites duplicates the volatile accesses in it, and both calls
     // really do reach the device (`D-114`).
@@ -276,6 +281,226 @@ fn trace_closure_symbol(
 fn check_after(file: &str, module: &MirModule, pass: &str) -> CompileResult<()> {
     verify::check_block_targets(file, module, Some(pass))?;
     verify::check(file, module, pass)
+}
+
+/// Takes the allocation out of a closure block that nothing reads any more
+/// (`D-141`'s second half, and the last of `#35`).
+///
+/// A closure with no captures is three code addresses and nothing else. The
+/// lifted body it names takes its block as a parameter it never mentions,
+/// because there is nothing in the block to read, and the block's drop helper
+/// frees the block and drops nothing else. When devirtualization has named the
+/// call and inlining has spliced the body in — or left a direct call to a body
+/// that ignores its block — the block's only remaining uses are the word such
+/// a call receives and its drop, and the allocation becomes a null word: the
+/// call passes it to a parameter nobody reads, and the release being deleted
+/// is the release of the allocation deleted with it.
+///
+/// That is the one exception to "drops are observable", and it is that rule
+/// stated from its other side: the block was invented by the compiler, so its
+/// lifetime is the compiler's to spend. A closure that captures anything is
+/// not eligible — the body reads its captures out of the block — and neither
+/// is one whose value reaches anything but these uses: a `FieldLoad` of the
+/// code word whose result is itself unread is deleted rather than run, since
+/// it would be a load through the null the block became.
+fn eliminate_dead_allocations(module: &mut MirModule) -> bool {
+    // Which functions never mention their last parameter: a lifted body with
+    // no captures is the whole of this set, and a call to anything else keeps
+    // its argument's block exactly as it was.
+    let unread_block_parameter: HashSet<String> = module
+        .functions
+        .iter()
+        .filter(|function| {
+            let Some(parameter) = function.params.last().copied() else {
+                return false;
+            };
+            !is_read(function, parameter)
+        })
+        .map(|function| function.name.clone())
+        .collect();
+    // The layouts that hold the header and nothing else, by name: their block
+    // has no captures for a body to read.
+    let bare_blocks = module
+        .structs
+        .iter()
+        .filter(|item| item.fields.len() == crate::lowering::CLOSURE_HEADER)
+        .map(|item| item.name.clone())
+        .collect::<HashSet<_>>();
+
+    let mut changed = false;
+    for function in functions_mut(module) {
+        changed |= eliminate_dead_allocations_in(function, &unread_block_parameter, &bare_blocks);
+    }
+    changed
+}
+
+fn eliminate_dead_allocations_in(
+    function: &mut MirFunction,
+    unread_block_parameter: &HashSet<String>,
+    bare_blocks: &HashSet<String>,
+) -> bool {
+    // The statements the rewrite replaces or deletes: a `StructNew` becomes a
+    // null word, and the code-word loads and the drop of that word go away
+    // with the allocation they belonged to.
+    let mut replacements = Vec::new();
+    let mut deletions = Vec::new();
+    for (index, block) in function.blocks.iter().enumerate() {
+        for (position, statement) in block.statements.iter().enumerate() {
+            let Instruction::StructNew { dst, name, .. } = &statement.instruction else {
+                continue;
+            };
+            // A closure block and nothing else: the local it lands in is a
+            // `Fn`, and the layout is one this module built with no captures.
+            if !function
+                .locals
+                .get(*dst)
+                .is_some_and(|local| matches!(local.ty, Type::Fn { .. }))
+                || !bare_blocks.contains(name)
+            {
+                continue;
+            }
+            if let Some((loads, drops)) = permitted_uses(
+                function,
+                block_aliases(function, *dst),
+                unread_block_parameter,
+            ) {
+                replacements.push((index, position, *dst));
+                deletions.extend(loads);
+                deletions.extend(drops);
+            }
+        }
+    }
+    let changed = !replacements.is_empty();
+    for (index, position, dst) in replacements {
+        function.blocks[index].statements[position].instruction =
+            Instruction::ConstInt { dst, value: 0 };
+    }
+    deletions.sort_unstable();
+    deletions.dedup();
+    for (index, position) in deletions.into_iter().rev() {
+        function.blocks[index].statements.remove(position);
+    }
+    changed
+}
+
+/// Every local holding the same block `origin` does: the `let` that names a
+/// closure copies the word, and the drop arrives for the copy.
+///
+/// A copy counts only when it is the local's one definition — a local written
+/// from elsewhere as well is not the block all the way down, and guessing
+/// would spend somebody else's value.
+fn block_aliases(function: &MirFunction, origin: LocalId) -> HashSet<LocalId> {
+    let mut definitions = vec![0usize; function.locals.len()];
+    for block in &function.blocks {
+        for statement in &block.statements {
+            if let Some(local) = defs(&statement.instruction) {
+                if let Some(entry) = definitions.get_mut(local) {
+                    *entry += 1;
+                }
+            }
+        }
+    }
+    let mut aliases = HashSet::new();
+    aliases.insert(origin);
+    loop {
+        let mut grown = aliases.clone();
+        for block in &function.blocks {
+            for statement in &block.statements {
+                let Instruction::Assign { dst, src } = &statement.instruction else {
+                    continue;
+                };
+                if aliases.contains(src)
+                    && function
+                        .locals
+                        .get(*dst)
+                        .is_some_and(|local| matches!(local.ty, Type::Fn { .. }))
+                    && definitions.get(*dst).is_some_and(|count| *count == 1)
+                {
+                    grown.insert(*dst);
+                }
+            }
+        }
+        if grown == aliases {
+            return aliases;
+        }
+        aliases = grown;
+    }
+}
+
+type Sites = Vec<(usize, usize)>;
+
+/// The `FieldLoad` positions of a dead block's code word and the `Drop`
+/// positions of the block itself, when those and block-ignoring call
+/// arguments are the whole of what reads it — the block itself or any copy
+/// of it.
+fn permitted_uses(
+    function: &MirFunction,
+    aliases: HashSet<LocalId>,
+    unread_block_parameter: &HashSet<String>,
+) -> Option<(Sites, Sites)> {
+    let is_alias = |local: &LocalId| aliases.contains(local);
+    let mut loads = Vec::new();
+    let mut drops = Vec::new();
+    for (index, block) in function.blocks.iter().enumerate() {
+        for local in terminator_uses(&block.terminator) {
+            if is_alias(&local) {
+                return None;
+            }
+        }
+        for (position, statement) in block.statements.iter().enumerate() {
+            let mut operands = Vec::new();
+            uses(&statement.instruction, &mut operands);
+            if !operands.iter().any(is_alias) {
+                continue;
+            }
+            match &statement.instruction {
+                // The copy that made an alias: allowed, and dead once the
+                // null word replaces what it copied.
+                Instruction::Assign { src, .. } if is_alias(src) => {}
+                // The word a direct call hands to its callee's unread block
+                // parameter. Last argument only: it is where the lowering
+                // puts the block, and a block anywhere else is a value like
+                // any other.
+                Instruction::Call { callee, args, .. }
+                    if args.last().is_some_and(is_alias)
+                        && unread_block_parameter.contains(callee) => {}
+                // The code word, unread since the call stopped being
+                // indirect. Deleted rather than run: it would be a load
+                // through the null the block becomes.
+                Instruction::FieldLoad {
+                    base,
+                    index: field,
+                    dst,
+                } => {
+                    if !is_alias(base) || *field != 0 || is_read(function, *dst) {
+                        return None;
+                    }
+                    loads.push((index, position));
+                }
+                Instruction::Drop { local, .. } if is_alias(local) => {
+                    drops.push((index, position));
+                }
+                _ => return None,
+            }
+        }
+    }
+    Some((loads, drops))
+}
+
+/// Whether any statement or terminator reads `local`.
+fn is_read(function: &MirFunction, local: LocalId) -> bool {
+    function.blocks.iter().any(|block| {
+        is_read_in_terminator(block, local)
+            || block.statements.iter().any(|statement| {
+                let mut operands = Vec::new();
+                uses(&statement.instruction, &mut operands);
+                operands.contains(&local)
+            })
+    })
+}
+
+fn is_read_in_terminator(block: &BasicBlock, local: LocalId) -> bool {
+    terminator_uses(&block.terminator).contains(&local)
 }
 
 /// What a pass is allowed to do to a function's volatile count.
