@@ -158,10 +158,13 @@
 ; many as the buckets. Everything is rehashed, because the bucket a key belongs
 ; in is a function of how many buckets there are.
 ;
-; The pile everything lands in during a rehash is the first bucket, taken out
-; of the table. That is not cleverness for its own sake: it is a list of the
-; right type that already exists, and this file cannot write down an empty one
-; outside a field or an argument.
+; A rehash moves a whole table, so nothing it moves may be drained from the
+; front of a list: taking the first bucket out of the array and the first entry
+; out of a pile shifts everything behind each one, which made one rehash
+; quadratic in the entries it carried and a table that doubles pay it again at
+; every doubling. The walk is by index and each old bucket is taken out with
+; `replace`; a bucket is short — the scan inside one is the half of a hash
+; table allowed to be linear — so draining it is what `D-146` gave `sort-by`.
 (fn reserve (K V) ((map &mut (Map K V))) -> unit
   (match map
     ((Map :slots slots :count count :hash hash :same same)
@@ -170,14 +173,13 @@
         (add-buckets slots 4)
         (if (< (clone count) capacity)
           ()
-          (let mut carried (remove slots 0))
-          (while (> (len slots) 0)
-            (let mut bucket (remove slots 0))
+          (add-buckets slots capacity)
+          (let mut index 0)
+          (while (< index capacity)
+            (let mut bucket (replace slots index (list)))
             (while (> (len &bucket) 0)
-              (push &mut carried (remove &mut bucket 0))))
-          (add-buckets slots (* capacity 2))
-          (while (> (len &carried) 0)
-            (place slots hash (remove &mut carried 0|)
+              (place slots hash (remove &mut bucket 0)))
+            (set index (+ index 1|)
 
 (fn add-buckets (K V) ((slots &mut (List (List (Entry K V)))) (count i64)) -> unit
   (let mut index 0)
