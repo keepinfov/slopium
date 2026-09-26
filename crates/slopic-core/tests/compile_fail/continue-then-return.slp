@@ -1,0 +1,13 @@
+; A `return` below a `continue` is unreachable, so it does not make the loop
+; body one that leaves: the move made before the `continue` is still a move
+; the next iteration would repeat (`D-163`).
+(fn eat ((text String)) -> i64
+  1)
+
+(fn main () -> i32
+  (let s "owned")
+  (loop
+    (eat s)
+    (continue)
+    (return 0))
+  0)

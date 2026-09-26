@@ -92,6 +92,19 @@ pub const RESERVED_WORDS: &[ReservedWord] = &[
     },
 ];
 
+/// The heads the parser reads as forms wherever a list begins with one.
+///
+/// A function named after one of these could never be called: `(return x)`
+/// is the form before it is a call, which is why a declaration of one is
+/// refused rather than left to fail at every use. Only declarations are
+/// refused — a binding or a parameter named `set` is readable as a value, and
+/// the standard library has one — and only the heads a call site could meet,
+/// which is why the program-level words (`fn`, `take`, `struct`) are not here.
+pub const FORM_HEADS: &[&str] = &[
+    "let", "set", "do", "unsafe", "if", "when", "and", "or", "loop", "while", "break", "continue",
+    "return", "defer", "lambda", "match", "try", "as",
+];
+
 /// The row for a reserved word, if `name` is one.
 pub fn reserved_word(name: &str) -> Option<&'static ReservedWord> {
     RESERVED_WORDS.iter().find(|word| word.text == name)
@@ -1344,6 +1357,7 @@ impl AstBuilder<'_> {
         }
         let name = self.required_atom(&items[0], "function name")?.to_owned();
         self.check_reserved(&name, items[0].span);
+        self.check_form_head(&name, items[0].span);
         let has_generics = items.len() >= 6
             && self.type_params_if_present(&items[1]).is_some()
             && matches!(items[2].kind, SExprKind::List(_));
@@ -1396,6 +1410,7 @@ impl AstBuilder<'_> {
         };
         let name = self.required_atom(head, "extern name")?.to_owned();
         self.check_reserved(&name, head.span);
+        self.check_form_head(&name, head.span);
         // `(name (T) (value T))` is the generic `fn` shape. There is nothing a
         // type parameter could be instantiated to here — the C vocabulary is
         // closed (`D-065`) — so say that instead of complaining that `(T)` is
@@ -2482,6 +2497,26 @@ impl AstBuilder<'_> {
         if let Some(word) = reserved_word(name) {
             self.diagnostics
                 .push(reserved_refusal(self.file, span, word));
+        }
+    }
+
+    /// Refuses a function named after a form (`D-163`). Bindings and
+    /// parameters are left alone: naming one `set` is legal and the standard
+    /// library does it, because a binding is read as a value — it is a
+    /// declaration, which exists to be called, that a form head takes away.
+    fn check_form_head(&mut self, name: &str, span: Span) {
+        if FORM_HEADS.contains(&name) {
+            self.diagnostics.push(
+                Diagnostic::error(
+                    codes::INVALID_SYNTAX,
+                    self.file,
+                    span,
+                    format!("`{name}` is the head of a form and cannot name a function"),
+                )
+                .with_help(
+                    "every call would read as the form before it read as a call; give the function another name",
+                ),
+            );
         }
     }
 }

@@ -227,6 +227,11 @@ something else rather than run, and asks for no `main` (`D-015`).
   (= (add 20 22) 42))
 ```
 
+A function may not be named after a form head — `return`, `set`, `when`, `loop`
+and the rest — because every call to it would read as the form first (`D-163`).
+A binding or a parameter may: it is read as a value, and the standard library
+has a parameter named `set`.
+
 A **constant** is a module-level name for a literal, inlined wherever it is
 used and exported like anything else. It is a literal and nothing else — no
 arithmetic, no reference to another constant — and it carries a type after the
@@ -773,6 +778,14 @@ path still owns that binding, and the code after the branch may use it.
     (return (clone b)))
   (concat &"neither " &"held"))
 ```
+
+A `return` is a statement, so it is written where statements go: the body of a
+function, a test or a `lambda`, a branch of an `if`, an arm of a `match`, a
+loop body, or the `do` that one of those bodies is. It is refused in the middle
+of a value — an operator operand, a `let` initializer — and under a call's
+arguments, where the arguments written before it have already produced values
+the exit never gives back; the value the branch would have answered is bound to
+a name instead, and the early exit takes that.
 
 A `return` ends every scope it stands in, and each one runs what it deferred
 before it releases what it owns, inner scopes first — the same order a `break`

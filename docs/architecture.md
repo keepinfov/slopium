@@ -165,10 +165,16 @@ request carrying `debug` rather than answering with a stripped object.
 Ending a scope is two phases, in this order: what the scope deferred runs, then
 what it owns is dropped (`D-133`). `drop_scope_except` is the exit that falls
 off the end of a scope, and `unwind_scopes` is the one that leaves a range of
-them at once — a `break`, a `continue`, and the error arm of a `try`, which used
-to walk the live set and reproduce the drop order by hand. A deferred expression
-is held on its scope and lowered again at each exit, because there are no
-landing pads and no unwinder to share one copy between them.
+them at once — a `break`, a `continue`, a `return`, and the error arm of a
+`try`, which used to walk the live set and reproduce the drop order by hand. A
+deferred expression is held on its scope and lowered again at each exit,
+because there are no landing pads and no unwinder to share one copy between
+them. Which exits are paths is what the merges after a branch or an arm ask:
+one that no path reaches emits no edge and expects no value, and lowering
+tracks that with a single flag — an exit sets it, an `if` or a `match` reports
+it upward when every branch left, and a loop clears it at its own exit,
+because a `break` inside a loop body leaves the loop and not the branch that
+encloses it (`D-163`).
 
 Register allocation is whole-interval: a local lives in one register for its
 entire function or in its frame slot for the entire function, with no interval

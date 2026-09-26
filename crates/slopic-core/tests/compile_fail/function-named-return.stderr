@@ -1,0 +1,5 @@
+function-named-return.slp:4:5: error[SL0100]: `return` is the head of a form and cannot name a function
+  |
+ 4 | (fn return ((value i64)) -> i64
+  |     ^^^^^^
+  = help: every call would read as the form before it read as a call; give the function another name

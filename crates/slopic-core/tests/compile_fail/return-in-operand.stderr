@@ -1,0 +1,5 @@
+return-in-operand.slp:4:6: error[SL0200]: `return` is written where a value is expected
+  |
+ 4 |   (- (return 0)))
+  |      ^^^^^^^^^^
+  = help: write it as a statement — under a `when`, in a branch or an arm, at the end of a loop body — or name the value and return normally

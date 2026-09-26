@@ -587,13 +587,20 @@ fn lower_lambda(
 
 fn lower_body(mut builder: Builder, body: &TExpr) -> Lowered {
     let value = builder.expr(body);
-    builder.drop_scope_except(0, value.as_ref().map(|value| value.local));
-    if builder.blocks[builder.current].terminator.is_none() {
-        builder.blocks[builder.current].terminator = Some(Terminator::Return(
-            value
-                .filter(|value| value.ty != Type::Unit)
-                .map(|value| value.local),
-        ));
+    // A body that ended by leaving sealed its own exit and unwound every
+    // scope on the way (`D-163`). The block lowering stands in now is
+    // unreachable, so it gets no drops and no implicit return: one there
+    // would have no value to hand back, and asking for the body's value
+    // would be reading a local no path ever wrote.
+    if !builder.left {
+        builder.drop_scope_except(0, value.as_ref().map(|value| value.local));
+        if builder.blocks[builder.current].terminator.is_none() {
+            builder.blocks[builder.current].terminator = Some(Terminator::Return(
+                value
+                    .filter(|value| value.ty != Type::Unit)
+                    .map(|value| value.local),
+            ));
+        }
     }
     let lifted = std::mem::take(&mut builder.lifted);
     let layouts = std::mem::take(&mut builder.layouts);
@@ -1727,6 +1734,10 @@ impl Builder {
             self.blocks[self.current].terminator = Some(Terminator::Goto(condition_block));
         }
         self.loop_targets.pop();
+        // A `break` or `return` written in the body left the block it stood
+        // in, not the loop: the loop is where its `break`s meet, and control
+        // continues at `exit_block` however many of them there were (`D-163`).
+        self.left = false;
         self.current = exit_block;
         result.map(|local| Value {
             local,
@@ -1943,6 +1954,13 @@ impl Builder {
             }
         }
         self.current = merge_block;
+        // When both branches left, nobody arrives at the merge: the `if` is
+        // itself an exit, and whoever is above it must not drop what this
+        // path never releases nor wait for a value it never produces
+        // (`D-163`).
+        if then_left && else_left {
+            self.left = true;
+        }
         result.map(|local| Value {
             local,
             ty: expr.ty.clone(),
@@ -2247,6 +2265,7 @@ impl Builder {
         };
         let base_live = self.live.clone();
         let mut arm_states = Vec::new();
+        let mut every_arm_left = true;
         for arm in arms {
             let arm_block = self.block();
             let next_check = self.block();
@@ -2314,6 +2333,7 @@ impl Builder {
                 self.blocks[self.current].terminator = Some(Terminator::Goto(merge_block));
                 arm_states.push((self.current, self.live.clone()));
             }
+            every_arm_left &= arm_left;
             self.scopes.pop();
             self.current = next_check;
             if mir_pattern_irrefutable(&arm.pattern) && arm.guard.is_none() {
@@ -2342,6 +2362,11 @@ impl Builder {
                 }
                 self.live.insert(id, false);
             }
+        }
+        // As with an `if`: when every arm left, nobody arrives at the merge
+        // and the `match` is an exit of its own (`D-163`).
+        if !arms.is_empty() && every_arm_left {
+            self.left = true;
         }
         self.current = merge_block;
         result.map(|local| Value {

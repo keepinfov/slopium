@@ -20,3 +20,16 @@ inner defer
 loop defer
 outer defer
 found it
+nested one
+nested
+fall nested
+broke out
+no loop
+41
+42
+3
+unload defer
+unloaded
+7
+3
+90

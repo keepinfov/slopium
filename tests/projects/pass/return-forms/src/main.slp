@@ -4,7 +4,7 @@
 ; printed order is the contract: what a scope deferred runs before that scope
 ; drops, inner scopes before outer ones, and nothing after the value leaves.
 
-(take std:io println)
+(take std:io println println-i64)
 (take std:string concat)
 
 (fn straight ((n i64)) -> String
@@ -50,6 +50,71 @@
     (set i (+ i 1)))
   (concat &"never " &"reached"))
 
+; An `if` whose arms both return reports the exit through the arm that
+; encloses it, so the value the other path still owns is not dropped on a
+; path that never arrives, and the move the returning arm made is not held
+; against the path that stays.
+(fn nested ((n i64)) -> String
+  (let owned (concat &"nest" &"ed"))
+  (if (> n 0)
+    (do
+      (if (= n 1) (return (concat &owned &" one")) (return owned))
+      (concat &owned &" unreachable"))
+    (concat &"fall " &owned)))
+
+; A `break` leaves its loop, not the branch around it: the `if` still has a
+; value on that path and meets its merge.
+(fn breaking ((n i64)) -> String
+  (if (= n 1)
+    (do
+      (loop
+        (break))
+      (concat &"broke " &"out"))
+    (concat &"no " &"loop")))
+
+; Every match arm returns and the surrounding branch does too, while the
+; binding written before the match is still the fall-through path's to use.
+(fn matched ((n i64)) -> i64
+  (let spare (list 1 2 3))
+  (if (> n 0)
+    (do
+      (match n
+        (1 (return 41))
+        (_ (return 42)))
+      (len &spare))
+    (len &spare)))
+
+; A loop body that always leaves runs at most once, so the value it moves
+; out is not a second iteration's problem.
+(fn unload ((text String)) -> String
+  (loop
+    (defer (println &"unload defer"))
+    (return text)))
+
+; An `if` is not the only expression a body can be: the whole body is one
+; `return`, and the block the exit leaves behind is unreachable.
+(fn bare () -> i64
+  (return 7))
+
+; A `return` in a `lambda` leaves the lambda, even where the lambda is an
+; argument of a call.
+(fn twice ((f (Fn (i64) i64)) (x i64)) -> i64
+  (f (f x)))
+
+(fn lambdas ((start i64)) -> i64
+  (twice
+    (lambda (start) ((x i64)) -> i64
+      (when (= x 0)
+        (return 90))
+      (+ x start))
+    start))
+
+(test "a return leaves a test body too"
+  (do
+    (when true
+      (return true))
+    false))
+
 (fn main () -> i32
   (println &(straight 1))
   (println &(straight 0))
@@ -60,4 +125,16 @@
   (println &(carried 1))
   (println &(carried 2))
   (println &(deep 1))
+  (println &(nested 1))
+  (println &(nested 5))
+  (println &(nested 0))
+  (println &(breaking 1))
+  (println &(breaking 0))
+  (println-i64 (matched 1))
+  (println-i64 (matched 9))
+  (println-i64 (matched 0))
+  (println &(unload (concat &"un" &"loaded")))
+  (println-i64 (bare))
+  (println-i64 (lambdas 1))
+  (println-i64 (lambdas 0))
   0)
