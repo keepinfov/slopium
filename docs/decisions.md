@@ -174,6 +174,8 @@ of what was believed at the time is the part worth keeping.
 - [D-159 — the compiler protocol stays internal at 1.0](#d-159--the-compiler-protocol-stays-internal-at-10)
 - [D-160 — a fix is a named rule, tied to the release that made it necessary](#d-160--a-fix-is-a-named-rule-tied-to-the-release-that-made-it-necessary)
 - [D-161 — the scanner stands down to snippets while a server is attached](#d-161--the-scanner-stands-down-to-snippets-while-a-server-is-attached)
+- [D-162 — a `unit` field owns a word like any other field](#d-162--a-unit-field-owns-a-word-like-any-other-field)
+- [D-163 — `return` leaves the nearest function, and the word is spent on it](#d-163--return-leaves-the-nearest-function-and-the-word-is-spent-on-it)
 
 ## D-001 — a native compiler, without LLVM
 
@@ -3874,3 +3876,70 @@ initializer runs first — side effects are real whether or not the value exists
 local typed `unit`. Construction is the only lowering that needs this: reads,
 clone, drop and verification were already counting every field, which is why
 they caught the disagreement instead of hiding it.
+
+## D-163 — `return` leaves the nearest function, and the word is spent on it
+
+Status: approved · 2026-09-18
+
+`return` was not reserved, and the compatibility promise at 1.0 would have
+given the word to programs permanently: teaching the parser a new head after
+that would silently change what a call to a function of that name means. The
+choice belonged before the promise, and the answer is the one the language
+already gave `break` — the exit exists, the word names it, and one spelling
+`(return expression)` covers everything, so a function answering `unit` writes
+`(return ())` and no bare form exists.
+
+What the exit is: the nearest function, which inside a `lambda` is the
+`lambda`, for the same reason a `break` leaves the nearest loop. It ends every
+scope it stands in through the unwinder `D-133` built, defers before drops,
+inner scopes first — the same order the error arm of a `try` already leaves in
+— and it may not be written inside a `defer`, which is `D-133`'s re-entrant
+refusal applied one more time. `D-133` said no return form exists; this is
+that premise replaced.
+
+What the exit is not: a value. `D-130` declined a bottom type and nothing
+here reinstates one. The expression is typed against the function's result,
+and the form itself takes whatever type the position around it expects,
+because a form that always leaves satisfies any expectation by leaving. The
+merge points agree: a branch or an arm that always returns produces nothing,
+decides no type, and moves nothing the other path still owns — which is also
+why a binding may move out through a guard's `return` and still be used on
+the path that answers.
+
+What the form cost besides itself: the merge points in `sema` and in MIR
+assumed every path through a branch or a loop body was a path, and the
+assumption had a hole nothing had reached. In MIR, a branch that moves a
+binding out and leaves balanced its move with a drop on the answering path —
+freeing a value that had left the function alive — and in `sema`, a loop body
+containing a bare move that always exits was refused as though a second
+iteration could follow it. Both are fixed for `return` and `break` together,
+since `break` carries the same shape and was kept out of the hole only by the
+loop-body move refusal that `return` made reachable.
+
+Where the form may be written is positions, not shapes: the body of a
+function, a test or a `lambda`, a branch, an arm, a loop body, and the `do`
+one of those bodies is. A value being built is not one of them, and the
+refusal says which value — an operand, a `let` initializer, or the inside of
+a call's arguments, where the arguments written before the exit have already
+produced values it cannot give back. The argument refusal stops one level
+short of the language: `(f (if c (return 0) 1))` is refused because the
+branch is written inside an argument, while `(let branch (if c (return 0) 1))`
+is legal and is the shape the fixtures use. Deciding which paths leave also
+needed a better answer than "some expression in the body returns": a `return`
+written below a `continue` never runs, and counting it made a loop body look
+like one that always leaves, which silently excused a move the next iteration
+would repeat. Divergence is now one enum with three values — falls through,
+leaves without leaving the function, leaves the function — walked in order
+inside a `do` and across the branches of an `if` and the arms of a `match`,
+so an unreachable tail is not a path and the merge points read the same
+answer `sema` did. MIR's own flag follows: a merge that only some path
+reaches stops emitting edges and drops the moment no path arrives, and a loop
+resets the flag at its own exit, because a `break` inside a loop body leaves
+the loop and not the branch that encloses it.
+
+The word is a form head, so a function may not be named it: every call would
+read `(return ...)` as the form before it read as a call. The refusal is for
+declarations, not for bindings and parameters, because a binding is read as a
+value and the standard library has a parameter named `set`; the general
+question — whether every form head should be refused at every name birth —
+is not this decision's and remains open.

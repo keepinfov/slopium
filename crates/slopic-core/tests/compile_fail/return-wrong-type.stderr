@@ -1,0 +1,4 @@
+return-wrong-type.slp:4:11: error[SL0200]: expected `i32`, found `String`
+  |
+ 4 |   (return "text"))
+  |           ^^^^^^

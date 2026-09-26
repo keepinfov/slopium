@@ -530,6 +530,7 @@ impl<'a> SymbolIndexBuilder<'a> {
                     self.expr(value, scope, bindings);
                 }
             }
+            TExprKind::Return(value) => self.expr(value, scope, bindings),
             // A `const` use is a reference to the declaration, the way a `fn`
             // named as a value is (`D-121`), so hover and rename follow it
             // even though the literal is already here.

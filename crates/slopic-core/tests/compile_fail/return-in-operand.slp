@@ -1,0 +1,4 @@
+; A `return` is a statement, and an operator's operand is a value's place
+; (`D-163`).
+(fn main () -> i32
+  (- (return 0)))

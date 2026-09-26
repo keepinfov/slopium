@@ -1,0 +1,6 @@
+continue-then-return.slp:10:10: error[SL0300]: `s` is moved inside a loop body
+  |
+10 |     (eat s)
+  |          ^
+  = label 9:3: this loop can run more than once
+  = help: move it before the loop, `clone` it inside the loop, or reassign `s` with `set` after the move
