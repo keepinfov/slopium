@@ -1,0 +1,35 @@
+straight defer
+left early
+straight defer
+fell through
+branched defer
+branch taken
+branched defer
+branch not
+chosen defer
+the first
+chosen defer
+the rest
+carried defer
+carried out
+carried defer
+carried out
+loop defer
+inner defer
+inner defer
+loop defer
+outer defer
+found it
+nested one
+nested
+fall nested
+broke out
+no loop
+41
+42
+3
+unload defer
+unloaded
+7
+3
+90

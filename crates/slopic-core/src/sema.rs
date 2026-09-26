@@ -157,6 +157,7 @@ pub enum TExprKind {
     },
     Break(Option<Box<TExpr>>),
     Continue,
+    Return(Box<TExpr>),
     Match {
         value: Box<TExpr>,
         arms: Vec<TMatchArm>,
@@ -701,6 +702,13 @@ struct Analyzer<'a> {
     /// around a `lambda` body, which is a function that happens to be written
     /// inside an argument rather than part of one.
     argument_depth: usize,
+    /// Whether the expression about to be typed sits where a statement goes
+    /// (`D-163`). A `return` is a statement, so a branch, an arm, a loop body
+    /// and the body of a function raise this for what they type; everywhere
+    /// else it stays down and a `return` there is refused. The expression
+    /// sites raise it themselves rather than inheriting it, because a `do`
+    /// used as a value is as much a value as a call argument.
+    statement: bool,
     language_items: crate::LanguageItems,
     validate_entry_point: bool,
     current_return_type: Option<Type>,
@@ -915,6 +923,7 @@ impl<'a> Analyzer<'a> {
             type_arities,
             active_type_params: HashSet::new(),
             argument_depth: 0,
+            statement: false,
             language_items: language_items.clone(),
             validate_entry_point,
             current_return_type: None,
@@ -1011,7 +1020,13 @@ impl<'a> Analyzer<'a> {
             self.current_module = module_of(&test.name);
             self.env = Environment::default();
             self.env.push();
+            // A test lowers as a function whose result is the truth it asserts
+            // (`D-156`), so a `return` inside one leaves the test, with the
+            // same result the last expression would have carried.
+            self.current_return_type = Some(Type::Bool);
+            self.statement = true;
             let body = self.expr(&test.body, Some(&Type::Bool));
+            self.current_return_type = None;
             self.env.pop();
             tests.push(TypedTest {
                 name: test.name.clone(),
@@ -1554,6 +1569,7 @@ impl<'a> Analyzer<'a> {
         }
         let return_type = self.normalize_type(&function.return_type, function.span);
         self.current_return_type = Some(return_type.clone());
+        self.statement = true;
         let body = self.expr(&function.body, Some(&return_type));
         self.current_return_type = None;
         self.env.pop();
@@ -1572,6 +1588,11 @@ impl<'a> Analyzer<'a> {
     }
 
     fn expr(&mut self, expr: &Expr, expected: Option<&Type>) -> TExpr {
+        // Consumed, not read: every subexpression defaults to a value, and
+        // the body-shaped arms below raise the flag again for what they type
+        // (`D-163`). A flag left standing would leak the position of one
+        // expression into the next sibling typed after it.
+        let statement = std::mem::take(&mut self.statement);
         let typed = match &expr.kind {
             ExprKind::Unit => self.typed(expr, Type::Unit, TExprKind::Unit),
             ExprKind::Bool(value) => self.typed(expr, Type::Bool, TExprKind::Bool(*value)),
@@ -1648,7 +1669,7 @@ impl<'a> Analyzer<'a> {
                 )
             }
             ExprKind::Set { name, value } => self.set(expr, name, value),
-            ExprKind::Do(expressions) => self.do_expr(expr, expressions, expected),
+            ExprKind::Do(expressions) => self.do_expr(expr, expressions, expected, statement),
             ExprKind::Compose {
                 rightward,
                 operands,
@@ -1660,7 +1681,7 @@ impl<'a> Analyzer<'a> {
             // neither MIR nor either backend learns the word (`D-067`).
             ExprKind::Unsafe(expressions) => {
                 self.unsafe_depth += 1;
-                let typed = self.do_expr(expr, expressions, expected);
+                let typed = self.do_expr(expr, expressions, expected, statement);
                 self.unsafe_depth -= 1;
                 typed
             }
@@ -1674,6 +1695,7 @@ impl<'a> Analyzer<'a> {
                 self.loop_expr(expr, Some(condition), body, expected)
             }
             ExprKind::Break(value) => self.break_expr(expr, value.as_deref()),
+            ExprKind::Return(value) => self.return_expr(expr, value, expected, statement),
             ExprKind::Continue => {
                 self.refuse_leaving_a_defer(expr.span, "continue");
                 if self.loops.is_empty() {
@@ -2165,7 +2187,13 @@ impl<'a> Analyzer<'a> {
         )
     }
 
-    fn do_expr(&mut self, expr: &Expr, expressions: &[Expr], expected: Option<&Type>) -> TExpr {
+    fn do_expr(
+        &mut self,
+        expr: &Expr,
+        expressions: &[Expr],
+        expected: Option<&Type>,
+        statement: bool,
+    ) -> TExpr {
         self.env.push();
         let mut typed = Vec::new();
         for (index, item) in expressions.iter().enumerate() {
@@ -2174,6 +2202,11 @@ impl<'a> Analyzer<'a> {
             } else {
                 None
             };
+            // Only a `do` that is itself in statement position passes that
+            // position on: `(f (do a (return b) c))` evaluates its arguments
+            // before the call, so a `return` in there would strand whatever
+            // the earlier arguments already own.
+            self.statement = statement;
             typed.push(self.expr(item, item_expected));
             let mut live_names = HashSet::new();
             for remaining in &expressions[index + 1..] {
@@ -2289,25 +2322,52 @@ impl<'a> Analyzer<'a> {
         let base = self.env.clone();
 
         self.env.push();
+        self.statement = true;
         let then_expr = self.expr(then_expr, expected);
         self.env.pop();
         let then_env = self.env.clone();
 
+        // A branch that always leaves produces nothing, so the other branch
+        // decides the type on its own (`D-163`).
+        let then_leaves = always_returns(&then_expr);
         self.env = base.clone();
         self.env.push();
-        let else_expr = self.expr(else_expr, Some(&then_expr.ty));
+        let else_expected = if then_leaves {
+            expected
+        } else {
+            Some(&then_expr.ty)
+        };
+        self.statement = true;
+        let else_expr = self.expr(else_expr, else_expected);
         self.env.pop();
         let else_env = self.env.clone();
+        // A branch that always leaves takes nothing with it that the other
+        // path could still want: it is not a path (`D-163`). Without this, a
+        // guard returning early would spend every value it named, and the
+        // move would outlive the branch that never ran.
+        let else_leaves = always_returns(&else_expr);
 
         self.env = base;
         for (id, binding) in &mut self.env.bindings {
-            let left = then_env.bindings.get(id).map(|b| b.state);
-            let right = else_env.bindings.get(id).map(|b| b.state);
+            let left = then_env
+                .bindings
+                .get(id)
+                .map(|b| b.state)
+                .filter(|_| !then_leaves);
+            let right = else_env
+                .bindings
+                .get(id)
+                .map(|b| b.state)
+                .filter(|_| !else_leaves);
             if left == Some(OwnershipState::Moved) || right == Some(OwnershipState::Moved) {
                 binding.state = OwnershipState::Moved;
             }
         }
-        let ty = then_expr.ty.clone();
+        let ty = if then_leaves {
+            else_expr.ty.clone()
+        } else {
+            then_expr.ty.clone()
+        };
         self.typed(
             expr,
             ty,
@@ -2420,6 +2480,77 @@ impl<'a> Analyzer<'a> {
         self.typed(expr, Type::Unit, TExprKind::Break(Some(Box::new(value))))
     }
 
+    /// `(return expression)`: the function's result, from any depth (`D-163`).
+    ///
+    /// The expression is typed against the function's result, and the form
+    /// itself carries whatever the context around it expects — it produces
+    /// nothing, so any expectation is satisfied by the exit that always
+    /// happens. That is the whole of the coercion an early exit needs: the
+    /// language has no bottom type and is not getting one (`D-130`), and a
+    /// form that never answers does not need one to agree with a `loop` body
+    /// that owes a `unit` or a branch that owes a value.
+    ///
+    /// The nearest function is the one a `return` leaves: a `lambda` body has
+    /// its own result, and a `return` written in one leaves the lambda, not
+    /// the function the lambda was written in, for the same reason a `break`
+    /// leaves the nearest loop.
+    fn return_expr(
+        &mut self,
+        expr: &Expr,
+        value: &Expr,
+        expected: Option<&Type>,
+        statement: bool,
+    ) -> TExpr {
+        // A `return` is a statement, so it is refused where a value is being
+        // built (`D-163`). The two refusals say different things: a `return`
+        // in a `let` value or an operator operand is in the wrong place, and
+        // one buried in a call's arguments would fire after the arguments
+        // before it had already produced owned temporaries that the exit
+        // never gives back. A `return` in a `defer` gets the defer's own
+        // refusal below instead: that is the reason it cannot run at all.
+        if self.defers.is_empty() && !statement {
+            self.diagnostics.push(
+                Diagnostic::error(
+                    codes::NAME_OR_TYPE,
+                    self.file,
+                    expr.span,
+                    "`return` is written where a value is expected",
+                )
+                .with_help("write it as a statement — under a `when`, in a branch or an arm, at the end of a loop body — or name the value and return normally"),
+            );
+        } else if self.defers.is_empty() && self.argument_depth > 0 {
+            self.diagnostics.push(
+                Diagnostic::error(
+                    codes::NAME_OR_TYPE,
+                    self.file,
+                    expr.span,
+                    "`return` is written inside a call's arguments",
+                )
+                .with_help("the arguments written before it have already produced values the exit cannot give back; bind the branch to a name first"),
+            );
+        }
+        // A deferred body runs while its scope is already ending, whatever
+        // ends it, so a `return` written in one asks the exit to happen again
+        // from inside it. A loop the body opened for itself does not help:
+        // the loop ends with the scope, and a `lambda` written inside a defer
+        // clears the stack, because a function value may be called after the
+        // scope is long gone.
+        if !self.defers.is_empty() {
+            self.error(
+                expr.span,
+                "`return` cannot be written inside a `defer`; the function is already leaving",
+            );
+        }
+        let Some(result) = self.current_return_type.clone() else {
+            self.error(expr.span, "`return` can only be used inside a function");
+            let value = self.expr(value, None);
+            return self.typed(expr, Type::Unit, TExprKind::Return(Box::new(value)));
+        };
+        let value = self.expr(value, Some(&result));
+        let ty = expected.cloned().unwrap_or(result);
+        self.typed(expr, ty, TExprKind::Return(Box::new(value)))
+    }
+
     /// Records what this loop produces, or reports that its breaks disagree.
     ///
     /// The first `break` decides and the rest are typed against it, so the only
@@ -2472,6 +2603,7 @@ impl<'a> Analyzer<'a> {
             result: expected.filter(|_| condition.is_none()).cloned(),
         });
         self.env.push();
+        self.statement = true;
         let body = Box::new(self.expr(body, Some(&Type::Unit)));
         self.env.pop();
         let frame = self.loops.pop().expect("the frame was just pushed");
@@ -2481,16 +2613,23 @@ impl<'a> Analyzer<'a> {
             frame.result.unwrap_or(Type::Unit)
         };
 
-        let mut escaped = owned_on_entry
-            .into_iter()
-            .filter(|id| {
-                self.env
-                    .bindings
-                    .get(id)
-                    .is_some_and(|binding| binding.state == OwnershipState::Moved)
-            })
-            .filter_map(|id| self.move_sites.get(&id).map(|span| (id, *span)))
-            .collect::<Vec<_>>();
+        // A body that always leaves runs at most once, whatever the loop
+        // around it says: every move in it left with the exit, and there is no
+        // second iteration to refuse on its behalf (`D-163`).
+        let mut escaped = if always_returns(&body) {
+            Vec::new()
+        } else {
+            owned_on_entry
+                .into_iter()
+                .filter(|id| {
+                    self.env
+                        .bindings
+                        .get(id)
+                        .is_some_and(|binding| binding.state == OwnershipState::Moved)
+                })
+                .filter_map(|id| self.move_sites.get(&id).map(|span| (id, *span)))
+                .collect::<Vec<_>>()
+        };
         escaped.sort_by_key(|(_, span)| (span.start, span.end));
         for (id, span) in escaped {
             // Forget the site so an enclosing loop does not report the same
@@ -2895,9 +3034,10 @@ impl<'a> Analyzer<'a> {
                 wildcard = true;
             }
             if guarded {
+                self.statement = true;
                 let body = self.expr(&arm.body, result_type.as_ref());
                 self.env.pop();
-                if result_type.is_none() {
+                if result_type.is_none() && !always_returns(&body) {
                     result_type = Some(body.ty.clone());
                 }
                 arm_environments.push(self.env.clone());
@@ -2930,9 +3070,12 @@ impl<'a> Analyzer<'a> {
             if !seen.insert(format!("pattern:{pattern_key}")) && !pattern_irrefutable(&pattern) {
                 self.error(arm.pattern.span, "duplicate match pattern");
             }
+            self.statement = true;
             let body = self.expr(&arm.body, result_type.as_ref());
             self.env.pop();
-            if result_type.is_none() {
+            // An arm that always leaves produces nothing and agrees with
+            // whatever the others produce (`D-163`).
+            if result_type.is_none() && !always_returns(&body) {
                 result_type = Some(body.ty.clone());
             }
             arm_environments.push(self.env.clone());
@@ -2946,12 +3089,24 @@ impl<'a> Analyzer<'a> {
         self.pattern_borrow = outer_borrow;
         self.env = base;
         if !arm_environments.is_empty() {
+            // An arm that always leaves is not a path through the `match`
+            // (`D-163`): what it moved left with it, and an arm that answers
+            // normally may still want the value.
+            let answering: Vec<bool> = typed_arms
+                .iter()
+                .map(|arm| !always_returns(&arm.body))
+                .collect();
             for (id, binding) in &mut self.env.bindings {
-                if arm_environments.iter().any(|env| {
-                    env.bindings
-                        .get(id)
-                        .is_some_and(|item| item.state == OwnershipState::Moved)
-                }) {
+                if arm_environments
+                    .iter()
+                    .zip(answering.iter())
+                    .filter(|(_, answers)| **answers)
+                    .any(|(env, _)| {
+                        env.bindings
+                            .get(id)
+                            .is_some_and(|item| item.state == OwnershipState::Moved)
+                    })
+                {
                     binding.state = OwnershipState::Moved;
                 }
             }
@@ -3600,6 +3755,12 @@ impl<'a> Analyzer<'a> {
         self.enclosing.push(std::mem::take(&mut self.env));
         let outer_pattern_borrow = self.pattern_borrow.take();
         let outer_return_type = self.current_return_type.take();
+        // The scope a `defer` is ending does not cross in either (`D-163`): a
+        // function value may be called long after that scope is gone, so a
+        // `return` written in a `lambda` inside a deferred body leaves the
+        // `lambda`, and is not the re-entrant exit it would be in the body
+        // itself.
+        let outer_defers = std::mem::take(&mut self.defers);
         // The permission does not cross into the body (`D-067`). A `lambda`
         // written inside an `unsafe` block is still a function value that can
         // be called from anywhere, so its body has to ask for the permission
@@ -3689,12 +3850,16 @@ impl<'a> Analyzer<'a> {
         // argument: its body has its own expressions, and a temporary borrowed
         // there would have no call to die after (`D-126`).
         let enclosing_arguments = std::mem::take(&mut self.argument_depth);
+        // Its body is the lambda's own, so a `return` in it leaves the lambda
+        // even though the lambda itself may be written inside an argument.
+        self.statement = true;
         let typed_body = self.expr(body, Some(&result_type));
         self.argument_depth = enclosing_arguments;
         self.env.pop();
         self.env = self.enclosing.pop().unwrap_or_default();
         self.pattern_borrow = outer_pattern_borrow;
         self.current_return_type = outer_return_type;
+        self.defers = outer_defers;
         self.unsafe_depth = outer_unsafe_depth;
 
         let ty = Type::Fn {
@@ -5095,6 +5260,7 @@ impl<'a> Analyzer<'a> {
                     self.materialize_typed_expr(value);
                 }
             }
+            TExprKind::Return(value) => self.materialize_typed_expr(value),
             TExprKind::Const { value, .. } => self.materialize_typed_expr(value),
             TExprKind::Unit
             | TExprKind::Bool(_)
@@ -5699,6 +5865,7 @@ fn collect_variable_names(expr: &Expr, output: &mut HashSet<String>) {
                 collect_variable_names(value, output);
             }
         }
+        ExprKind::Return(value) => collect_variable_names(value, output),
         ExprKind::Unit
         | ExprKind::Bool(_)
         | ExprKind::Int(_)
@@ -5716,6 +5883,67 @@ fn pattern_irrefutable(pattern: &TPattern) -> bool {
             .all(|field| pattern_irrefutable(&field.pattern)),
         TPattern::Bool(_) | TPattern::Int(_) | TPattern::Enum { .. } => false,
     }
+}
+
+/// How an expression's evaluation can end (`D-163`).
+///
+/// Ordered, not membership: the expressions after one that does not fall
+/// through are unreachable, so a `return` written below a `continue` in one
+/// `do` never runs and must not count as the `do` leaving the function. The
+/// merge points ask for [`Divergence::Exits`] — a path that always leaves
+/// produces nothing, moves nothing the other path still owns, and agrees with
+/// whatever the other path answers — which is the coercion a language without
+/// a bottom type (`D-130`) gives an exit that always happens.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Divergence {
+    /// Evaluation reaches what follows.
+    FallsThrough,
+    /// Evaluation ends without falling through and without leaving the
+    /// function: a `break` or a `continue`.
+    Leaves,
+    /// Evaluation ends by leaving the function: a `return`.
+    Exits,
+}
+
+impl Divergence {
+    fn combine(self, other: Divergence) -> Divergence {
+        match (self, other) {
+            (Divergence::Exits, Divergence::Exits) => Divergence::Exits,
+            (Divergence::FallsThrough, Divergence::FallsThrough) => Divergence::FallsThrough,
+            _ => Divergence::Leaves,
+        }
+    }
+}
+
+fn divergence(expression: &TExpr) -> Divergence {
+    match &expression.kind {
+        TExprKind::Return(_) => Divergence::Exits,
+        TExprKind::Break(_) | TExprKind::Continue => Divergence::Leaves,
+        // In order: the first expression that does not fall through decides,
+        // because the rest never runs — a `return` the loop's second
+        // iteration would have reached is not a `return` at all.
+        TExprKind::Do(items) => items
+            .iter()
+            .map(divergence)
+            .find(|divergence| *divergence != Divergence::FallsThrough)
+            .unwrap_or(Divergence::FallsThrough),
+        TExprKind::If {
+            then_expr,
+            else_expr,
+            ..
+        } => divergence(then_expr).combine(divergence(else_expr)),
+        TExprKind::Match { arms, .. } => arms
+            .iter()
+            .map(|arm| divergence(&arm.body))
+            .reduce(Divergence::combine)
+            .unwrap_or(Divergence::FallsThrough),
+        _ => Divergence::FallsThrough,
+    }
+}
+
+/// Whether evaluating this expression always leaves the function (`D-163`).
+fn always_returns(expression: &TExpr) -> bool {
+    divergence(expression) == Divergence::Exits
 }
 
 fn contains_parameter(ty: &Type, parameters: &HashSet<String>) -> bool {
@@ -6284,6 +6512,7 @@ fn specialize_expr(
                 specialize_expr(value, substitutions, queue);
             }
         }
+        TExprKind::Return(value) => specialize_expr(value, substitutions, queue),
         TExprKind::Const { value, .. } => specialize_expr(value, substitutions, queue),
         TExprKind::Unit
         | TExprKind::Bool(_)
@@ -6451,6 +6680,71 @@ mod tests {
                   (consume s)
                   (set i (+ i 1))))
               0)
+        "#;
+        analyze_source(source).unwrap();
+    }
+
+    /// A `return` written below a `continue` never runs, so it is not the
+    /// loop body's way out: the move before the `continue` is still a move
+    /// the next iteration would repeat (`D-163`). Reading the body as one
+    /// that always leaves excused the move and freed the same string twice.
+    #[test]
+    fn a_return_below_a_continue_does_not_excuse_the_move_above_it() {
+        let source = r#"
+            (fn consume ((value String)) -> unit ())
+            (fn main () -> i32
+              (let s "hello")
+              (loop
+                (consume s)
+                (continue)
+                (return 0))
+              0)
+        "#;
+        let errors = analyze_source(source).unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|error| error.message.contains("moved inside a loop body")));
+    }
+
+    /// A `return` is a statement, so a `let` value is not one of the places
+    /// it may be written (`D-163`).
+    #[test]
+    fn refuses_a_return_where_a_value_is_built() {
+        let source = r#"
+            (fn main () -> i32
+              (let value (return 0))
+              value)
+        "#;
+        let errors = analyze_source(source).unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|error| error.message.contains("where a value is expected")));
+    }
+
+    /// An argument list is a value's place too, and the arguments before the
+    /// exit have already produced values it cannot give back (`D-163`).
+    #[test]
+    fn refuses_a_return_inside_a_calls_arguments() {
+        let source = r#"
+            (fn take ((value i64)) -> i32 0)
+            (fn main () -> i32
+              (take (if true (return 0) 1)))
+        "#;
+        let errors = analyze_source(source).unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|error| error.message.contains("inside a call's arguments")));
+    }
+
+    /// A branch written where a value is bound is a body, so a `return` in one
+    /// of its arms is legal: nothing owned has been produced when it runs.
+    #[test]
+    fn accepts_a_branch_that_returns_where_a_value_is_bound() {
+        let source = r#"
+            (fn pick ((n i64)) -> i64
+              (let early (if (= n 1) (return 41) 0))
+              early)
+            (fn main () -> i32 0)
         "#;
         analyze_source(source).unwrap();
     }

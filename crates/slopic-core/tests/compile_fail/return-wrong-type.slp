@@ -1,0 +1,4 @@
+; The expression is typed against the function's result, so a `return` of
+; another type is refused at the value (`D-163`).
+(fn main () -> i32
+  (return "text"))

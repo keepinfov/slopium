@@ -1,0 +1,8 @@
+; A function named after a form head could never be called: every call reads
+; as the form first, so the declaration is refused where it is written
+; (`D-163`).
+(fn return ((value i64)) -> i64
+  value)
+
+(fn main () -> i32
+  0)
