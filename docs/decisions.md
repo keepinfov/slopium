@@ -3874,3 +3874,30 @@ initializer runs first — side effects are real whether or not the value exists
 local typed `unit`. Construction is the only lowering that needs this: reads,
 clone, drop and verification were already counting every field, which is why
 they caught the disagreement instead of hiding it.
+
+## D-164 — a closure block nothing reads loses its allocation and its drop
+
+Status: approved · 2026-09-19
+
+`D-141` predicted that a call devirtualized and inlined in one breath would
+leave a block nothing reads, and the prediction held: what remained of
+`((<< double increment) n)` after the two named bodies were spliced in was a
+three-word heap block, built and freed in the same function, holding three
+code addresses no instruction looked at. The release pipeline takes it now.
+A closure layout with no captures is the whole of the eligibility — the body
+it names never mentions its block parameter, because there is nothing in the
+block to read — and the block's value must reach nothing but the word a
+direct call hands to such a body and the block's own drop, through plain
+copies or not at all. The allocation becomes a null word and the drop is
+deleted with it.
+
+The rule this bends is the optimizer's own: "drops are observable" (`D-031`
+temper, stated for passes at v0.3.1) kept every `Drop` and `Free` beyond
+suspicion, because deleting one is freeing memory late and moving one across
+a branch changes when it is freed. The exception is narrower than it sounds:
+the release being deleted is the release of an allocation deleted beside it,
+invented by the compiler rather than asked for by the program, so no
+observable moment moves — the block never had one. A closure that captures
+anything keeps everything: the body reads its captures out of the block, and
+so does a closure that escapes its function by any path, which the use scan
+refuses one use at a time.

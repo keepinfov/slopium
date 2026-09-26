@@ -416,6 +416,24 @@ fi
 # still exits 0.
 assert_patterns "$annotations_project/expected.stderr" "$emit_dir/annotations.mir.stderr"
 
+# A composition built and called in place must not cost an allocation: the
+# devirtualizer names the call, the inliner splices the bodies, and a block
+# nothing reads any more loses its allocation and its drop (`D-164`). What
+# remains of `leftward` is the arithmetic of `double (increment n)` and
+# nothing else.
+composition_project="$projects_dir/pass/composition"
+"$compiler" "$composition_project/src/main.slp" \
+  --source-root "$composition_project/src" --toolchain-dependency std \
+  --optimize --emit mir-text --output "$emit_dir/composition.mir.txt" \
+  2>"$emit_dir/composition.mir.stderr"
+if sed -n '/^fn main:leftward/,/^}/p' "$emit_dir/composition.mir.txt" |
+  grep --quiet --line-regexp 'sl_rt_alloc\|closure'; then
+  echo "project-tests: a composition called in place still pays for its block" >&2
+  sed -n '/^fn main:leftward/,/^}/p' "$emit_dir/composition.mir.txt" >&2
+  exit 1
+fi
+echo "project-tests: a composition called in place costs no allocation ... ok"
+
 # The manager turns debug information on for `dev` and off for `release`, which
 # is what makes a plain `slopium build` debuggable without asking for anything.
 # The linked section is the check rather than a `.loc` directive, because that

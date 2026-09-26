@@ -70,22 +70,29 @@ command-line protocol is internal and versioned, and stays internal at 1.0:
    out of the block and jump to it (`D-101`). Every statement carries the span
    of the expression it came from, and every block is terminated by
    construction.
-8. The release profile runs an optimization pipeline to a fixpoint:
-   devirtualization — a call through a closure block built in the same straight
-   line names the symbol instead of jumping through the block, which runs before
-   inlining because an ordinary call is the only shape the inliner matches
-   (`D-141`) — then bounded inlining, cross-block constant propagation — which stops tracking a local
-   the moment its address is taken, because a C `extern` with an out-parameter
-   writes through that address (`D-124`) — control-flow simplification, and
-   dead code elimination. Two behaviours are preserved by construction —
-   arithmetic that would trap is never folded away or removed, and drops are
-   never deleted or moved across a branch. Inlining does not cross a module
-   boundary, because a module's object is cached on its own body and would go
-   stale if it contained a copy of another module's code. An `inline`
-   annotation raises the two size ceilings for one callee and changes nothing
-   else: every rule that makes inlining sound still decides, which is why the
-   annotation is not part of a module's interface and adding one rebuilds
-   nothing but the module it is written in (`D-122`).
+ 8. The release profile runs an optimization pipeline to a fixpoint:
+    devirtualization — a call through a closure block built in the same straight
+    line names the symbol instead of jumping through the block, which runs before
+    inlining because an ordinary call is the only shape the inliner matches
+    (`D-141`) — then bounded inlining, cross-block constant propagation — which stops tracking a local
+    the moment its address is taken, because a C `extern` with an out-parameter
+    writes through that address (`D-124`) — control-flow simplification, and
+    dead code elimination. Inlining is followed by dead allocation
+    elimination, which takes the block out of a closure whose every remaining
+    use is the word a direct call hands to a body that ignores it and the
+    block's own drop: a closure with no captures is three code addresses and
+    nothing else, so the block becomes a null word and the drop goes with it —
+    the one way a drop is deleted, because the release it was going to perform
+    is the release of the allocation deleted beside it (`D-164`). Two
+    behaviours are preserved by construction —
+    arithmetic that would trap is never folded away or removed, and drops are
+    never deleted or moved across a branch, save that one. Inlining does not cross a module
+    boundary, because a module's object is cached on its own body and would go
+    stale if it contained a copy of another module's code. An `inline`
+    annotation raises the two size ceilings for one callee and changes nothing
+    else: every rule that makes inlining sound still decides, which is why the
+    annotation is not part of a module's interface and adding one rebuilds
+    nothing but the module it is written in (`D-122`).
 
    Two bounds keep a mistake in a pass from hanging the compiler, and they mean
    opposite things (`D-132`). The pipeline's bound is quiet: every pass is
