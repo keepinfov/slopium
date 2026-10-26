@@ -1,0 +1,35 @@
+use std::time::Instant;
+
+const COUNT: i64 = @COUNT@;
+const MODE: u8 = @MODE@;
+
+fn main() {
+    let piece = "@PIECE@";
+    let start = Instant::now();
+    let mut out = String::new();
+    for i in 0..COUNT {
+        match MODE {
+            0 => {
+                out.push_str("item ");
+                out.push_str(&i.to_string());
+                out.push('\n');
+            }
+            1 => out.push_str(piece),
+            _ => out.push_str(&i.to_string()),
+        }
+    }
+    let appended = Instant::now();
+    // Diagnostic control: explicitly copy to an owned final String, like C.
+    // The original Rust kernel keeps its native zero-copy finalization.
+    let text = out.clone();
+    drop(out);
+    let finalized = Instant::now();
+    let sum: i64 = text.bytes().map(i64::from).sum();
+    let checked = Instant::now();
+    let clock_end = Instant::now();
+    println!("{}\n{}", text.len(), sum);
+    println!("{}\n{}\n{}\n{}", appended.duration_since(start).as_nanos(),
+             finalized.duration_since(appended).as_nanos(),
+             checked.duration_since(finalized).as_nanos(),
+             clock_end.duration_since(checked).as_nanos());
+}
