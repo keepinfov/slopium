@@ -1,6 +1,6 @@
 ; Diagnostic copy of the control workload; the original kernel is unchanged.
 (take std:io println-i64)
-(take std:builder new write-str write-i64 write-byte build)
+(take std:builder new write-str write-i64 write-u64 write-byte build)
 (take std:string byte-at)
 (take std:time monotonic)
 (take std:result Result)
@@ -27,7 +27,9 @@
         (write-byte &mut out 10))
       (if (= mode 1)
         (write-str &mut out &piece)
-        (write-i64 &mut out i)))
+        (if (= mode 3)
+          (write-u64 &mut out (- (as u64 18446744073709551615) (as u64 i)))
+          (write-i64 &mut out i))))
     (set i (+ i 1)))
   (let appended (now))
   (let text (build out))

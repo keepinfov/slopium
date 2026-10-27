@@ -15,6 +15,7 @@ fn main() {
                 out.push('\n');
             }
             1 => out.push_str(piece),
+            3 => out.push_str(&(u64::MAX - i as u64).to_string()),
             _ => out.push_str(&i.to_string()),
         }
     }

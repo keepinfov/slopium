@@ -32,6 +32,10 @@ check, not a performance result.
   sum 36,116,720; the runner computes expectations independently.
 - Integers: the same count of successive decimal integers without separators,
   exercising integer formatting and append together.
+- The paired runner also measures long integers: the same counts of unsigned
+  values descending from `u64::MAX`, each twenty decimal digits. C uses
+  unsigned `snprintf`, Rust unsigned `to_string`, and Python independently
+  computes every expected byte count and checksum.
 - Constant pieces: 5, 64 and 4,096 `a` bytes, repeated to approximately 8 KiB,
   512 KiB and 4 MiB. The exact length is `floor(size / piece_width) * piece_width`.
   Checksum therefore reads fixed identical input in each language. This matrix
@@ -128,3 +132,7 @@ remain the statistical unit. The original control is always unchanged and
 runs once; repeated-process wall/RSS numbers describe different lifetimes.
 The [bulk-copy report](2026-10-27-bulk-copy.md) records both fresh-process and
 steady-state results, including uncertainty in small cases.
+
+The [integer-digit report](2026-10-27-integer-digits.md) compares three
+allocation-free alternatives and records the selected implementation’s full
+paired matrix, exact piece-binary identity, profiling evidence and missed goals.

@@ -84,6 +84,7 @@ def main():
     subprocess.run(['cc', '-O2', startup_source, '-o', startup], check=True)
     cases = [(f'{name}-{count}', mode, count, 5) for count in [1000, 50000, 250000]
              for name, mode in [('records', 0), ('integers', 2)]]
+    cases += [(f'long-integers-{count}', 3, count, 5) for count in [1000, 50000, 250000]]
     cases += [(f'pieces-{size}-{width}', 1, size // width, width)
               for size in [8192, 524288, 4194304] for width in [5, 64, 4096]]
     cases += [('original-control', 0, 50000, 5)]
@@ -94,7 +95,9 @@ def main():
     binaries = {}
     for name, mode, count, width in cases:
         expected = (''.join(f'item {i}\n' for i in range(count)) if mode == 0 else
-                    'a' * (width * count) if mode == 1 else ''.join(map(str, range(count))))
+                    'a' * (width * count) if mode == 1 else
+                    ''.join(str(2**64 - 1 - i) for i in range(count)) if mode == 3 else
+                    ''.join(map(str, range(count))))
         case = report['cases'][name] = {'correctness': [len(expected), sum(expected.encode())], 'languages': {}}
         for language, root, suffix in [('before', before, 'slp'), ('after', after, 'slp'),
                                        ('c', after, 'c'), ('rust', after, 'rs')]:

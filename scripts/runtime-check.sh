@@ -200,7 +200,7 @@ cat >"$check_dir/runtime.slp" <<'SLOPIUM'
 (take std:set Set set-of set-add set-discard set-count)
 (take std:time monotonic)
 (take std:random bytes)
-(take std:builder (new :as builder-new) write-str write-byte size build)
+(take std:builder (new :as builder-new) write-str write-byte write-i64 write-u64 size build)
 (take std:panic assert)
 
 (struct Pair ((left String) (right String)))
@@ -353,8 +353,24 @@ cat >"$check_dir/runtime.slp" <<'SLOPIUM'
   (assert (string-equals (& text) (& expected)) (& "builder bytes"))
   (assert (string-equals (& piece) (& "a\0\x80\xffé0123456789")) (& "builder source")))
 
+(fn check-builder-integers () -> unit
+  (let mut out (builder-new))
+  (write-i64 (&mut out) -9223372036854775808)
+  (write-byte (&mut out) 32)
+  (write-i64 (&mut out) 9223372036854775807)
+  (write-byte (&mut out) 32)
+  (write-u64 (&mut out) 18446744073709551615)
+  (write-byte (&mut out) 32)
+  (write-u64 (&mut out) 0)
+  (assert (= (size (& out)) 63) (& "builder integer size"))
+  (let text (build out))
+  (assert (string-equals (& text)
+    (& "-9223372036854775808 9223372036854775807 18446744073709551615 0"))
+    (& "builder integer bytes")))
+
 (fn main () -> i32
   (check-builder)
+  (check-builder-integers)
   (let number
     (match (read-i64)
       ((Option:Some value) value)
