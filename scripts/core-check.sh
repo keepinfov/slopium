@@ -91,13 +91,14 @@ cat > "$work/program.slp" <<'SLP'
 
 ; And a builder, which is `core` because a growing buffer needs an allocator
 ; and not an operating system (`D-145`). Linking it here is what says the
-; module reaches no further than the two string entry points it declares.
+; module reaches no further than the core runtime entry points it declares.
 (fn builder-answer () -> i64
   (let mut out (builder-new))
-  (write-str (&mut out) (& "answer "))
+  (write-str (&mut out) (& ""))
+  (write-str (&mut out) (& "answer \0\xff"))
   (write-i64 (&mut out) 42)
   (let text (build out))
-  (if (equals (& text) (& "answer 42")) 42 0))
+  (if (equals (& text) (& "answer \0\xff42")) 42 0))
 
 ; A volatile access is instructions and never a call (`D-067`), which is what
 ; makes a raw pointer usable in a program with no operating system under it. A

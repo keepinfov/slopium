@@ -231,6 +231,20 @@ void sl_rt_list_push(SlList *list, const void *element) {
     list->len += 1;
 }
 
+/* The list is grown by the caller (`D-124`). Widening a whole piece here
+ * avoids a `sl_rt_string_byte` call for each byte without changing the
+ * word-per-byte representation (`D-145`). */
+void sl_rt_builder_write_bytes(int64_t *elements, int64_t count,
+                               const char *text, int64_t length) {
+    if (length < 0 || count < length) {
+        RT_FAIL("builder buffer too short");
+    }
+    int64_t start = count - length;
+    for (int64_t index = 0; index < length; index += 1) {
+        elements[start + index] = (int64_t)(unsigned char)text[index];
+    }
+}
+
 uint64_t sl_rt_list_len(const SlList *list) {
     return list->len;
 }
