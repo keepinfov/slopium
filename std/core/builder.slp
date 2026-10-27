@@ -10,18 +10,24 @@
 ;
 ; The buffer is a `(List u8)`. Every integer is one machine word wide whatever
 ; its type says, so that is a word per byte — the same shape `core:string`'s
-; `from-bytes` already takes, and the reason this module needs no runtime entry
-; point of its own beyond the two `core:string` also declares.
+; `from-bytes` already takes. Long pieces are copied in one runtime call
+; (`sl_rt_builder_write_bytes`); short pieces skip the extra pass over the
+; buffer. Growing the list still takes one `push` per byte (`D-124`).
 
 (export Builder new write-str write-byte write-i64 write-u64 size build)
 
 (struct Builder ((bytes (List u8|)
 
-; The length travels beside the pointer, because a Slopium string may contain a
-; NUL byte and C would stop at it (`D-079`).
+(extern "sl_rt_string_from_bytes" (bytes-raw (bytes &(Slice u8))) -> String)
+
 (extern "sl_rt_string_byte" (byte-raw (text &String) (length i64) (index i64)) -> i64)
 
-(extern "sl_rt_string_from_bytes" (bytes-raw (bytes &(Slice u8))) -> String)
+; The words are already there — `write-str` grows the buffer first — and this
+; fills the last of them. The string's length is explicit because `&String`
+; crosses as a pointer alone and a piece may contain NUL (`D-079`).
+(extern "sl_rt_builder_write_bytes"
+  (write-bytes-raw (bytes &mut (List u8)) (text &String) (length i64))
+  -> unit)
 
 ; The empty `(list)` takes its element type from the field being built, which
 ; is the same reason `core:map` builds its bucket array in the struct literal.
@@ -36,14 +42,22 @@
   (match into
     ((Builder :bytes bytes) (push bytes byte|)
 
-; One pass over the piece, appending. Nothing is allocated: the buffer grows
-; where it already is, which is the whole of the difference from `concat`.
+; C may not resize a list it was handed (`D-124`), so bulk copying needs a
+; zero-filled tail first. For pieces of at most one word, the second pass and
+; its extra call cost more than reading the source bytes directly.
 (fn write-str ((into &mut Builder) (text &String)) -> unit
   (let width (len text))
   (let mut index 0)
-  (while (< index width)
-    (write-byte into (as u8 (byte-raw text width index)))
-    (set index (+ index 1|)
+  (if (<= width 8)
+    (while (< index width)
+      (write-byte into (as u8 (byte-raw text width index)))
+      (set index (+ index 1)))
+    (match into
+      ((Builder :bytes bytes)
+        (while (< index width)
+          (push bytes (as u8 0))
+          (set index (+ index 1)))
+        (write-bytes-raw bytes text width|)
 
 ; The digits go in least significant first and come back out reversed, so a
 ; number costs one small list rather than one `String` per digit — which is

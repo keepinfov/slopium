@@ -91,6 +91,59 @@ if [ -n "$abi_beyond" ]; then
 fi
 echo "runtime-check: the runtime objects against docs/runtime-abi.md ... ok"
 
+# The library only passes valid lengths. Exercise the helper's public C
+# contract directly too, including failures before any pointer is touched.
+cat >"$check_dir/builder-abi.c" <<'BUILDER'
+#include <assert.h>
+#include <stdint.h>
+#include <string.h>
+
+void sl_rt_builder_write_bytes(int64_t *, int64_t, const char *, int64_t);
+
+int main(int argc, char **argv) {
+    if (argc == 2) {
+        if (strcmp(argv[1], "negative-count") == 0) {
+            sl_rt_builder_write_bytes(NULL, INT64_MIN, NULL, 0);
+        } else if (strcmp(argv[1], "negative-length") == 0) {
+            sl_rt_builder_write_bytes(NULL, 0, NULL, INT64_MIN);
+        } else if (strcmp(argv[1], "short-tail") == 0) {
+            sl_rt_builder_write_bytes(NULL, 2, NULL, 3);
+        }
+        return 1;
+    }
+    sl_rt_builder_write_bytes(NULL, 0, NULL, 0);
+    sl_rt_builder_write_bytes(NULL, INT64_MAX, NULL, 0);
+    int64_t words[] = {777, -1, -1, -1, -1, 888};
+    const char text[] = {'A', 0, (char)0x80, (char)0xff};
+    sl_rt_builder_write_bytes(words, 5, text, 4);
+    assert(words[0] == 777 && words[5] == 888);
+    assert(words[1] == 65 && words[2] == 0);
+    assert(words[3] == 128 && words[4] == 255);
+    return 0;
+}
+BUILDER
+cc -g -fsanitize=address -fno-omit-frame-pointer \
+  -o "$check_dir/builder-abi" "$check_dir/builder-abi.c" \
+  "$workspace_dir/runtime/slop_rt_core.c" "$workspace_dir/runtime/slop_rt_hosted.c"
+ASAN_OPTIONS=detect_leaks="${SLOPIUM_ASAN_DETECT_LEAKS:-0}":halt_on_error=1 \
+  "$check_dir/builder-abi"
+for failure in negative-count negative-length short-tail; do
+  if ASAN_OPTIONS=detect_leaks="${SLOPIUM_ASAN_DETECT_LEAKS:-0}":halt_on_error=1 \
+    "$check_dir/builder-abi" "$failure" >"$check_dir/builder-abi.out" 2>&1; then
+    echo "runtime-check: builder helper accepted $failure" >&2
+    exit 1
+  else
+    builder_status=$?
+  fi
+  if [[ "$builder_status" != 101 ]] ||
+     ! grep -Fxq 'slopium runtime error: builder buffer too short' "$check_dir/builder-abi.out"; then
+    echo "runtime-check: builder helper did not reject $failure with its diagnostic" >&2
+    cat "$check_dir/builder-abi.out" >&2
+    exit 1
+  fi
+done
+echo "runtime-check: builder copy bounds and byte widening under ASan ... ok"
+
 # The C an `extern` reaches. Under ASan this is where a borrow handed across
 # the boundary is checked for real: the pointer must be live, and a `String`'s
 # must be NUL-terminated, or `strlen` walks off the allocation.
@@ -147,6 +200,8 @@ cat >"$check_dir/runtime.slp" <<'SLOPIUM'
 (take std:set Set set-of set-add set-discard set-count)
 (take std:time monotonic)
 (take std:random bytes)
+(take std:builder (new :as builder-new) write-str write-byte size build)
+(take std:panic assert)
 
 (struct Pair ((left String) (right String)))
 (enum Message Empty (Text ((value String))))
@@ -278,7 +333,28 @@ cat >"$check_dir/runtime.slp" <<'SLOPIUM'
 (fn stepped ((value i64)) -> i64
   (+ value 1))
 
+; Empty buffers can have a null element pointer. A nonempty prefix followed by
+; enough pieces to reallocate catches a stale pointer or a wrong tail offset;
+; embedded NUL and high bytes catch C-string and signed-char copies.
+(fn check-builder () -> unit
+  (let mut out (builder-new))
+  (write-str (&mut out) (& ""))
+  (write-byte (&mut out) 62)
+  (let piece "a\0\x80\xffé0123456789")
+  (let mut expected ">")
+  (let mut index 0)
+  (while (< index 100)
+    (write-str (&mut out) (& piece))
+    (set expected (concat (& expected) (& piece)))
+    (set index (+ index 1)))
+  (write-str (&mut out) (& ""))
+  (assert (= (size (& out)) 1601) (& "builder size"))
+  (let text (build out))
+  (assert (string-equals (& text) (& expected)) (& "builder bytes"))
+  (assert (string-equals (& piece) (& "a\0\x80\xffé0123456789")) (& "builder source")))
+
 (fn main () -> i32
+  (check-builder)
   (let number
     (match (read-i64)
       ((Option:Some value) value)

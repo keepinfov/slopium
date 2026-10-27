@@ -68,3 +68,30 @@
   (let mut out (new))
   (write-f64 &mut out 0.1)
   (equal-text &(build out) &"0.10000000000000001"))
+
+(test "empty pieces leave empty and populated buffers alone"
+  (let mut out (new))
+  (write-str &mut out &"")
+  (write-str &mut out &"prefix")
+  (write-str &mut out &"")
+  (and (= (size &out) 6) (equal-text &(build out) &"prefix")))
+
+(test "bulk copies preserve NUL high bytes and UTF-8 after a prefix"
+  (let mut out (new))
+  (write-byte &mut out 62)
+  (write-str &mut out &"a\0\x80\xffé0123456789")
+  (write-str &mut out &"tail")
+  (and (= (size &out) 21) (equal-text &(build out) &">a\0\x80\xffé0123456789tail")))
+
+(test "repeated bulk copies survive growth and leave their source unchanged"
+  (let mut out (new))
+  (let piece "0123456789abcdef\0\xff")
+  (let mut expected "")
+  (let mut index 0)
+  (while (< index 100)
+    (write-str &mut out &piece)
+    (set expected (concat &expected &piece))
+    (set index (+ index 1)))
+  (and (= (size &out) 1800)
+       (equal-text &piece &"0123456789abcdef\0\xff")
+       (equal-text &(build out) &expected)))

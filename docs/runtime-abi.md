@@ -132,6 +132,8 @@ uint64_t sl_rt_list_remove(SlList *list, uint64_t index);
 uint64_t sl_rt_list_replace(SlList *list, uint64_t index, const void *element);
 SlList *sl_rt_list_clone(const SlList *source);
 void sl_rt_list_drop(SlList *list);
+void sl_rt_builder_write_bytes(int64_t *elements, int64_t count,
+                               const char *text, int64_t length);
 ```
 
 A list owns its elements. `sl_rt_list_new` returns an empty list the caller
@@ -146,6 +148,19 @@ list's own storage: a borrow, never freed by the holder, and invalid once the
 list grows or drops. `sl_rt_list_clone` copies deeply through `clone_element`;
 `sl_rt_list_drop` consumes the list, releasing each element through
 `drop_element`, and accepts null as a no-op.
+
+`sl_rt_builder_write_bytes` is the one list entry written for a library rather
+than for the compiler (`D-145`): it fills the last `length` of the list's
+`count` elements with the low byte of each source byte, which is how
+`core:builder`'s `write-str` copies pieces longer than eight bytes in one call.
+The caller has already grown the list — `count` is its length and `length` is
+the piece's, so `count - length` is where the copy starts — because the buffer
+rule above holds here too: C may not resize the list it was handed (`D-124`).
+The library still pushes one element per byte before that call. Both counts
+must be nonnegative and `count >= length`; otherwise the helper panics. An
+empty piece writes nothing, so a null element pointer is valid when `count`
+is zero. The source is borrowed for the call and may contain NUL or arbitrary
+bytes; each byte is widened unsigned into one word.
 
 ### Slices
 

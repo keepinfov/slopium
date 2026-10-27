@@ -177,6 +177,7 @@ of what was believed at the time is the part worth keeping.
 - [D-162 — a `unit` field owns a word like any other field](#d-162--a-unit-field-owns-a-word-like-any-other-field)
 - [D-163 — `return` leaves the nearest function, and the word is spent on it](#d-163--return-leaves-the-nearest-function-and-the-word-is-spent-on-it)
 - [D-164 — a closure block nothing reads loses its allocation and its drop](#d-164--a-closure-block-nothing-reads-loses-its-allocation-and-its-drop)
+- [D-165 — packed byte storage needs its own measurement first](#d-165--packed-byte-storage-needs-its-own-measurement-first)
 
 ## D-001 — a native compiler, without LLVM
 
@@ -3970,3 +3971,42 @@ observable moment moves — the block never had one. A closure that captures
 anything keeps everything: the body reads its captures out of the block, and
 so does a closure that escapes its function by any path, which the use scan
 refuses one use at a time.
+
+## D-165 — packed byte storage needs its own measurement first
+
+Status: deferred · 2026-10-25
+
+`core:builder` grows a `(List u8)`, whose elements are machine words (`D-107`).
+The benchmark's 540 KB document therefore uses 4.3 MB of live buffer elements
+before spare capacity. The snapshot in `bench/README.md` records 9.5 MB peak
+RSS for Slopium and 2.3 MB for C.
+
+The minimum optimization adds `sl_rt_builder_write_bytes`: `write-str` sizes
+the buffer and C widens long pieces into its tail. Pieces of at most eight
+bytes keep a direct loop: pre-filling and copying them costs more than reading
+their bytes once, and the five-byte pieces in the benchmark regress without
+this path. This supersedes `D-145`'s use of `sl_rt_string_byte` for every piece.
+A borrowed list supplies a pointer/count pair (`D-124`), and the source
+string's pointer is followed by its explicitly passed byte length, so no
+compiler change is needed. Buffer growth still calls `push` for each byte:
+only the `sl_rt_string_byte` calls for long pieces disappear, and the factor
+of eight remains. Making a byte cost a byte would require packed storage,
+with matching compiler loads, stores, and runtime element handling.
+
+That is a representation change, not a library one. A list element's width is
+an ABI fact that `runtime-abi.md` states in prose — a list element is one
+machine word wide as a value — and three layers read it: lowering sizes the
+push, both backends load and store the element, and every borrow of an element
+takes an address whose stride changes. It also changes every
+`(List i64)`-shaped `extern` that means bytes today, `sl_rt_string_from_bytes`
+among them, and it leaves `(Ptr u8)` arithmetic over a packed list meaning
+what it always meant while reads through `get-ref` change identity.
+
+Deferred rather than rejected: `D-145` retained word-sized elements to avoid
+adding a collection representation to a library change. A packed design needs
+the builder kernel's peak RSS beside the C one, plus a workload that reads
+and writes the resulting collection, so the memory win is measured alongside
+the cost of narrow accesses. The design question to settle first is whether
+the rule is per element type — small integers and `bool` pack, every other
+list stays a word — or a second collection type, and what a `(List u8)`
+crossed to C as a slice means then.
