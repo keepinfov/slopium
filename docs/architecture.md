@@ -83,7 +83,10 @@ command-line protocol is internal and versioned, and stays internal at 1.0:
     block's own drop: a closure with no captures is three code addresses and
     nothing else, so the block becomes a null word and the drop goes with it —
     the one way a drop is deleted, because the release it was going to perform
-    is the release of the allocation deleted beside it (`D-164`). Two
+    is the release of the allocation deleted beside it (`D-164`). Copies are
+    safe only when both locals belong to the proven alias set: a merge local
+    with multiple definitions is excluded, so assigning a closure to it keeps
+    the allocation even if its later return or use is through that local. Two
     behaviours are preserved by construction —
     arithmetic that would trap is never folded away or removed, and drops are
     never deleted or moved across a branch, save that one. Inlining does not cross a module

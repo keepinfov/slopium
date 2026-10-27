@@ -1,0 +1,23 @@
+(take std:io println-i64)
+
+(fn double ((value i64)) -> i64
+  (* value 2))
+
+(fn add-ten ((value i64)) -> i64
+  (+ value 10))
+
+; Both branches assign an owned function to the same return local. Each
+; allocation must survive the merge and remain callable by its receiver.
+(fn pick ((doubling bool)) -> (Fn (i64) i64)
+  (if doubling double add-ten))
+
+(fn apply ((action (Fn (i64) i64)) (value i64)) -> i64
+  (action value))
+
+(fn main () -> i32
+  (println-i64 (apply (pick false) 5))
+  (println-i64 (apply (pick true) 5))
+  0)
+
+(test "returned branch closures retain their code and drop helpers"
+  (and (= (apply (pick false) 5) 15) (= (apply (pick true) 5) 10)))
