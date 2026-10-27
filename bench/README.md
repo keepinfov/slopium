@@ -34,6 +34,11 @@ python3 bench/run.py --kernels fib,mandelbrot       # two kernels only
 python3 bench/run.py --quick                        # while editing kernels
 ```
 
+For builder-specific attribution, [the phase probes](builder-phases/README.md)
+measure append, owned finalization and checksum separately, with a document-size
+and piece-size matrix and matching C/Rust controls. They preserve this suite's
+original kernels and store their own raw samples and compiler identity.
+
 ## What is measured
 
 For every (kernel, language) pair, one warm-up run and then ten measured
