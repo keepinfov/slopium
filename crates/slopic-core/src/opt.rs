@@ -388,7 +388,8 @@ fn eliminate_dead_allocations_in(
 ///
 /// A copy counts only when it is the local's one definition — a local written
 /// from elsewhere as well is not the block all the way down, and guessing
-/// would spend somebody else's value.
+/// would spend somebody else's value. Track the word regardless of its type:
+/// inlining binds a lifted body's erased `i64` block parameter with `Assign`.
 fn block_aliases(function: &MirFunction, origin: LocalId) -> HashSet<LocalId> {
     let mut definitions = vec![0usize; function.locals.len()];
     for block in &function.blocks {
@@ -409,13 +410,7 @@ fn block_aliases(function: &MirFunction, origin: LocalId) -> HashSet<LocalId> {
                 let Instruction::Assign { dst, src } = &statement.instruction else {
                     continue;
                 };
-                if aliases.contains(src)
-                    && function
-                        .locals
-                        .get(*dst)
-                        .is_some_and(|local| matches!(local.ty, Type::Fn { .. }))
-                    && definitions.get(*dst).is_some_and(|count| *count == 1)
-                {
+                if aliases.contains(src) && definitions.get(*dst).is_some_and(|count| *count == 1) {
                     grown.insert(*dst);
                 }
             }
@@ -454,9 +449,10 @@ fn permitted_uses(
                 continue;
             }
             match &statement.instruction {
-                // The copy that made an alias: allowed, and dead once the
-                // null word replaces what it copied.
-                Instruction::Assign { src, .. } if is_alias(src) => {}
+                // Only copies in the proven alias set are safe. A merge
+                // local with multiple definitions is deliberately excluded
+                // from that set and may return or otherwise expose the block.
+                Instruction::Assign { dst, src } if is_alias(src) && is_alias(dst) => {}
                 // The word a direct call hands to its callee's unread block
                 // parameter. Last argument only: it is where the lowering
                 // puts the block, and a block anywhere else is a value like

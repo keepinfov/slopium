@@ -33,6 +33,7 @@ scripts/project-tests.sh
 | `defer` | A `defer` on each of the four ways a scope ends, registration order against running order, a nested scope, and a C handle with no destructor |
 | `target-modules` | One module name that is a different file per target across three triples, built and run for both the host and the cross target, with a third file for a target this toolchain cannot build |
 | `composition` | `<<` and `>>` applied and unapplied, both directions, three operands, one operand, and two locals of `Fn` type composed |
+| `closure-branch-return` | Owned function values returned through a branch merge, then called and dropped in dev and release |
 | `fieldless-enums` | An enum with no payload anywhere: copied not moved, compared with `=`, matched, and an `Option` beside it keeping the old representation |
 | `unit-fields` | A `unit` field in a named struct, a variant carrying one, and both arms of a generic `(Result unit String)` met through `try` |
 | `result-instances` | An error out of `try` rebuilt as the return type's own `Err`, with both deferred effects and an owned value beside it proving each arm ends its scopes once |

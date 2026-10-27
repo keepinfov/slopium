@@ -839,3 +839,25 @@ fn a_closure_that_escapes_keeps_its_block() {
         instructions(probe)
     );
 }
+
+#[test]
+fn closures_returned_through_a_branch_merge_keep_their_blocks() {
+    let source = r#"
+        (fn double ((x i64)) -> i64 (* x 2))
+        (fn increment ((x i64)) -> i64 (+ x 1))
+        (fn pick ((flag bool)) -> (Fn (i64) i64)
+          (if flag double increment))
+        (fn main () -> i32 0)
+    "#;
+    let module = release(source);
+    let pick = function(&module, "pick");
+    assert_eq!(
+        instructions(pick)
+            .iter()
+            .filter(|instruction| matches!(instruction, Instruction::StructNew { .. }))
+            .count(),
+        2,
+        "both closures escape through the multiply-defined merge local: {:?}",
+        instructions(pick)
+    );
+}
