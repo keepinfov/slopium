@@ -96,3 +96,35 @@ Memcheck's heap summary reports allocation activity, not a per-phase RSS peak.
 No portable C-parity promise is made. After a measured baseline, record explicit
 goals for the selected phase, the unchanged original workload, short-piece
 regressions and RSS before implementing further throughput changes.
+
+## Paired revision comparisons
+
+`compare.py` compares two frozen source trees whose `target/debug/slopic`
+binaries were built from those trees. It builds the complete phase matrix
+and untouched original kernels, validates every output, then interleaves the
+two Slopium revisions and C/Rust controls within each workload. Two rounds
+have separate three-pass warmups and fifteen measured samples, with recorded
+ordering seeds 154 and 155. An empty C process records the startup floor.
+No timing or RSS threshold is added to correctness CI.
+
+```sh
+nix develop --command python3 bench/builder-phases/compare.py \
+  --before-root /path/to/baseline --after-root "$PWD" --pin 2 \
+  --outdir bench/results/builder-phases/paired-comparison
+```
+
+The output directory must not exist. Finish all builds and checks before
+sampling, keep both source trees unchanged until completion, and retain the
+raw report and generated sources. The report records both compiler hashes,
+tracked patches, library/runtime hashes, checked outputs and every sample.
+Compare matching internal intervals and whole-process RSS; retain C/Rust and
+startup variation when assessing changes close to the noise floor.
+
+For noisy short workloads, select cases with repeatable `--case NAME` and
+use `--repeat-document 100`. Diagnostics then repeat inside each process;
+every document's result is checked, and the first five internal intervals
+are discarded before averaging the remaining intervals. Process samples
+remain the statistical unit. The original control is always unchanged and
+runs once; repeated-process wall/RSS numbers describe different lifetimes.
+The [bulk-copy report](2026-10-27-bulk-copy.md) records both fresh-process and
+steady-state results, including uncertainty in small cases.
