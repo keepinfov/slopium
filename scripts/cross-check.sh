@@ -3,8 +3,9 @@
 #
 # Two backends are only worth having if they agree. Every program in the corpus
 # is compiled twice — once natively, once for aarch64 — and both are run, the
-# second under qemu; stdout and exit status must match exactly. Nothing here
-# inspects the generated code, because agreement on behaviour is the property
+# second under qemu; each must reach its expected outcome before stdout and
+# exit status are compared. Nothing here inspects the generated code, because
+# agreement on behaviour is the property
 # that matters and it is the one an inspection cannot establish.
 #
 # The ABI half is separate and checks something the differential cannot: that
@@ -35,34 +36,100 @@ cross_target="aarch64-unknown-linux-gnu"
 cross_cc="${SLOPIUM_CC_AARCH64_UNKNOWN_LINUX_GNU:-aarch64-unknown-linux-gnu-cc}"
 qemu="${SLOPIUM_QEMU_AARCH64:-qemu-aarch64}"
 
-if ! command -v "$cross_cc" >/dev/null 2>&1; then
-  echo "cross-check: run inside 'nix develop' for the aarch64 toolchain" >&2
-  skip "$cross_cc not found; cross-backend checks skipped"
-  exit 0
-fi
-if ! command -v "$qemu" >/dev/null 2>&1; then
-  skip "$qemu not found; cross-backend checks skipped"
-  exit 0
-fi
-
-cargo build --quiet --workspace --manifest-path "$workspace_dir/Cargo.toml"
-compiler="$workspace_dir/target/debug/slopic"
-
 fail() {
   echo "cross-check: $*" >&2
   exit 1
 }
 
-# Runs a program and writes "<stdout>" plus a trailing status line, so a
-# difference in either is one comparison.
+# Keep the conventional status line for differential comparisons, and retain
+# how the run ended separately: exit 139 is not necessarily SIGSEGV, nor is an
+# explicit exit 124 a deadline expiring.
 capture() {
   local output="$1"
   shift
-  set +e
-  "$@" >"$output" 2>"$output.stderr"
-  local status=$?
-  set -e
-  echo "exit status: $status" >>"$output"
+  python3 "$workspace_dir/scripts/cross-run.py" --output "$output" \
+    --timeout "${SLOPIUM_CROSS_TIMEOUT:-30}" -- "$@"
+}
+
+check_outcome() {
+  local label="$1" architecture="$2" output="$3" expected="$4" diagnostic="$5"
+  local status outcome
+  status="$(cat "$output.status")"
+  outcome="$(cat "$output.outcome")"
+  if [[ "$outcome" != exit || "$status" != "$expected" ]]; then
+    echo "cross-check: $label [$architecture]: $outcome, exit status $status; expected $expected" >&2
+    cat "$output.stderr" >&2
+    return 1
+  fi
+  if [[ -n "$diagnostic" ]] && ! grep -Fq -- "$diagnostic" "$output.stderr"; then
+    echo "cross-check: $label [$architecture]: missing diagnostic: $diagnostic" >&2
+    cat "$output.stderr" >&2
+    return 1
+  fi
+}
+
+compare_results() {
+  local label="$1" prefix="$2" expected="$3" diagnostic="$4"
+  [[ "$expected" =~ ^[0-9]{1,3}$ ]] && (( 10#$expected <= 255 )) ||
+    fail "$label has an invalid expected exit status: $expected"
+  expected=$((10#$expected))
+  local unexpected=0
+  check_outcome "$label" host "$prefix.native.out" "$expected" "$diagnostic" || unexpected=1
+  check_outcome "$label" "$cross_target" "$prefix.cross.out" "$expected" "$diagnostic" || unexpected=1
+  [[ "$unexpected" == 0 ]] || fail "$label had unexpected execution outcomes"
+  if ! cmp --silent "$prefix.native.out" "$prefix.cross.out"; then
+    echo "cross-check: backends disagree on $label" >&2
+    diff -u "$prefix.native.out" "$prefix.cross.out" >&2 || true
+    exit 1
+  fi
+}
+
+# Exercise the real capture and comparison path without a compiler or qemu.
+check_checker() {
+  local directory="$result_dir/checker" prefix name
+  local SLOPIUM_CROSS_TIMEOUT=2
+  mkdir -p "$directory"
+  for status in 0 7 124 127 139; do
+    prefix="$directory/exit-$status"
+    capture "$prefix.native.out" bash -c "exit $status"
+    capture "$prefix.cross.out" bash -c "exit $status"
+    compare_results "explicit exit $status" "$prefix" "$status" ""
+  done
+  prefix="$directory/panic"
+  capture "$prefix.native.out" bash -c 'echo "integer overflow" >&2; exit 101'
+  capture "$prefix.cross.out" bash -c 'echo "integer overflow" >&2; exit 101'
+  compare_results "expected panic" "$prefix" 101 "integer overflow"
+
+  for name in signal realtime timeout missing loader mismatch diagnostic; do
+    prefix="$directory/$name"
+    local -a command
+    local expected=0 diagnostic="" reason deadline=2
+    case "$name" in
+      signal) command=(bash -c 'kill -s SEGV "$$"'); reason="signal SIGSEGV" ;;
+      realtime) command=(bash -c 'kill -s RTMIN+1 "$$"'); reason="signal" ;;
+      timeout) command=(bash -c 'sleep 30'); reason="timed out"; deadline=0.05 ;;
+      missing) command=("$directory/does-not-exist"); reason="could not start" ;;
+      loader)
+        printf '#!/nonexistent/slopium-test-loader\n' >"$directory/no-loader"
+        chmod +x "$directory/no-loader"
+        command=("$directory/no-loader"); reason="could not start" ;;
+      mismatch) command=(bash -c 'exit 7'); reason="exit, exit status 7" ;;
+      diagnostic)
+        command=(bash -c 'exit 101'); expected=101
+        diagnostic="integer overflow"; reason="missing diagnostic" ;;
+    esac
+    SLOPIUM_CROSS_TIMEOUT="$deadline" capture "$prefix.native.out" "${command[@]}"
+    SLOPIUM_CROSS_TIMEOUT="$deadline" capture "$prefix.cross.out" "${command[@]}"
+    if (compare_results "$name" "$prefix" "$expected" "$diagnostic") >"$prefix.log" 2>&1; then
+      fail "checker accepted matching $name failures"
+    fi
+    if ! grep -Fq "[host]: $reason" "$prefix.log" ||
+       ! grep -Fq "[$cross_target]: $reason" "$prefix.log"; then
+      cat "$prefix.log" >&2
+      fail "checker did not explain both $name failures"
+    fi
+  done
+  echo "cross-check: controlled execution-outcome checks ... ok"
 }
 
 # ---------------------------------------------------------------------------
@@ -75,7 +142,8 @@ compare_program() {
   local label="$1"
   local prefix="$2"
   local profile="$3"
-  shift 3
+  local expected="$4" diagnostic="$5"
+  shift 5
   local -a compile=("$@")
 
   # `slopic` knows no profiles; the manager's release policy is just
@@ -93,13 +161,27 @@ compare_program() {
   capture "$prefix.native.out" "$prefix.native"
   capture "$prefix.cross.out" "$qemu" "$prefix.cross"
 
-  if ! cmp --silent "$prefix.native.out" "$prefix.cross.out"; then
-    echo "cross-check: backends disagree on $label ($profile)" >&2
-    diff -u "$prefix.native.out" "$prefix.cross.out" >&2 || true
-    exit 1
-  fi
+  compare_results "$label ($profile)" "$prefix" "$expected" "$diagnostic"
   differential_count=$((differential_count + 1))
 }
+
+[[ "$#" == 0 || ( "$#" == 1 && "$1" == --self-check ) ]] ||
+  fail "usage: scripts/cross-check.sh [--self-check]"
+check_checker
+[[ "${1:-}" != --self-check ]] || exit 0
+
+if ! command -v "$cross_cc" >/dev/null 2>&1; then
+  echo "cross-check: run inside 'nix develop' for the aarch64 toolchain" >&2
+  skip "$cross_cc not found; cross-backend checks skipped"
+  exit 0
+fi
+if ! command -v "$qemu" >/dev/null 2>&1; then
+  skip "$qemu not found; cross-backend checks skipped"
+  exit 0
+fi
+
+cargo build --quiet --workspace --manifest-path "$workspace_dir/Cargo.toml"
+compiler="$workspace_dir/target/debug/slopic"
 
 for profile in dev release; do
   for source in "$workspace_dir"/examples/*.slp; do
@@ -109,7 +191,9 @@ for profile in dev release; do
     if ! "$compiler" "$source" --emit check >/dev/null 2>&1; then
       continue
     fi
-    compare_program "example $name" "$result_dir/example-$name-$profile" "$profile" \
+    # The complete top-level examples currently all return zero; syntax-only
+    # examples are excluded above by checking whether they compile.
+    compare_program "example $name" "$result_dir/example-$name-$profile" "$profile" 0 "" \
       "$compiler" "$source" --emit exe
   done
 
@@ -137,7 +221,9 @@ for profile in dev release; do
       --emit check >/dev/null 2>&1; then
       continue
     fi
-    compare_program "fixture $name" "$result_dir/pass-$name-$profile" "$profile" \
+    expected=0
+    [[ ! -f "$project/expected.status" ]] || expected="$(cat "$project/expected.status")"
+    compare_program "fixture $name" "$result_dir/pass-$name-$profile" "$profile" "$expected" "" \
       "$compiler" "$entry" --source-root "$project/src" --toolchain-dependency std --emit exe
   done
 done
@@ -304,7 +390,12 @@ EOF
 for profile in dev release; do
   for source in "$trap_dir"/*.slp; do
     name="$(basename "$source" .slp)"
-    compare_program "trap $name" "$trap_dir/$name-$profile" "$profile" \
+    case "$name" in
+      *zero) diagnostic="division by zero" ;;
+      shift-*) diagnostic="shift amount out of range" ;;
+      *) diagnostic="integer overflow" ;;
+    esac
+    compare_program "trap $name" "$trap_dir/$name-$profile" "$profile" 101 "$diagnostic" \
       "$compiler" "$source" --emit exe
     # A trap that stopped trapping would compare equal but succeed, so the
     # status is checked as well as the agreement.
@@ -361,7 +452,7 @@ EOF
 
 float_count=0
 for profile in dev release; do
-  compare_program "float comparison" "$float_dir/nan-$profile" "$profile" \
+  compare_program "float comparison" "$float_dir/nan-$profile" "$profile" 0 "" \
     "$compiler" "$float_dir/nan.slp" --emit exe
   if ! cmp --silent "$float_dir/expected.stdout" "$float_dir/nan-$profile.native.out"; then
     echo "cross-check: float comparison answers changed ($profile)" >&2
@@ -430,7 +521,7 @@ EOF
 
 unsigned_count=0
 for profile in dev release; do
-  compare_program "unsigned arithmetic" "$unsigned_dir/wide-$profile" "$profile" \
+  compare_program "unsigned arithmetic" "$unsigned_dir/wide-$profile" "$profile" 0 "" \
     "$compiler" "$unsigned_dir/wide.slp" --emit exe
   if ! cmp --silent "$unsigned_dir/expected.stdout" "$unsigned_dir/wide-$profile.native.out"; then
     echo "cross-check: unsigned answers changed ($profile)" >&2

@@ -62,6 +62,13 @@ there is no exit status to read it from (`D-122`).
 
 Every passing project must pass `fmt --check`, `check`, `run`, and `test`.
 Selected projects also build and run under the release profile.
+The cross-backend runner additionally executes eligible passing projects for
+both architectures and profiles. It requires a normal exit with status zero,
+or the decimal status in `expected.status` when present, before comparing output.
+Signals, timeouts and launch failures are rejected independently on each target.
+The project-manager runner still requires passing projects' `run` to succeed;
+`expected.status` does not change that contract. Cross-check's dedicated
+arithmetic failure cases require both status 101 and the runtime diagnostic.
 The runner additionally checks `new`, `targets`, `compiler`, and `clean`, plus
 body-only versus public-interface cache invalidation for separate module
 objects. The low-level compiler is exercised in `check`, HIR, MIR, assembly,
