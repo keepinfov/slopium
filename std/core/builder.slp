@@ -59,23 +59,13 @@
           (set index (+ index 1)))
         (write-bytes-raw bytes text width|)
 
-; The digits go in least significant first and come back out reversed, so a
-; number costs one small list rather than one `String` per digit — which is
-; what `core:string`'s `digits-of` costs, and why this is not written over it.
+; Emit the higher digits first, so the call stack holds at most twenty
+; magnitudes instead of allocating a temporary list (`D-166`). Zero reaches
+; the final write directly and produces its one digit.
 (fn write-u64 ((into &mut Builder) (value u64)) -> unit
-  (if (= value 0)
-    (write-byte into 48)
-    (do
-      (let mut digits (list (as u8 0)))
-      (let discarded (remove &mut digits 0))
-      (let mut remaining value)
-      (while (> remaining 0)
-        (push &mut digits (as u8 (+ 48 (as i64 (% remaining 10)))))
-        (set remaining (/ remaining 10)))
-      (let mut index (len &digits))
-      (while (> index 0)
-        (set index (- index 1))
-        (write-byte into (get &digits index|)
+  (when (>= value 10)
+    (write-u64 into (/ value 10)))
+  (write-byte into (as u8 (+ 48 (as i64 (% value 10|)
 
 ; A sign and a magnitude. The magnitude of the smallest `i64` has no `i64` to
 ; hold it, so it is taken one below and put back as a `u64`, exactly as

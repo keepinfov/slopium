@@ -60,7 +60,7 @@ cat > "$work/program.slp" <<'SLP'
   hex-from-u64 hex-prefixed-from-u64)
 (take core:float from-f64 to-f64)
 (take core:map Map new insert lookup)
-(take core:builder (new :as builder-new) write-str write-i64 build)
+(take core:builder (new :as builder-new) write-str write-i64 write-u64 build)
 (take core:panic assert)
 
 ; Named `main` and exported, because the link below is asked to validate an
@@ -97,8 +97,18 @@ cat > "$work/program.slp" <<'SLP'
   (write-str (&mut out) (& ""))
   (write-str (&mut out) (& "answer \0\xff"))
   (write-i64 (&mut out) 42)
+  (write-str (&mut out) (& " "))
+  (write-i64 (&mut out) -9223372036854775808)
+  (write-str (&mut out) (& " "))
+  (write-i64 (&mut out) 9223372036854775807)
+  (write-str (&mut out) (& " "))
+  (write-u64 (&mut out) 18446744073709551615)
+  (write-str (&mut out) (& " "))
+  (write-u64 (&mut out) 0)
   (let text (build out))
-  (if (equals (& text) (& "answer \0\xff42")) 42 0))
+  (if (equals (& text)
+        (& "answer \0\xff42 -9223372036854775808 9223372036854775807 18446744073709551615 0"))
+    42 0))
 
 ; A volatile access is instructions and never a call (`D-067`), which is what
 ; makes a raw pointer usable in a program with no operating system under it. A

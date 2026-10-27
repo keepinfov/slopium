@@ -4,7 +4,7 @@
 (take std:builder Builder new write-str write-byte write-i64 write-u64 size build)
 (take std:float write-f64)
 (take std:io println println-i64)
-(take std:string equals from-i64 concat)
+(take std:string equals from-i64 from-u64 concat)
 (take std:test equal-i64 equal-text)
 
 (fn joined ((count i64)) -> String
@@ -95,3 +95,66 @@
   (and (= (size &out) 1800)
        (equal-text &piece &"0123456789abcdef\0\xff")
        (equal-text &(build out) &expected)))
+
+; The general string formatter is independent of the builder's digit path.
+(fn unsigned-agrees ((value u64)) -> bool
+  (let expected (from-u64 value))
+  (let mut out (new))
+  (write-str &mut out &"prefix:")
+  (write-u64 &mut out value)
+  (write-byte &mut out 33)
+  (let width (size &out))
+  (let decorated (concat &(concat &"prefix:" &expected) &"!"))
+  (and (= width (len &decorated)) (equal-text &(build out) &decorated)))
+
+(fn signed-agrees ((value i64)) -> bool
+  (let expected (from-i64 value))
+  (let mut out (new))
+  (write-i64 &mut out value)
+  (and (= (size &out) (len &expected)) (equal-text &(build out) &expected)))
+
+(test "unsigned powers of ten and both neighbors preserve every digit"
+  (let mut correct (unsigned-agrees 0))
+  (let mut power (as u64 1))
+  (let mut exponent 0)
+  (while (< exponent 20)
+    (set correct
+      (and correct
+           (unsigned-agrees (- power 1))
+           (unsigned-agrees power)
+           (unsigned-agrees (+ power 1))))
+    (set exponent (+ exponent 1))
+    ; The next power after 10^19 would overflow u64.
+    (when (< exponent 20)
+      (set power (* power 10))))
+  (and correct (unsigned-agrees 18446744073709551615)))
+
+(test "signed decimal boundaries agree on both sides of zero"
+  (let mut correct (signed-agrees 0))
+  (let mut power 1)
+  (let mut exponent 0)
+  (while (< exponent 19)
+    (set correct
+      (and correct
+           (signed-agrees (- power 1))
+           (signed-agrees power)
+           (signed-agrees (+ power 1))
+           (signed-agrees (- 0 (- power 1)))
+           (signed-agrees (- 0 power))
+           (signed-agrees (- 0 (+ power 1)))))
+    (set exponent (+ exponent 1))
+    (when (< exponent 19)
+      (set power (* power 10))))
+  (and correct (signed-agrees -9223372036854775808) (signed-agrees -9223372036854775807)
+    (signed-agrees 9223372036854775806) (signed-agrees 9223372036854775807)))
+
+(test "signed limits and consecutive writes have exact literal spelling"
+  (let mut out (new))
+  (write-i64 &mut out -9223372036854775808)
+  (write-byte &mut out 32)
+  (write-i64 &mut out 9223372036854775807)
+  (write-byte &mut out 32)
+  (write-i64 &mut out -1)
+  (write-i64 &mut out 0)
+  (write-u64 &mut out 1)
+  (equal-text &(build out) &"-9223372036854775808 9223372036854775807 -101"))

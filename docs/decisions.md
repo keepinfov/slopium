@@ -4010,3 +4010,27 @@ the cost of narrow accesses. The design question to settle first is whether
 the rule is per element type — small integers and `bool` pack, every other
 list stays a word — or a second collection type, and what a `(List u8)`
 crossed to C as a slice means then.
+
+## D-166 — integer builder writes hold digits on the call stack
+
+Status: approved · 2026-10-27
+
+`write-u64` emits the quotient recursively before appending its last decimal
+digit, so a number needs no temporary list or String. Each recursive call
+divides its magnitude by ten; the full `u64` range needs at most twenty
+calls, and zero writes its single digit without recursion. `write-i64` keeps
+its existing sign and unsigned-magnitude conversion, including the signed
+minimum. The builder's growing buffer remains the only heap storage used by
+integer writes. This supersedes the scratch-list part of `D-145` without
+changing the word-sized buffer representation deferred in `D-165`.
+
+The post-bulk baseline in `bench/builder-phases/2026-10-27-bulk-copy.md`
+makes integer formatting the next measured experiment. Three allocation-free
+algorithms were compared on the unchanged original kernel and on 50,000
+short and 20-digit integers: recursion, a descending decimal divisor, and
+reversal of digits appended directly to the builder's tail. Recursion won
+both independently warmed paired rounds for both integer lengths, while
+avoiding divisor discovery and a second pass over the output. Its bounded
+stack use is preferable here to scratch allocation or an additional runtime
+entry. Exact outputs, freestanding linkage and both targets remain gates;
+the measurements and limits accompany the implementation.
