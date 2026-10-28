@@ -178,6 +178,7 @@ of what was believed at the time is the part worth keeping.
 - [D-163 — `return` leaves the nearest function, and the word is spent on it](#d-163--return-leaves-the-nearest-function-and-the-word-is-spent-on-it)
 - [D-164 — a closure block nothing reads loses its allocation and its drop](#d-164--a-closure-block-nothing-reads-loses-its-allocation-and-its-drop)
 - [D-165 — packed byte storage needs its own measurement first](#d-165--packed-byte-storage-needs-its-own-measurement-first)
+- [D-167 — the builder packs bytes inside ordinary words](#d-167--the-builder-packs-bytes-inside-ordinary-words)
 
 ## D-001 — a native compiler, without LLVM
 
@@ -3976,6 +3977,10 @@ refuses one use at a time.
 
 Status: deferred · 2026-10-25
 
+The builder-local storage question is superseded by `D-167`. General narrow
+collection storage remains deferred; the earlier bulk-copy step and its ABI
+obligations remain part of the history below.
+
 `core:builder` grows a `(List u8)`, whose elements are machine words (`D-107`).
 The benchmark's 540 KB document therefore uses 4.3 MB of live buffer elements
 before spare capacity. The snapshot in `bench/README.md` records 9.5 MB peak
@@ -4034,3 +4039,70 @@ avoiding divisor discovery and a second pass over the output. Its bounded
 stack use is preferable here to scratch allocation or an additional runtime
 entry. Exact outputs, freestanding linkage and both targets remain gates;
 the measurements and limits accompany the implementation.
+
+## D-167 — the builder packs bytes inside ordinary words
+
+Status: approved · 2026-10-28
+
+`core:builder:Builder` will hold complete words in `words: (List u64)`, a
+scalar `tail: u64` for the last zero to seven bytes, and a logical byte count
+`used: i64`. Eight consecutive bytes occupy one numeric word, with the first
+byte in its lowest eight bits; packing and decoding use explicit shifts rather
+than a native-endian byte view. An ordinary list element remains a machine
+word, and no other list, array, slice, generic operation or compiler C spelling
+changes. This supersedes the builder-local deferral in `D-165`, without
+selecting general narrow storage or a new owning-buffer type.
+
+The comparison in `bench/builder-storage/2026-10-28.md` measures the original
+kernel unchanged except for its builder import. Two independently warmed
+rounds reduce wall time by 51.0%, original RSS from 9756 to 2588 KiB, and the
+largest 4 MiB-piece RSS from 38448 to 9904 KiB. Indexed reads and short
+finalization regress, and the report retains those costs. Dedicated owning
+bytes and generic narrow lists have native C cost models only; their missing
+compiler ownership and width semantics are not established by those models.
+Builder-local packing meets the memory goals with existing collection glue,
+so those broader designs are not prerequisites for this change.
+
+`new` establishes a nonnegative `used`, `len(words) = floor(used / 8)`, and a
+`tail` whose unused high bits are zero. The current language keeps fields
+constructible, so the implementation must check these invariants at exposed
+operations and refuse malformed state before an unchecked memory access.
+Logical-length addition, word-count arithmetic and allocation size must be
+checked before mutation or allocation. Growth uses the existing list's
+geometric capacity policy. The initial append path pushes once per completed
+word and makes one borrowed pack call per nonempty piece; a push checks
+capacity but allocates only when growth is needed. One capacity decision per
+whole piece is deferred rather than supplied by a new reserve builtin or an
+owner-header FFI extension.
+
+Ordinary structural drop owns and releases the word list. Structural clone
+copies its initialized words independently and copies the scalar tail/count;
+there is no foreign raw pointer pretending to own an allocation. Growth may
+invalidate payload addresses, so the pack bridge receives an exclusive borrow
+of already sized words, with word pointer/count, tail, logical byte count and
+source pointer/explicit byte length. It neither resizes nor retains pointers.
+Finalization borrows the initialized words and tail, allocates a fresh owned
+String, decodes the logical bytes, and includes one trailing NUL in capacity
+but not length. The consumed builder then drops normally. One final copy is
+accepted; zero-copy ownership transfer is not part of this design.
+
+The qualified `Builder` type and `new`, `size`, `write-byte`, `write-str`,
+`write-i64`, `write-u64` and consuming `build` remain, including float writers
+that accept that type. Replacing public `bytes: (List u8)` is an approved
+breaking constructor/field/pattern change. Direct construction migrates to
+`new` plus writes; consuming field access migrates to `build` and String byte
+access, or explicitly materializes ordinary bytes. Shared readers can finalize
+a clone at an explicit allocation/copy cost. Raw arbitrary editing needs
+rebuilding through writers or a separately designed adapter; no zero-copy
+byte-list view is promised. Existing runtime symbols retain their ABI
+obligations even when the builder stops calling them.
+
+Implementation stays separated into checked storage/growth, append operations,
+and owned finalization with library integration. The field replacement uses a
+breaking-change subject and trailer, updates the Russian migration guide and
+module interfaces/library digest, and regenerates fixtures serially. Both
+targets/profiles, memory tools, freestanding linkage, public malformed states
+and float integration remain implementation gates; the research prototype does
+not replace them. Each implementation needs its full validation and refreshed
+measurements. This decision changes no installed representation or release
+version by itself.
