@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Exercise the private owner in its real module without exporting a test API.
+# Exercise the real owner and private helpers without exporting a test API.
 set -euo pipefail
 ulimit -c 0
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -60,12 +60,12 @@ for target in host aarch64; do
             cp "$source" "$main"
             message='invalid state'
             case "$failure" in
-                negative-used) expression='(storage-grow-zero &mut (PackedStorage :words (list) :tail 0 :used -1) 0)' ;;
-                short) expression='(storage-grow-zero &mut (PackedStorage :words (list) :tail 0 :used 8) 0)' ;;
-                long) expression='(storage-grow-zero &mut (PackedStorage :words (list (as u64 0)) :tail 0 :used 0) 0)' ;;
-                tail) expression='(storage-grow-zero &mut (PackedStorage :words (list) :tail 256 :used 1) 0)' ;;
-                full) expression='(storage-grow-zero &mut (PackedStorage :words (list (as u64 0)) :tail 1 :used 8) 0)' ;;
-                negative-extra) expression='(storage-grow-zero &mut (storage-new) -1)'; message='negative length' ;;
+                negative-used) expression='(storage-grow-zero &mut (Builder :words (list) :tail 0 :used -1) 0)' ;;
+                short) expression='(storage-grow-zero &mut (Builder :words (list) :tail 0 :used 8) 0)' ;;
+                long) expression='(storage-grow-zero &mut (Builder :words (list (as u64 0)) :tail 0 :used 0) 0)' ;;
+                tail) expression='(storage-grow-zero &mut (Builder :words (list) :tail 256 :used 1) 0)' ;;
+                full) expression='(storage-grow-zero &mut (Builder :words (list (as u64 0)) :tail 1 :used 8) 0)' ;;
+                negative-extra) expression='(storage-grow-zero &mut (new) -1)'; message='negative length' ;;
                 overflow) expression='(storage-length 9223372036854775807 1)'; message='length overflow' ;;
                 integer-zero-overflow) expression='(storage-integer-room 9223372036854775807 0 0)'; message='length overflow' ;;
                 integer-width-overflow) expression='(storage-integer-room 9223372036854775788 18446744073709551615 0)'; message='length overflow' ;;
@@ -82,17 +82,22 @@ for target in host aarch64; do
         # Every future exposed writer checks forged states, including empty
         # pieces and zero integers, before any word access or allocation.
         for state in \
-            '(PackedStorage :words (list) :tail 0 :used -1)' \
-            '(PackedStorage :words (list) :tail 0 :used 8)' \
-            '(PackedStorage :words (list (as u64 0)) :tail 0 :used 0)' \
-            '(PackedStorage :words (list) :tail 256 :used 1)' \
-            '(PackedStorage :words (list (as u64 0)) :tail 1 :used 8)'; do
-            for operation in 'storage-write-byte 0' 'storage-write-str &""' \
-                'storage-write-str &"a"' 'storage-write-i64 0' 'storage-write-u64 0'; do
+            '(Builder :words (list) :tail 0 :used -1)' \
+            '(Builder :words (list) :tail 0 :used 8)' \
+            '(Builder :words (list (as u64 0)) :tail 0 :used 0)' \
+            '(Builder :words (list) :tail 256 :used 1)' \
+            '(Builder :words (list (as u64 0)) :tail 1 :used 8)'; do
+            for operation in 'write-byte 0' 'write-str &""' \
+                'write-str &"a"' 'write-i64 0' 'write-u64 0' 'size' 'build'; do
                 cp "$source" "$main"
                 read -r writer argument <<< "$operation"
-                printf '\n(fn main () -> i32 (let mut state %s) (%s &mut state %s) 0)\n' \
-                    "$state" "$writer" "$argument" >> "$main"
+                case "$writer" in
+                    build) call='(build state)' ;;
+                    size) call='(size &state)' ;;
+                    *) call="($writer &mut state $argument)" ;;
+                esac
+                printf '\n(fn main () -> i32 (let mut state %s) %s 0)\n' \
+                    "$state" "$call" >> "$main"
                 "$slopic" "${base[@]}" "${flags[@]}" "${opt[@]}" -o "$out-fail"
                 if "${execute[@]}" "$out-fail" > "$out-fail.out" 2>&1; then
                     echo "builder-storage-check: accepted $operation on $state" >&2; exit 1
@@ -106,13 +111,19 @@ for target in host aarch64; do
         cat >> "$main" <<'SLP'
 (export answer)
 (fn answer () -> i64
-  (let mut state (PackedStorage :words (list (as u64 65)) :tail 66 :used 9))
+  (let mut state (Builder :words (list (as u64 65)) :tail 66 :used 9))
   (storage-grow-zero &mut state 71)
-  (storage-write-str &mut state &"core\0\xffé")
-  (storage-write-byte &mut state 255)
-  (storage-write-i64 &mut state -9223372036854775808)
-  (storage-write-u64 &mut state 18446744073709551615)
-  (if (storage-valid &state) 42 1))
+  (write-str &mut state &"core\0\xffé")
+  (write-byte &mut state 255)
+  (write-i64 &mut state -9223372036854775808)
+  (write-u64 &mut state 18446744073709551615)
+  (let width (size &state))
+  (let text (build state))
+  (if (and (= width 129) (= (len &text) 129)
+           (= (byte-raw &text 129 0) 65) (= (byte-raw &text 129 8) 66)
+           (= (byte-raw &text 129 84) 0) (= (byte-raw &text 129 85) 255)
+           (= (byte-raw &text 129 86) 195) (= (byte-raw &text 129 87) 169)
+           (= (byte-raw &text 129 89) 45) (= (byte-raw &text 129 128) 53)) 42 1))
 SLP
         "$slopic" "${base[@]}" "${flags[@]}" "${opt[@]}" --freestanding --library --emit obj -o "$out.o"
         "$cc" -O2 -ffreestanding -fno-builtin -fno-stack-protector -c "$root/runtime/slop_rt_core.c" -o "$out-runtime.o"
@@ -133,16 +144,16 @@ with open(sys.argv[1], 'a') as f:
     f.write('''
 (export answer)
 (fn answer () -> i64
-  (let mut state (storage-new))
+  (let mut state (new))
   (let piece "''' + 'a' * 4096 + '''")
   (let mut repeat 0)
   (while (< repeat 256)
-    (storage-write-str &mut state &piece)
+    (write-str &mut state &piece)
     (set repeat (+ repeat 1)))
-  (storage-write-str &mut state &"")
-  (storage-write-byte &mut state 255)
+  (write-str &mut state &"")
+  (write-byte &mut state 255)
   (storage-check &state)
-  (match &state ((PackedStorage :words _ :tail _ :used used) (clone used))))
+  (match &state ((Builder :words _ :tail _ :used used) (clone used))))
 ''')
 PY
         "$slopic" "${base[@]}" "${flags[@]}" "${opt[@]}" --freestanding --library --emit obj -o "$out-count.o"
@@ -160,7 +171,7 @@ cp "$source" "$main"
 ASAN_OPTIONS=detect_leaks=1 "$work/asan" >/dev/null
 cat >> "$main" <<'SLP'
 (fn main () -> i32
-  (let mut state (storage-new))
+  (let mut state (new))
   (let held &state)
   (storage-grow-zero &mut state 1)
   (storage-valid held)
@@ -176,4 +187,40 @@ errors=[json.loads(line) for line in open(sys.argv[1]) if line.strip()]
 assert len(errors)==1 and errors[0]['code']=='SL0300', errors
 assert errors[0]['span']['line']>0 and errors[0]['span']['column']>0, errors
 PY
-echo 'builder-storage-check: ASan/UBSan and owner loan ... ok'
+for loan in words build; do
+    cp "$source" "$main"
+    if [[ "$loan" == words ]]; then
+        cat >> "$main" <<'SLP'
+(fn main () -> i32
+  (let mut state (new))
+  (write-str &mut state &"abcdefgh")
+  (match &state
+    ((Builder :words words :tail _ :used _)
+      (let held (slice words 0 (len words)))
+      (write-str &mut state &"ijklmnop")
+      (len &held)))
+  0)
+SLP
+    else
+        cat >> "$main" <<'SLP'
+(fn main () -> i32
+  (let state (new))
+  (let held &state)
+  (let text (build state))
+  (size held)
+  (len &text)
+  0)
+SLP
+    fi
+    if "$slopic" --source-root "$work/package" --toolchain-dependency core "$main" \
+        --diagnostic-format json -o "$work/loan" >"$work/loan.out" 2>"$work/loan.json"; then
+        echo "builder-storage-check: accepted live $loan loan" >&2; exit 1
+    fi
+    python3 - "$work/loan.json" <<'PY'
+import json, sys
+errors=[json.loads(line) for line in open(sys.argv[1]) if line.strip()]
+assert len(errors)==1 and errors[0]['code']=='SL0300', errors
+assert errors[0]['span']['line']>0 and errors[0]['span']['column']>0, errors
+PY
+done
+echo 'builder-storage-check: ASan/UBSan and owner, word-view and consuming loans ... ok'

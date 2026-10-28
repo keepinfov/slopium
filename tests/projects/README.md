@@ -81,6 +81,11 @@ manager errors for ownership, borrows, types, matching, modules, dependencies,
 generics, standard-library contracts, entry points, borrowed-value escape, and
 removed v0.1 syntax.
 
+`builder-old-field` keeps the approved `D-167` constructor migration explicit:
+the old `Builder :bytes` form is rejected by the actual bundled interface with
+`SL0200`. Its single-file counterpart under `slopic-core/tests/compile_fail`
+also locks the diagnostic spans and rendering without loading a package.
+
 `runtime-fail` projects compile successfully, then assert native exit status
 101 and the normalized runtime message for bounds, input, process API, and
 arithmetic failures. `deliberate-panic` is the one that fails because it

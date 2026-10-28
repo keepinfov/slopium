@@ -102,6 +102,40 @@ SlString *sl_rt_string_new(const char *bytes, uint64_t len) {
     return string;
 }
 
+/* Decode numeric words a whole word at a time. Explicit byte stores retain
+ * low-byte-first semantics independently of native endianness (`D-167`).
+ * Both allocations belong to the returned String; the source stays borrowed. */
+SlString *sl_rt_string_from_words(const uint64_t *words, int64_t count,
+                                  uint64_t tail, int64_t used) {
+    if (used < 0 || count != used / 8 || (count && !words) ||
+        (uint64_t)used >= (uint64_t)SIZE_MAX ||
+        (tail >> (((uint64_t)used & 7) * 8))) {
+        RT_FAIL("builder packed string bounds");
+    }
+    SlString *string = sl_checked_alloc(sizeof(SlString));
+    string->ptr = sl_checked_alloc((uint64_t)used + 1);
+    string->len = (uint64_t)used;
+    string->cap = (uint64_t)used + 1;
+    unsigned char *out = (unsigned char *)string->ptr;
+    for (int64_t index = 0; index < count; ++index) {
+        uint64_t word = words[index];
+        out[0] = (unsigned char)word;
+        out[1] = (unsigned char)(word >> 8);
+        out[2] = (unsigned char)(word >> 16);
+        out[3] = (unsigned char)(word >> 24);
+        out[4] = (unsigned char)(word >> 32);
+        out[5] = (unsigned char)(word >> 40);
+        out[6] = (unsigned char)(word >> 48);
+        out[7] = (unsigned char)(word >> 56);
+        out += 8;
+    }
+    for (uint64_t index = 0; index < ((uint64_t)used & 7); ++index) {
+        out[index] = (unsigned char)(tail >> (index * 8));
+    }
+    string->ptr[used] = '\0';
+    return string;
+}
+
 uint64_t sl_rt_string_len(const SlString *string) {
     return string->len;
 }

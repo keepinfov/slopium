@@ -96,6 +96,8 @@ SlString *sl_rt_string_slice(const char *bytes, int64_t len, int64_t start,
 SlString *sl_rt_string_concat(const char *left, int64_t left_len,
                               const char *right, int64_t right_len);
 SlString *sl_rt_string_from_bytes(const int64_t *bytes, uint64_t count);
+SlString *sl_rt_string_from_words(const uint64_t *words, int64_t count,
+                                  uint64_t tail, int64_t used);
 ```
 
 Every `SlString *` that comes out is a fresh allocation the caller owns and
@@ -106,6 +108,17 @@ and still the caller's afterwards. The four primitives over raw bytes are what
 `int64_t` per byte, because the library builds bytes in a `(List i64)`, and
 keeps the low eight bits of each. An index or range outside the length is a
 panic, not an error value.
+
+`sl_rt_string_from_words` borrows the compact builder's initialized numeric
+words and scalar tail (`D-167`). It rejects negative `used`, a count unequal
+to `floor(used / 8)`, a null word pointer with nonzero count, a length that
+cannot include a NUL within `SIZE_MAX`, or nonzero unused tail bits. This
+happens before allocation or a source read; failure panics with
+`builder packed string bounds`. The input remains unchanged and borrowed.
+Each complete word decodes to eight low-byte-first bytes using explicit
+unsigned-byte stores, followed by the partial tail. The result owns a fresh
+String header and byte allocation: length is `used`, capacity is `used + 1`,
+and `ptr[used]` is NUL. This is one copy, with no source allocation transfer.
 
 ### Function values
 
@@ -155,11 +168,11 @@ list grows or drops. `sl_rt_list_clone` copies deeply through `clone_element`;
 `sl_rt_builder_write_bytes` is the one list entry written for a library rather
 than for the compiler (`D-145`): it fills the last `length` of the list's
 `count` elements with the low byte of each source byte, which is how
-`core:builder`'s `write-str` copies pieces longer than eight bytes in one call.
+the earlier word-per-byte builder copied long pieces in one call.
 The caller has already grown the list — `count` is its length and `length` is
 the piece's, so `count - length` is where the copy starts — because the buffer
 rule above holds here too: C may not resize the list it was handed (`D-124`).
-The library still pushes one element per byte before that call. Both counts
+Its caller still pushes one element per byte before that call. Both counts
 must be nonnegative and `count >= length`; otherwise the helper panics. An
 empty piece writes nothing, so a null element pointer is valid when `count`
 is zero. The source is borrowed for the call and may contain NUL or arbitrary
@@ -181,8 +194,9 @@ unused bits in the old tail. Failure panics with `builder packed append bounds`.
 An empty append returns the old tail. Source and destination are disjoint live
 borrows; NUL, high bytes and UTF-8 receive identical byte semantics. The owning
 Slopium caller checks its old word count before growing and lending the new
-array. The public builder has not switched to this storage yet; the existing
-`sl_rt_builder_write_bytes` signature and behavior remain part of ABI v1.
+array. The public builder uses this bridge for every nonempty piece. The
+existing `sl_rt_builder_write_bytes` signature and behavior remain part of
+ABI v1 for older callers, alongside `sl_rt_string_from_bytes`.
 
 ### Slices
 

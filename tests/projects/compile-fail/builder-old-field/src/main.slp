@@ -1,0 +1,4 @@
+(take std:builder Builder)
+(fn main () -> i32
+  (let out (Builder :bytes (list (as u8 65))))
+  0)

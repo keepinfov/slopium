@@ -103,6 +103,12 @@ regressions and RSS before implementing further throughput changes.
 
 ## Paired revision comparisons
 
+Use `--compact` for production compact-builder integration: it adds 1-byte and
+7/8/9-byte pieces at every document size to the normal matrix. Both revisions
+call the installed public builder and owned finalizer. Every sample must exit
+successfully as well as print correct output; binary hashes are retained. The
+startup control must also exit successfully with empty output.
+
 `compare.py` compares two frozen source trees whose `target/debug/slopic`
 binaries were built from those trees. It builds the complete phase matrix
 and untouched original kernels, validates every output, then interleaves the

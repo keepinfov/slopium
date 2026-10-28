@@ -144,6 +144,7 @@ for failure in negative-count negative-length short-tail; do
 done
 echo "runtime-check: builder copy bounds and byte widening under ASan ... ok"
 "$workspace_dir/scripts/builder-pack-check.sh"
+"$workspace_dir/scripts/builder-finalize-check.sh"
 
 # The C an `extern` reaches. Under ASan this is where a borrow handed across
 # the boundary is checked for real: the pointer must be live, and a `String`'s

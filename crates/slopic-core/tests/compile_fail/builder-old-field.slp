@@ -1,0 +1,6 @@
+; Keep the removed-field refusal's code/span contract in the single-file
+; harness; the project fixture checks the actual bundled Builder interface.
+(struct Builder ((words (List u64)) (tail u64) (used i64)))
+(fn main () -> i32
+  (let out (Builder :bytes (list (as u8 65))))
+  0)

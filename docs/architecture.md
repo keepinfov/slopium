@@ -601,54 +601,67 @@ Unrecoverable runtime errors print a normalized message and exit with status
 The host `cc` is used only to assemble and link emitted assembly. No LLVM,
 Cranelift, VM, or interpreter is involved.
 
-## Compact builder storage foundation
+## Compact builder storage
 
-`D-167` selects builder-local packing without changing ordinary collection
-widths or compiler ownership rules. The foundation in `core:builder` is a
-private `PackedStorage` aggregate over an ordinary `List u64`, scalar tail and
-logical byte length. It is not exported or connected to the public `Builder`
-yet. Shared validation checks nonnegative length, exact complete-word count and
-zero unused tail bits. Length planning rejects negative additions and overflow
-before allocation; division by eight needs no overflow-prone round-up addition.
+`D-167` packs only `core:builder:Builder`: complete numeric words live in an
+ordinary `List u64`, zero to seven remaining low-byte-first bytes in a scalar
+`tail`, and logical byte length in `used: i64`. Ordinary collection widths,
+headers, generic glue and the compiler's ownership rules are unchanged. The
+qualified type and public function names are preserved; replacing public
+`bytes` constructor/field patterns is the explicitly approved migration.
 
-Zero-initializing growth preserves the existing prefix:
-a completed partial tail becomes the first new word, subsequent words are zero,
-and a remaining partial tail contains only initialized low bytes. List growth
-keeps its checked four-element initial capacity and doubling policy, including
-allocation-size checks in the existing runtime. Ordinary structural clone/drop
-and loans apply. No header is recovered from a C payload pointer.
+The fields remain constructible. Every builder function validates nonnegative
+length, exact complete-word count and zero unused tail bits before unchecked
+access or payload growth. Logical addition rejects negative length and signed
+overflow before mutation. Division by eight needs no overflow-prone rounding
+addition. List capacity keeps its checked four-element initial capacity and
+doubling policy. Ordinary structural clone/drop copy and release owned fields;
+they do not interpret logical byte metadata, so even forged metadata does not
+turn the list into a raw pointer owner. Library operations reject that state.
 
-Same-module tests exercise the private owner without exporting a new type.
-`scripts/builder-storage-check.sh`, called by `core-check.sh`, compiles a copy
-of the actual library module as the test owner so dependencies' tests remain
-excluded. It checks both targets/profiles, malformed state and arithmetic
-failures, the owner loan, memory tools and core-only linkage. The existing
-external builder fixture preserves the public field/API until the later
-integration change. Append operations and owned String finalization follow
-separately; this foundation claims no installed builder speedup.
+Byte writes combine the scalar tail and push only when it completes. Piece
+writes load metadata once, share the scalar invariant validator, check logical
+addition and initialize one word per completed word. The exclusive C borrow
+begins after list growth; `sl_rt_builder_pack_words` sees sized words and old
+tail/count, replaces newly completed words and returns the new tail. The owner
+is valid again at return. No other owner operation runs during the temporary
+payload borrow; the source String remains borrowed and unchanged. Empty pieces
+still validate metadata but make no pack call. One reserve per piece remains
+deferred; no owner-header FFI or new compiler builtin is assumed.
 
-Private append operations extend this owner before public integration. Byte
-writes combine a low-byte-first scalar tail and push only when it completes.
-Piece writes load metadata once, validate the old state with the shared scalar
-validator, check logical addition, then initialize one word per completed word.
-The exclusive C borrow sees the already sized payload and the old tail/count;
-`sl_rt_builder_pack_words` replaces only newly completed words and returns the
-new tail. The owner is valid again when the operation returns. No other owner
-operation runs during the temporary payload borrow. Empty pieces still validate
-the owner but make no packing call. The pack borrow begins after list growth;
-the source String remains borrowed and unchanged throughout the operation.
-
-Integer writes retain `D-166` quotient-first emission. An exposed operation
+Integer writes retain `D-166` quotient-first emission. A public operation
 validates once and checks room for every byte before emitting a sign or digit.
-At most twenty bytes are possible; near the signed length limit the exact
-decimal width is counted before mutation. Private digit recursion then writes
-without repeating owner validation per digit. Existing process-terminating
-panic behavior applies to invalid state, overflow and allocation refusal.
+Unsigned magnitude or signed sign-plus-magnitude needs at most twenty bytes;
+near the signed length limit the exact decimal width is counted before any
+mutation. Private recursion then writes without validating per digit.
+`core:float:write-f64` keeps the same qualified Builder parameter and passes its
+formatted temporary String through the same checked piece writer.
 
-The storage checker exercises each writer on forged states, byte/source
-preservation, mixed growth, integer extremes and independent clones in all
-four target/profile combinations. Linker-wrapped runtime counters assert that
-1 MiB in 256 pieces performs 131072 pushes and 256 packing calls. The separate
-runtime bridge checker verifies both targets at C `-O0`/`-O2`, native memory
-tools and invalid C bounds before any pointer access. Public `Builder` still
-uses its previous representation; owned finalization remains separate.
+`size` validates and returns logical bytes. Consuming `build` validates before
+creating a shared slice of the words. `sl_rt_string_from_words` checks count,
+length, pointers and tail padding before allocation or reads, allocates a fresh
+String header and `used + 1` bytes, decodes each full word with eight explicit
+unsigned-byte stores, then the partial tail and NUL. Length excludes NUL and
+capacity includes it. The source slice and consumed word owner drop normally
+after the copy. There is no transfer of the list allocation, native-endian byte
+view, mutable String header or retained source pointer. Existing runtime ABI
+symbols remain, including the legacy word-per-byte writer and converter.
+
+Module interfaces already include struct field names/types, and module object
+keys include every interface, including bundled modules. The cache regression
+changes Builder-shaped fields with an unchanged compiler and clone consumer,
+requires the consumer stamp to change and checks its output, then checks a
+fresh repeated build. Bundled library source hashes also change and the
+consumer digest is regenerated serially; no cache format or release version
+change is required for this representation migration.
+
+The actual-module storage checker verifies both target/profile pairs, invalid
+public states across size/writes/build, arithmetic failures, ownership loans,
+clone/drop, native memory tools, core-only hooks and exact growth/pack counts.
+Reference bytes use independent String operations. Runtime finalization checks
+use exactly sized word allocations over 4098 lengths, verify every output byte,
+header/NUL/source preservation, and read results after releasing inputs.
+External builder/string/float fixtures cover the qualified public API; the old
+constructor fixture and matching diagnostic snapshots make the breaking field
+change explicit. Complete strict verification and actual production measurements
+remain gates for each implementation change.
