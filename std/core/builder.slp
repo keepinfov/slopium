@@ -84,3 +84,129 @@
     ((Builder :bytes bytes)
       (let view (slice &bytes 0 (len &bytes)))
       (bytes-raw &view|)
+
+; Private foundation for the D-167 builder; the public Builder switches later.
+(struct PackedStorage ((words (List u64)) (tail u64) (used i64)))
+(extern "sl_rt_panic" (storage-panic (message &String)) -> unit)
+(fn storage-new () -> PackedStorage
+  (PackedStorage :words (list) :tail 0 :used 0))
+(fn storage-valid ((storage &PackedStorage)) -> bool
+  (match storage
+    ((PackedStorage :words words :tail tail :used used)
+      (and (>= (clone used) 0)
+           (= (len words) (shr (clone used) 3))
+           (= (shr (clone tail) (as u64 (* (bit-and (clone used) 7) 8))) 0|)
+(fn storage-check ((storage &PackedStorage)) -> unit
+  (when (not (storage-valid storage))
+    (storage-panic &"builder storage: invalid state")))
+(fn storage-length ((used i64) (extra i64)) -> i64
+  (when (or (< used 0) (< extra 0))
+    (storage-panic &"builder storage: negative length"))
+  (when (> used (- 9223372036854775807 extra))
+    (storage-panic &"builder storage: length overflow"))
+  (+ used extra))
+; Extend initialized bytes with zero, preserving a valid owner at both ends.
+; A full tail becomes the first new word; capacity remains the List's concern.
+(fn storage-grow-zero ((storage &mut PackedStorage) (extra i64)) -> unit
+  (storage-check storage)
+  (match storage
+    ((PackedStorage :words words :tail tail :used used)
+      (let needed (storage-length (clone used) extra))
+      (let complete (shr needed 3))
+      (let mut count (len words))
+      (when (< count complete)
+        (push words (clone tail))
+        (set tail 0)
+        (set count (+ count 1)))
+      (while (< count complete)
+        (push words (as u64 0))
+        (set count (+ count 1)))
+      (set used needed|)
+(test "packed storage starts empty and survives zero growth"
+  (let mut storage (storage-new))
+  (storage-grow-zero &mut storage 0)
+  (storage-valid &storage))
+(test "packed storage preserves a partial tail without completing a word"
+  (let mut storage (PackedStorage :words (list) :tail 0x4241 :used 2))
+  (storage-grow-zero &mut storage 5)
+  (match &storage
+    ((PackedStorage :words words :tail tail :used used)
+      (and (= (len words) 0)
+           (= (clone tail) 0x4241)
+           (= (clone used) 7)
+           (storage-valid &storage|)
+(test "packed storage completes a tail into initialized words"
+  (let mut storage (PackedStorage :words (list) :tail 0x4241 :used 2))
+  (storage-grow-zero &mut storage 15)
+  (match &storage
+    ((PackedStorage :words words :tail tail :used used)
+      (and (= (len words) 2)
+           (= (get words 0) (as u64 0x4241))
+           (= (get words 1) (as u64 0))
+           (= (clone tail) 0)
+           (= (clone used) 17)
+           (storage-valid &storage|)
+(test "packed storage crosses repeated capacity boundaries"
+  (let mut storage (storage-new))
+  (let mut length 0)
+  (let mut valid true)
+  (while (< length 1100)
+    (storage-grow-zero &mut storage 1)
+    (set length (+ length 1))
+    (set valid (and valid (storage-valid &storage))))
+  valid)
+(test "packed storage clone keeps an independent owner"
+  (let mut original
+    (PackedStorage :words (list (as u64 0x4847464544434241)) :tail 0x4a49 :used 10))
+  (let mut copied (clone original))
+  (storage-grow-zero &mut copied 70)
+  (storage-grow-zero &mut original 1)
+  (and (storage-valid &original)
+    (storage-valid &copied)
+    (match &original
+      ((PackedStorage :words words :tail tail :used used)
+        (and (= (len words) 1) (= (clone tail) 0x4a49) (= (clone used) 11))))
+    (match &copied
+      ((PackedStorage :words words :tail tail :used used)
+        (and (= (len words) 10)
+             (= (get words 1) (as u64 0x4a49))
+             (= (clone used) 80|)
+(test "packed length planning reaches the signed limit without rounding overflow"
+  (and (= (storage-length 0 9223372036854775807) 9223372036854775807)
+       (= (storage-length 9223372036854775800 7) 9223372036854775807)
+       (= (shr (storage-length 9223372036854775807 0) 3) 1152921504606846975)))
+(test "packed storage rejects invalid metadata before growth"
+  (and (not (storage-valid &(PackedStorage :words (list) :tail 0 :used -1)))
+       (not (storage-valid &(PackedStorage :words (list) :tail 0 :used 8)))
+       (not (storage-valid &(PackedStorage :words (list) :tail 256 :used 1)))
+       (not (storage-valid &(PackedStorage :words (list) :tail 1 :used 0|)
+(test "packed growth preserves every starting tail offset"
+  (let mut offset 0)
+  (let mut valid true)
+  (while (< offset 8)
+    (let tail (if (= offset 0) (as u64 0) (- (shl (as u64 1) (as u64 (* offset 8))) 1)))
+    (let mut extra 0)
+    (while (< extra 20)
+      (let mut storage
+        (PackedStorage :words (list (as u64 0x8877665544332211))
+                       :tail tail
+                       :used (+ 8 offset)))
+      (storage-grow-zero &mut storage extra)
+      (set valid (and valid (storage-valid &storage)))
+      (match &storage
+        ((PackedStorage :words words :tail remaining :used used)
+          (set valid
+            (and valid
+                 (= (get words 0) (as u64 0x8877665544332211))
+                 (= (clone used) (+ 8 (+ offset extra)))))
+          (if (< (+ offset extra) 8)
+            (set valid (and valid (= (clone remaining) tail)))
+            (do
+              (set valid (and valid (= (get words 1) tail) (= (clone remaining) 0)))
+              (let mut at 2)
+              (while (< at (len words))
+                (set valid (and valid (= (get words at) (as u64 0))))
+                (set at (+ at 1)))))))
+      (set extra (+ extra 1)))
+    (set offset (+ offset 1)))
+  valid)

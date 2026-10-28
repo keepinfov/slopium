@@ -8,8 +8,8 @@ this is how to walk through them.
 
 Everything is reproducible through the Nix dev shell, and the check suite is
 only whole inside it: it carries valgrind, gdb, qemu, Neovim and an
-`aarch64-unknown-linux-gnu-*` cross toolchain, and fourteen checks quietly skip
-themselves without those.
+`aarch64-unknown-linux-gnu-*` cross toolchain. Affected checks otherwise skip
+when those tools are absent; `SLOPIUM_STRICT=1` makes every skip a failure.
 
 ```sh
 git clone https://github.com/keepinfov/slopium
