@@ -55,7 +55,8 @@ for target in host aarch64; do
             else skip 'missing Valgrind'; fi
         fi
         # Failures must be deliberate panics with the expected message.
-        for failure in negative-used short long tail full negative-extra overflow; do
+        for failure in negative-used short long tail full negative-extra overflow \
+            integer-zero-overflow integer-width-overflow integer-sign-overflow; do
             cp "$source" "$main"
             message='invalid state'
             case "$failure" in
@@ -66,6 +67,9 @@ for target in host aarch64; do
                 full) expression='(storage-grow-zero &mut (PackedStorage :words (list (as u64 0)) :tail 1 :used 8) 0)' ;;
                 negative-extra) expression='(storage-grow-zero &mut (storage-new) -1)'; message='negative length' ;;
                 overflow) expression='(storage-length 9223372036854775807 1)'; message='length overflow' ;;
+                integer-zero-overflow) expression='(storage-integer-room 9223372036854775807 0 0)'; message='length overflow' ;;
+                integer-width-overflow) expression='(storage-integer-room 9223372036854775788 18446744073709551615 0)'; message='length overflow' ;;
+                integer-sign-overflow) expression='(storage-integer-room 9223372036854775788 9223372036854775808 1)'; message='length overflow' ;;
             esac
             printf '\n(fn main () -> i32 %s 0)\n' "$expression" >> "$main"
             "$slopic" "${base[@]}" "${flags[@]}" "${opt[@]}" -o "$out-fail"
@@ -75,6 +79,28 @@ for target in host aarch64; do
             [[ "$status" == 101 ]]
             grep -Fq "builder storage: $message" "$out-fail.out"
         done
+        # Every future exposed writer checks forged states, including empty
+        # pieces and zero integers, before any word access or allocation.
+        for state in \
+            '(PackedStorage :words (list) :tail 0 :used -1)' \
+            '(PackedStorage :words (list) :tail 0 :used 8)' \
+            '(PackedStorage :words (list (as u64 0)) :tail 0 :used 0)' \
+            '(PackedStorage :words (list) :tail 256 :used 1)' \
+            '(PackedStorage :words (list (as u64 0)) :tail 1 :used 8)'; do
+            for operation in 'storage-write-byte 0' 'storage-write-str &""' \
+                'storage-write-str &"a"' 'storage-write-i64 0' 'storage-write-u64 0'; do
+                cp "$source" "$main"
+                read -r writer argument <<< "$operation"
+                printf '\n(fn main () -> i32 (let mut state %s) (%s &mut state %s) 0)\n' \
+                    "$state" "$writer" "$argument" >> "$main"
+                "$slopic" "${base[@]}" "${flags[@]}" "${opt[@]}" -o "$out-fail"
+                if "${execute[@]}" "$out-fail" > "$out-fail.out" 2>&1; then
+                    echo "builder-storage-check: accepted $operation on $state" >&2; exit 1
+                else result=$?; fi
+                [[ "$result" == 101 ]]
+                grep -Fq 'builder storage: invalid state' "$out-fail.out"
+            done
+        done
         # Link only core and the four allocator/failure hooks on both targets.
         cp "$source" "$main"
         cat >> "$main" <<'SLP'
@@ -82,6 +108,10 @@ for target in host aarch64; do
 (fn answer () -> i64
   (let mut state (PackedStorage :words (list (as u64 65)) :tail 66 :used 9))
   (storage-grow-zero &mut state 71)
+  (storage-write-str &mut state &"core\0\xffé")
+  (storage-write-byte &mut state 255)
+  (storage-write-i64 &mut state -9223372036854775808)
+  (storage-write-u64 &mut state 18446744073709551615)
   (if (storage-valid &state) 42 1))
 SLP
         "$slopic" "${base[@]}" "${flags[@]}" "${opt[@]}" --freestanding --library --emit obj -o "$out.o"
@@ -95,6 +125,32 @@ SLP
         done < "$out-symbols"
         "$cc" "$out-core.o" "$work/driver.c" -o "$out-core"
         "${execute[@]}" "$out-core"
+        # Observe actual runtime calls, without changing the production owner.
+        cp "$source" "$main"
+        python3 - "$main" <<'PY'
+import sys
+with open(sys.argv[1], 'a') as f:
+    f.write('''
+(export answer)
+(fn answer () -> i64
+  (let mut state (storage-new))
+  (let piece "''' + 'a' * 4096 + '''")
+  (let mut repeat 0)
+  (while (< repeat 256)
+    (storage-write-str &mut state &piece)
+    (set repeat (+ repeat 1)))
+  (storage-write-str &mut state &"")
+  (storage-write-byte &mut state 255)
+  (storage-check &state)
+  (match &state ((PackedStorage :words _ :tail _ :used used) (clone used))))
+''')
+PY
+        "$slopic" "${base[@]}" "${flags[@]}" "${opt[@]}" --freestanding --library --emit obj -o "$out-count.o"
+        "$cc" -D_POSIX_C_SOURCE=200809L -Wl,--wrap=sl_rt_list_push \
+            -Wl,--wrap=sl_rt_builder_pack_words "$out-count.o" \
+            "$root/scripts/builder-pack-count.c" "$root/runtime/slop_rt_core.c" \
+            "$root/runtime/slop_rt_hosted.c" -o "$out-count"
+        "${execute[@]}" "$out-count"
         echo "builder-storage-check: $expected owner tests, panics and core linkage $target/$profile ... ok"
     done
 done

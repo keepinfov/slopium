@@ -90,12 +90,14 @@
 (extern "sl_rt_panic" (storage-panic (message &String)) -> unit)
 (fn storage-new () -> PackedStorage
   (PackedStorage :words (list) :tail 0 :used 0))
+(fn (inline) storage-valid-parts ((count i64) (tail u64) (used i64)) -> bool
+  (and (>= used 0)
+       (= count (shr used 3))
+       (= (shr tail (as u64 (* (bit-and used 7) 8))) 0)))
 (fn storage-valid ((storage &PackedStorage)) -> bool
   (match storage
     ((PackedStorage :words words :tail tail :used used)
-      (and (>= (clone used) 0)
-           (= (len words) (shr (clone used) 3))
-           (= (shr (clone tail) (as u64 (* (bit-and (clone used) 7) 8))) 0|)
+      (storage-valid-parts (len words) (clone tail) (clone used|)
 (fn storage-check ((storage &PackedStorage)) -> unit
   (when (not (storage-valid storage))
     (storage-panic &"builder storage: invalid state")))
@@ -210,3 +212,167 @@
       (set extra (+ extra 1)))
     (set offset (+ offset 1)))
   valid)
+
+(extern "sl_rt_builder_pack_words"
+  (storage-pack (words &mut (List u64))
+                (tail u64)
+                (used i64)
+                (text &String)
+                (length i64))
+  -> u64)
+
+; Only checked operations call this after reserving logical length.
+(fn storage-byte-unchecked ((storage &mut PackedStorage) (byte u8)) -> unit
+  (match storage
+    ((PackedStorage :words words :tail tail :used used)
+      (let offset (bit-and (clone used) 7))
+      (let combined (bit-or (clone tail) (shl (as u64 byte) (as u64 (* offset 8)))))
+      (if (= offset 7)
+        (do
+          (push words combined)
+          (set tail 0))
+        (set tail combined))
+      (set used (+ (clone used) 1|)
+(fn storage-write-byte ((storage &mut PackedStorage) (byte u8)) -> unit
+  (storage-check storage)
+  (match storage
+    ((PackedStorage :words _ :tail _ :used used) (storage-length (clone used) 1)))
+  (storage-byte-unchecked storage byte))
+; Keep checked scalar metadata live through growth, so even one-byte pieces
+; avoid repeated owner traversals. C sees sized words only during its borrow.
+(fn storage-write-str ((storage &mut PackedStorage) (text &String)) -> unit
+  (match storage
+    ((PackedStorage :words words :tail tail :used used)
+      (let old-used (clone used))
+      (let old-tail (clone tail))
+      (let mut count (len words))
+      (when (not (storage-valid-parts count old-tail old-used))
+        (storage-panic &"builder storage: invalid state"))
+      (let width (len text))
+      (when (< width 0)
+        (storage-panic &"builder storage: negative length"))
+      (when (> old-used (- 9223372036854775807 width))
+        (storage-panic &"builder storage: length overflow"))
+      (when (> width 0)
+        (let needed (+ old-used width))
+        (let complete (shr needed 3))
+        (while (< count complete)
+          (push words (as u64 0))
+          (set count (+ count 1)))
+        (set tail (storage-pack words old-tail old-used text width))
+        (set used needed|)
+
+; The existing quotient-first algorithm emits at most twenty decimal digits.
+(fn storage-digits ((storage &mut PackedStorage) (value u64)) -> unit
+  (when (>= value 10)
+    (storage-digits storage (/ value 10)))
+  (storage-byte-unchecked storage (as u8 (+ 48 (as i64 (% value 10|)
+(fn storage-integer-room ((used i64) (value u64) (sign i64)) -> unit
+  (when (> used 9223372036854775787)
+    (let mut remaining value)
+    (let mut width (+ sign 1))
+    (while (>= remaining 10)
+      (set remaining (/ remaining 10))
+      (set width (+ width 1)))
+    (storage-length used width)))
+(fn storage-write-u64 ((storage &mut PackedStorage) (value u64)) -> unit
+  (storage-check storage)
+  (match storage
+    ((PackedStorage :words _ :tail _ :used used)
+      (storage-integer-room (clone used) value 0)))
+  (storage-digits storage value))
+(fn storage-write-i64 ((storage &mut PackedStorage) (value i64)) -> unit
+  (storage-check storage)
+  (let magnitude (if (< value 0) (+ (as u64 (- (+ value 1))) 1) (as u64 value)))
+  (match storage
+    ((PackedStorage :words _ :tail _ :used used)
+      (storage-integer-room (clone used) magnitude (if (< value 0) 1 0))))
+  (when (< value 0)
+    (storage-byte-unchecked storage 45))
+  (storage-digits storage magnitude))
+
+; Compare private storage without exporting a reader or finalization operation.
+(fn storage-test-equal ((storage &PackedStorage) (text &String)) -> bool
+  (match storage
+    ((PackedStorage :words words :tail tail :used used)
+      (let mut valid (and (storage-valid storage) (= (clone used) (len text))))
+      (let mut index 0)
+      (while (< index (clone used))
+        (let word
+          (if (< (shr index 3) (len words)) (get words (shr index 3)) (clone tail)))
+        (set valid
+          (and valid
+            (= (as i64 (bit-and (shr word (as u64 (* (bit-and index 7) 8))) 255))
+               (byte-raw text (len text) index))))
+        (set index (+ index 1)))
+      valid)))
+(test "packed append bytes and pieces across all tail offsets"
+  (let text "\0\x80\xfféabcdef0123456789")
+  (let mut valid true)
+  (let mut offset 0)
+  (while (< offset 8)
+    (let mut width 0)
+    (while (<= width (len &text))
+      (let mut storage (storage-new))
+      (let mut reference (new))
+      (let mut prefix 0)
+      (while (< prefix offset)
+        (storage-write-byte &mut storage 255)
+        (write-byte &mut reference 255)
+        (set prefix (+ prefix 1)))
+      (let mut source (new))
+      (let mut source-index 0)
+      (while (< source-index width)
+        (write-byte &mut source (as u8 (byte-raw &text (len &text) source-index)))
+        (set source-index (+ source-index 1)))
+      (let piece (build source))
+      (storage-write-str &mut storage &piece)
+      (write-str &mut reference &piece)
+      (storage-write-str &mut storage &"")
+      (set valid (and valid (storage-test-equal &storage &(build reference))))
+      (set width (+ width 1)))
+    (set offset (+ offset 1)))
+  valid)
+(test "packed append keeps integer extremes and zero"
+  (let mut storage (storage-new))
+  (storage-write-i64 &mut storage -9223372036854775808)
+  (storage-write-byte &mut storage 32)
+  (storage-write-u64 &mut storage 18446744073709551615)
+  (storage-write-byte &mut storage 32)
+  (storage-write-i64 &mut storage 9223372036854775807)
+  (storage-write-byte &mut storage 32)
+  (storage-write-u64 &mut storage 0)
+  (storage-test-equal &storage
+    &"-9223372036854775808 18446744073709551615 9223372036854775807 0"))
+
+(test "packed append preserves every byte and repeated mixed growth"
+  (let mut storage (storage-new))
+  (let mut reference (new))
+  (let piece "\0\x80\xffé0123456789")
+  (let mut i 0)
+  (while (< i 1024)
+    (let byte (as u8 (bit-and i 255)))
+    (storage-write-byte &mut storage byte)
+    (write-byte &mut reference byte)
+    (storage-write-str &mut storage &piece)
+    (write-str &mut reference &piece)
+    (storage-write-i64 &mut storage (- i 512))
+    (write-i64 &mut reference (- i 512))
+    (set i (+ i 1)))
+  (and (storage-test-equal &storage &(build reference))
+       (storage-test-equal &(storage-new) &"")
+       (= (len &piece) 15)))
+(test "packed append clones an independent tail and complete words"
+  (let mut original (storage-new))
+  (storage-write-str &mut original &"abcdefgh\0\xff")
+  (let mut copied (clone original))
+  (storage-write-str &mut original &"é")
+  (storage-write-u64 &mut copied 18446744073709551615)
+  (and (storage-test-equal &original &"abcdefgh\0\xffé")
+       (storage-test-equal &copied &"abcdefgh\0\xff18446744073709551615")))
+(test "packed integer preflight accepts exact available room"
+  (storage-integer-room 9223372036854775806 0 0)
+  (storage-integer-room 9223372036854775805 1 1)
+  (storage-integer-room 9223372036854775787 18446744073709551615 0)
+  (storage-integer-room 9223372036854775787 9223372036854775808 1)
+  true)

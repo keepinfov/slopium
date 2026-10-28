@@ -1496,6 +1496,10 @@ test main:сумма ... FAILED: expected 42, got 41
 Формат пакета и хранилище: [`docs/packaging.md`](docs/packaging.md).
 Модель безопасности: [`docs/security.md`](docs/security.md).
 ABI рантайма (версия 1): [`docs/runtime-abi.md`](docs/runtime-abi.md).
+В ABI добавлен `sl_rt_builder_pack_words`: упаковка байтов в заранее
+подготовленные слова через временное заимствование, без передачи владения.
+Это основа компактного builder; публичный `Builder` пока использует прежнее
+представление.
 
 ## Neovim
 

@@ -14,7 +14,7 @@ dependencies = [
 name = "core"
 version = "0.17.0"
 source = "toolchain"
-checksum = "d98b78e4c463cfa79c61bd53d079f10b1ecb42e7792f842ee5e0e1eef20daffe"
+checksum = "0394814ec2cec8131aa9cc2425d1c76e5dba7909d4d4c8b5b5d4a67249019f24"
 dependencies = []
 
 [[package]]
