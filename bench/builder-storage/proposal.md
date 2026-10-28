@@ -1,7 +1,8 @@
 # Compact builder storage proposal
 
-Status: measured recommendation, awaiting separate production approval. Issue
-#157; `D-165` remains deferred. This document is not an approved decision.
+Status: approved by `D-167` on 2026-10-28; implementation remains separate.
+Issue #157. The decision covers local packing, public-field migration and the
+initial per-word push scope; general narrow collection storage stays deferred.
 
 The comparison considers three alternatives: eight bytes per existing u64 list
 word, a dedicated owning byte buffer, and general narrow-element packing. The
@@ -39,14 +40,13 @@ library-only substitute under that contract. No read-only pointer is used to
 bypass the restriction. Returning a raw pointer also does not create an affine
 owner with drop/clone behavior.
 
-Any word-backed Builder proposal therefore requires explicit approval of its
-public compatibility change before implementation. Keeping function names does
-not preserve direct construction or destructuring. Existing list/slice C APIs
-must not be silently repurposed as packed byte APIs.
+The public compatibility change has separate approval in `D-167`. Keeping
+function names does not preserve direct construction or destructuring. Existing
+list/slice C APIs must not be silently repurposed as packed byte APIs.
 
 ## Decision and migration plan
 
-Recommend builder-local word packing, subject to the approval below. The
+The approved design is builder-local word packing (`D-167`). The
 [checked comparison](2026-10-28.md) measures original-kernel RSS of 2588 KiB
 against the 5120 KiB goal and a maximum 4 MiB-piece RSS of 9904 KiB against
 16384 KiB. Original wall time improves 51.0% in both independent rounds and
@@ -62,11 +62,11 @@ both as prerequisites for the initial builder improvement; general collection
 workloads can justify a separate design later. Native C model numbers are not
 predictions of unimplemented Slopium compiler features.
 
-Before production #158–#160, the review must select a representation and its
-compatibility policy, then add an approved tracked decision superseding the
-relevant part of `D-165`. No such approval is inferred from the research PR.
+The separate design and compatibility approval is now recorded in `D-167`,
+superseding the builder-local deferral in `D-165`. Production #158–#160 follows
+after this decision lands; this research changes no installed representation.
 
-If the packed-word design is selected, keep the functions `new`, `write-byte`,
+The packed-word design keeps the functions `new`, `write-byte`,
 `write-str`, `write-u64`, `write-i64`, `size` and consuming `build`. Client code
 that currently constructs the `bytes` field migrates to `new` and writes the
 input bytes. A client that consumes/destructures the field migrates to `build`
@@ -142,7 +142,7 @@ compatible substitution: the same List u8 field currently exposes one element
 per logical byte. A separate opt-in packed module/type could retain the old API,
 but that is an explicit additional public API choice and would not make existing
 std:builder users compact automatically. Default replacement and public-field
-migration require separate breaking-change approval.
+migration have separate breaking-change approval in `D-167`.
 
 ## Valid states of the proposed packed owner
 
@@ -201,29 +201,24 @@ An additional prototype loan probe keeps `held = &out`, attempts a write through
 borrow `out` while it is shared-borrowed". This is evidence of the existing
 owner-wide loan rule, not a new borrow-checker implementation.
 
-## Per-piece reservation is a separate scope decision
+## Approved initial per-word growth scope
 
 The executable prototype still pre-fills an ordinary list with one `push` per
 complete word. It removes the old one-call-per-byte pattern by a factor of eight
 and meets the measured append/RSS goals, but it does **not** implement
-#159's stronger acceptance item of one capacity decision per whole piece.
+#159's original acceptance item of one capacity decision per whole piece.
 The existing mutable-list extern supplies payload pointer and element count; it
 does not lend the list header or allow C to resize that allocation.
 
-The recommendation is to approve this measured word-prefill strategy for the
-initial compact builder and explicitly revise that #159 acceptance item to one
-push per completed word, one borrowed pack call per nonempty piece and no
-per-byte growth call. One-reserve-per-piece remains deferred. This is a proposed
-scope adjustment, not a silent waiver of the issue. Separate approval must cover
-it together with the public-field migration before production starts.
-
-Retaining the stronger target instead requires a separately specified compiler
-reserve operation or owner-header FFI protocol, with its language/ABI and
-companion changes. Neither is implemented or justified by the C models here. No
-header is recovered from a borrowed payload pointer, no readonly borrow is cast
-to mutable, and no new builtin is assumed. The measured gains are the reason to
-prefer the bounded initial design, rather than expanding compiler scope solely
-to remove the remaining per-word capacity checks.
+`D-167` approves the measured word-prefill strategy for the initial compact
+builder: one push per completed word, one borrowed pack call per nonempty piece
+and no per-byte growth call. This explicitly revises #159's initial acceptance;
+one-reserve-per-piece remains deferred. Retaining that stronger target would
+require a separately specified compiler reserve operation or owner-header FFI
+protocol, with its language/ABI and companion changes. Neither is implemented
+or justified by the C models here. No header is recovered from a borrowed
+payload pointer and no new builtin is assumed. The measured gains justify the
+bounded initial design and its remaining per-word capacity checks.
 
 ## Mutable raw-field clients also need migration
 
@@ -241,11 +236,11 @@ for both a deep clone and finalization. No new indexed mutation/view adapter is
 included by default. Such adapters need a separate API decision rather than a
 claim of source compatibility.
 
-## Exact approval and landing boundary
+## Approved scope and landing boundary
 
-The requested approval covers default `core:builder:Builder` storage as `words:
+The approval in `D-167` covers default `core:builder:Builder` storage as `words:
 (List u64)`, scalar `tail: u64` and logical `used: i64`; migration away from the
-public `bytes: (List u8)` constructor/field/pattern; and the proposed
+public `bytes: (List u8)` constructor/field/pattern; and the explicit
 #159 adjustment accepting one push per completed word in the initial design.
 It retains the qualified Builder type and writer/size/build functions, ordinary
 collection layouts and the existing C borrow vocabulary. It adds two bounded
@@ -258,12 +253,10 @@ integration change must use the approved `!` subject and `BREAKING CHANGE:`
 trailer, the issue fragment and explicit Russian migration guide. No release
 version moves as part of these implementation tasks.
 
-Only after separate approval may a tracked decision supersede the relevant part
-of `D-165`, #159's acceptance be revised, and production #158 start. This
-research PR records no accepted new decision and does not activate any
-representation change. If one-reserve-per-piece remains mandatory, the design
-must first specify that compiler/ABI extension instead of claiming the current
-prototype satisfies it.
+`D-167` records the separate representation, migration and initial growth-scope
+approval. Production #158 can follow once the decision lands. This research
+still activates no representation change. A future one-reserve-per-piece path
+must specify its compiler/ABI extension and establish its benefit separately.
 
 ## Source audit anchors
 

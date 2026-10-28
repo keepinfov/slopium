@@ -1,8 +1,9 @@
 # Builder storage study
 
-Issue #157 researches storage before any production representation decision.
-`D-165` remains deferred. Nothing here changes `core:builder`, the compiler,
-installed runtime symbols, list layouts or release versions.
+Issue #157 researches storage; `D-167` records the approved local packing,
+public-field migration and initial per-word growth scope. Nothing here changes
+`core:builder`, the compiler, installed runtime symbols, list layouts or release
+versions.
 
 The runnable Slopium prototype stores complete words in an ordinary `List u64`
 and keeps one partial word in its owner. Two research C entry points pack a
@@ -73,12 +74,13 @@ and regenerates no fixture. The ordinary full repository gate still applies to
 changes submitted with this study.
 
 The [design proposal](proposal.md) records the ownership/compatibility matrix
-and the separate approval required before production work.
+and the separate approval recorded in `D-167` before production work.
 
 The [2026-10-28 report](2026-10-28.md) contains the corrected full paired
 comparison, identities, all append/read/finalization rows and missed targets.
 The prototype still pushes once per completed word, not once per piece; the
-proposal requests explicit agreement on that #159 scope adjustment. Production
-also needs public-state validation and actual float/library integration.
+approved decision explicitly accepts that initial #159 scope adjustment.
+Production also needs public-state validation and actual float/library
+integration.
 Slopium's C runtime/bridge use the compiler's flags with no explicit C
 optimization level; native C models use `-O2` and are reported separately.
