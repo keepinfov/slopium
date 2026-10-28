@@ -600,3 +600,29 @@ Unrecoverable runtime errors print a normalized message and exit with status
 
 The host `cc` is used only to assemble and link emitted assembly. No LLVM,
 Cranelift, VM, or interpreter is involved.
+
+## Compact builder storage foundation
+
+`D-167` selects builder-local packing without changing ordinary collection
+widths or compiler ownership rules. The foundation in `core:builder` is a
+private `PackedStorage` aggregate over an ordinary `List u64`, scalar tail and
+logical byte length. It is not exported or connected to the public `Builder`
+yet. Shared validation checks nonnegative length, exact complete-word count and
+zero unused tail bits. Length planning rejects negative additions and overflow
+before allocation; division by eight needs no overflow-prone round-up addition.
+
+Zero-initializing growth preserves the existing prefix:
+a completed partial tail becomes the first new word, subsequent words are zero,
+and a remaining partial tail contains only initialized low bytes. List growth
+keeps its checked four-element initial capacity and doubling policy, including
+allocation-size checks in the existing runtime. Ordinary structural clone/drop
+and loans apply. No header is recovered from a C payload pointer.
+
+Same-module tests exercise the private owner without exporting a new type.
+`scripts/builder-storage-check.sh`, called by `core-check.sh`, compiles a copy
+of the actual library module as the test owner so dependencies' tests remain
+excluded. It checks both targets/profiles, malformed state and arithmetic
+failures, the owner loan, memory tools and core-only linkage. The existing
+external builder fixture preserves the public field/API until the later
+integration change. Append operations and owned String finalization follow
+separately; this foundation claims no installed builder speedup.

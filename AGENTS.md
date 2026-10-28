@@ -433,9 +433,9 @@ Rules:
 
 - A failing required check blocks the merge. If the failure is demonstrably
   pre-existing, show before-and-after evidence and ask.
-- Without valgrind, gdb, qemu, Neovim, or the AArch64 toolchain, fourteen
-  places in the suite print a line and pass. `SLOPIUM_STRICT=1 scripts/verify.sh` turns every
-  one of them into a failure. Use it when you want to know that the suite ran
+- Without valgrind, gdb, qemu, Neovim, or the AArch64 toolchain, affected
+  checks print a line and skip. `SLOPIUM_STRICT=1 scripts/verify.sh` turns every
+  such skip into a failure. Use it when you want to know that the suite ran
   rather than that it finished.
 - If you could not run part of the suite, say exactly which part and why in your
   report. A skipped check is never reported as a passing one.

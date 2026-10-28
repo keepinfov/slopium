@@ -84,3 +84,7 @@ Production also needs public-state validation and actual float/library
 integration.
 Slopium's C runtime/bridge use the compiler's flags with no explicit C
 optimization level; native C models use `-O2` and are reported separately.
+
+The [#158 foundation report](2026-10-28-foundation.md) records private-owner
+validation, unchanged public function assembly, the retained code/data footprint
+and the paired original-control results before public integration.

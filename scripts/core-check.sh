@@ -354,4 +354,5 @@ check_target aarch64-unknown-linux-gnu \
 # Only x86-64 has a `-none` row: freestanding AArch64 waits until freestanding
 # x86-64 is proven, which is what this line does.
 check_through_the_compiler x86_64-unknown-none "cc" "nm" || status=1
+SLOPIC="$slopic" "$root/scripts/builder-storage-check.sh" || status=1
 exit "$status"

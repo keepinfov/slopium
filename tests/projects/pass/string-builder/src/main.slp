@@ -158,3 +158,12 @@
   (write-i64 &mut out 0)
   (write-u64 &mut out 1)
   (equal-text &(build out) &"-9223372036854775808 9223372036854775807 -101"))
+
+(test "the storage foundation preserves public builder construction"
+  (let mut out (Builder :bytes (list (as u8 65) (as u8 0))))
+  (let copied (clone out))
+  (let fields-agree
+    (match &out
+      ((Builder :bytes bytes) (= (len bytes) 2))))
+  (write-byte &mut out 255)
+  (and fields-agree (equals &(build out) &"A\0\xff") (equals &(build copied) &"A\0")))
