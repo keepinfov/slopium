@@ -626,3 +626,29 @@ failures, the owner loan, memory tools and core-only linkage. The existing
 external builder fixture preserves the public field/API until the later
 integration change. Append operations and owned String finalization follow
 separately; this foundation claims no installed builder speedup.
+
+Private append operations extend this owner before public integration. Byte
+writes combine a low-byte-first scalar tail and push only when it completes.
+Piece writes load metadata once, validate the old state with the shared scalar
+validator, check logical addition, then initialize one word per completed word.
+The exclusive C borrow sees the already sized payload and the old tail/count;
+`sl_rt_builder_pack_words` replaces only newly completed words and returns the
+new tail. The owner is valid again when the operation returns. No other owner
+operation runs during the temporary payload borrow. Empty pieces still validate
+the owner but make no packing call. The pack borrow begins after list growth;
+the source String remains borrowed and unchanged throughout the operation.
+
+Integer writes retain `D-166` quotient-first emission. An exposed operation
+validates once and checks room for every byte before emitting a sign or digit.
+At most twenty bytes are possible; near the signed length limit the exact
+decimal width is counted before mutation. Private digit recursion then writes
+without repeating owner validation per digit. Existing process-terminating
+panic behavior applies to invalid state, overflow and allocation refusal.
+
+The storage checker exercises each writer on forged states, byte/source
+preservation, mixed growth, integer extremes and independent clones in all
+four target/profile combinations. Linker-wrapped runtime counters assert that
+1 MiB in 256 pieces performs 131072 pushes and 256 packing calls. The separate
+runtime bridge checker verifies both targets at C `-O0`/`-O2`, native memory
+tools and invalid C bounds before any pointer access. Public `Builder` still
+uses its previous representation; owned finalization remains separate.

@@ -134,6 +134,9 @@ SlList *sl_rt_list_clone(const SlList *source);
 void sl_rt_list_drop(SlList *list);
 void sl_rt_builder_write_bytes(int64_t *elements, int64_t count,
                                const char *text, int64_t length);
+uint64_t sl_rt_builder_pack_words(uint64_t *words, int64_t count,
+                                 uint64_t tail, int64_t used,
+                                 const char *text, int64_t length);
 ```
 
 A list owns its elements. `sl_rt_list_new` returns an empty list the caller
@@ -161,6 +164,25 @@ must be nonnegative and `count >= length`; otherwise the helper panics. An
 empty piece writes nothing, so a null element pointer is valid when `count`
 is zero. The source is borrowed for the call and may contain NUL or arbitrary
 bytes; each byte is widened unsigned into one word.
+
+`sl_rt_builder_pack_words` adds the compact bridge selected by `D-167`.
+It borrows an exclusively writable array of `count` initialized numeric words
+that the caller has already sized for the append. `used` and `tail` describe
+the old logical bytes; `text` borrows exactly `length` source bytes. The first
+byte occupies the low eight bits of a word, independently of native endianness.
+Existing complete words remain unchanged; newly completed words are replaced,
+and the result is the remaining partial tail with unused high bits zero.
+The helper neither allocates, resizes an owner header nor retains pointers.
+
+Before touching either pointer, it rejects negative `used` or `length`, signed
+addition overflow, a count unequal to `floor((used + length) / 8)`, a null word
+pointer with nonzero count, a null source with nonzero length, or nonzero
+unused bits in the old tail. Failure panics with `builder packed append bounds`.
+An empty append returns the old tail. Source and destination are disjoint live
+borrows; NUL, high bytes and UTF-8 receive identical byte semantics. The owning
+Slopium caller checks its old word count before growing and lending the new
+array. The public builder has not switched to this storage yet; the existing
+`sl_rt_builder_write_bytes` signature and behavior remain part of ABI v1.
 
 ### Slices
 

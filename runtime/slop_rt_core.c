@@ -245,6 +245,28 @@ void sl_rt_builder_write_bytes(int64_t *elements, int64_t count,
     }
 }
 
+/* Numeric low-byte-first words do not depend on the target's endianness.
+ * The exclusive payload borrow is already sized; neither pointer is retained
+ * and no owner header may be resized through this bridge (`D-167`). */
+uint64_t sl_rt_builder_pack_words(uint64_t *words, int64_t count,
+                                 uint64_t tail, int64_t used,
+                                 const char *text, int64_t length) {
+    if (used < 0 || length < 0 || used > INT64_MAX - length ||
+        count != (used + length) / 8 || (count && !words) ||
+        (length && !text) || (tail >> (((uint64_t)used & 7) * 8)))
+        RT_FAIL("builder packed append bounds");
+    uint64_t position = (uint64_t)used;
+    for (int64_t i = 0; i < length; ++i) {
+        tail |= (uint64_t)(unsigned char)text[i] << ((position & 7) * 8);
+        if ((position & 7) == 7) {
+            words[position / 8] = tail;
+            tail = 0;
+        }
+        ++position;
+    }
+    return tail;
+}
+
 uint64_t sl_rt_list_len(const SlList *list) {
     return list->len;
 }

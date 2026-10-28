@@ -88,3 +88,27 @@ optimization level; native C models use `-O2` and are reported separately.
 The [#158 foundation report](2026-10-28-foundation.md) records private-owner
 validation, unchanged public function assembly, the retained code/data footprint
 and the paired original-control results before public integration.
+
+The #159 append harness copies the actual `std/core/builder.slp` module and
+adds diagnostic-only exports and a research String adapter inside its temporary
+package. It compares the old public writers and the private checked packed
+writers through the same module boundary. `append_ns` measures production
+append code; `research_finalize_ns`, total wall time and RSS include the older
+study finalizer and do not establish production finalization or public builder
+integration. The unchanged original kernel is also built with both compilers.
+
+```sh
+python3 bench/builder-storage/append.py \
+  --compiler target/debug/slopic \
+  --baseline-compiler /path/to/baseline/target/debug/slopic \
+  --baseline-root /path/to/baseline \
+  --pin 2 --outdir bench/results/builder-storage/append-final
+```
+
+The default matrix uses two independently warmed, shuffled rounds with fifteen
+samples for 1/5/7/8/9/64/4096-byte pieces across 8 KiB, 512 KiB and 4 MiB
+documents, records, short/long integers and the original control. `--quick` is
+a three-sample harness check only. Run measurements after local builds and
+checks finish; retain the raw report, source identities and every regression.
+The [checked append report](2026-10-28-append.md) contains both final rounds,
+all controls, the slower research-finalization rows and validation limits.
