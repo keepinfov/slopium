@@ -5,6 +5,12 @@ public-field migration and initial per-word growth scope. Nothing here changes
 `core:builder`, the compiler, installed runtime symbols, list layouts or release
 versions.
 
+The original #157 study uses its recorded pre-integration source revision
+`94cc2822721532e94242cafd773166ecc599fbbe`; its "current" variant denotes that
+word-per-byte baseline. The [public integration report](2026-10-28-integration.md)
+compares the actual installed builders, includes C/Rust controls, cold and warm
+small-case observations, and records missed goals as well as memory gains.
+
 The runnable Slopium prototype stores complete words in an ordinary `List u64`
 and keeps one partial word in its owner. Two research C entry points pack a
 borrowed pre-sized word list and produce an owned runtime String. All word
@@ -96,6 +102,12 @@ writers through the same module boundary. `append_ns` measures production
 append code; `research_finalize_ns`, total wall time and RSS include the older
 study finalizer and do not establish production finalization or public builder
 integration. The unchanged original kernel is also built with both compilers.
+
+Run this historical private-owner harness from its recorded #159 revision
+`bd9d8a624a38b8e69ad6935b87ba45c02eb3ae81`; public integration renames those
+private helpers. Current production comparisons use
+`bench/builder-phases/compare.py --compact`, including one-byte and word-edge
+pieces with the real installed builder and owned finalization.
 
 ```sh
 python3 bench/builder-storage/append.py \

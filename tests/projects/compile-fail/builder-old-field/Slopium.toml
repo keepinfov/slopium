@@ -1,0 +1,7 @@
+[package]
+name = "builder-old-field"
+version = "0.1.0"
+entry = "src/main.slp"
+
+[dependencies]
+std = { toolchain = true }

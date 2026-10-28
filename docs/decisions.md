@@ -4106,3 +4106,16 @@ and float integration remain implementation gates; the research prototype does
 not replace them. Each implementation needs its full validation and refreshed
 measurements. This decision changes no installed representation or release
 version by itself.
+
+### D-167 implementation — 2026-10-28
+
+The public `Builder` now uses the selected words/tail/count representation.
+`size`, every writer and consuming `build` validate logical metadata; ordinary
+structural clone/drop keep their existing field ownership and do not interpret
+that metadata. The consuming conversion uses additive
+`sl_rt_string_from_words`, with a new String allocation and explicit whole-word
+byte decoding, while every earlier runtime ABI entry remains available.
+`README.md` records the incompatible raw-field migration and the allocation
+cost of reading a clone through a String. Module interface keys already include
+field names/types, so the migration needs verification and bundled digest
+regeneration rather than a new cache design or version increment.

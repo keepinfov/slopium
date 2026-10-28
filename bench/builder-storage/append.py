@@ -37,6 +37,9 @@ def main():
         parser.error('pin outside permitted affinity')
     root = Path(__file__).resolve().parents[2]
     here = Path(__file__).resolve().parent
+    if '(struct PackedStorage ' not in (root / 'std/core/builder.slp').read_text():
+        parser.error('this historical private-owner harness requires the recorded #159 revision; '
+                     'use builder-phases/compare.py --compact for public integration')
     out = args.outdir.resolve()
     out.mkdir(parents=True, exist_ok=False)
     compiler, baseline = args.compiler.resolve(), args.baseline_compiler.resolve()

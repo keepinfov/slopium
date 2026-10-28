@@ -47,6 +47,8 @@ def main():
     parser.add_argument('--outdir', type=Path, required=True)
     parser.add_argument('--pin', type=int, required=True)
     parser.add_argument('--case', action='append', default=[], help='select a named workload; repeatable')
+    parser.add_argument('--compact', action='store_true',
+                        help='include one-byte and 7/8/9-byte piece boundaries')
     parser.add_argument('--repeat-document', type=int, default=1,
                         help='repeat each diagnostic in one process; discard its first five intervals')
     args = parser.parse_args()
@@ -72,7 +74,7 @@ def main():
         'cpu': next(line.split(':', 1)[1].strip() for line in Path('/proc/cpuinfo').read_text().splitlines() if line.startswith('model name')),
         'affinity': sorted(os.sched_getaffinity(0)), 'load_before': os.getloadavg(),
         'runs': 15, 'warmup': 3, 'rounds': 2, 'seeds': [154, 155],
-        'repeat_document': args.repeat_document,
+        'repeat_document': args.repeat_document, 'compact': args.compact,
         'before': identity(before), 'after': identity(after),
         'tools': {name: run(command).splitlines()[0] for name, command in {
             'cc': ['cc', '--version'], 'rustc': ['rustc', '--version'],
@@ -85,8 +87,9 @@ def main():
     cases = [(f'{name}-{count}', mode, count, 5) for count in [1000, 50000, 250000]
              for name, mode in [('records', 0), ('integers', 2)]]
     cases += [(f'long-integers-{count}', 3, count, 5) for count in [1000, 50000, 250000]]
+    widths = [1, 5, 7, 8, 9, 64, 4096] if args.compact else [5, 64, 4096]
     cases += [(f'pieces-{size}-{width}', 1, size // width, width)
-              for size in [8192, 524288, 4194304] for width in [5, 64, 4096]]
+              for size in [8192, 524288, 4194304] for width in widths]
     cases += [('original-control', 0, 50000, 5)]
     if set(args.case) - {case[0] for case in cases}:
         parser.error('unknown workload name')
@@ -128,18 +131,19 @@ def main():
             command = list(map(str, [*command, source, '-o', binary]))
             subprocess.run(command, check=True, stdout=subprocess.DEVNULL)
             binaries[name, language] = binary
-            case['languages'][language] = {'build': command, 'source_sha256': sha(source.read_bytes()), 'rounds': []}
+            case['languages'][language] = {'build': command, 'source_sha256': sha(source.read_bytes()),
+                                         'binary_sha256': sha(binary.read_bytes()), 'rounds': []}
 
     def sample(name, language):
         with tempfile.TemporaryFile() as stdout:
-            _, rss, wall = harness.spawn([str(binaries[name, language])], stdout.fileno())
+            code, rss, wall = harness.spawn([str(binaries[name, language])], stdout.fileno())
             stdout.seek(0)
             values = list(map(int, stdout.read().splitlines()))
         width = 2 if name == 'original-control' else 6
         repetitions = 1 if name == 'original-control' else args.repeat_document
         groups = [values[i:i + width] for i in range(0, len(values), width)]
-        if len(values) != width * repetitions or any(group[:2] != report['cases'][name]['correctness'] for group in groups) or any(v < 0 for v in values):
-            raise RuntimeError(f'invalid output: {name}/{language}: {values}')
+        if code != 0 or len(values) != width * repetitions or any(group[:2] != report['cases'][name]['correctness'] for group in groups) or any(v < 0 for v in values):
+            raise RuntimeError(f'invalid process/output: {name}/{language}: status {code}: {values}')
         retained = groups[5:] if repetitions > 1 else groups
         intervals = [statistics.mean(group[i] for group in retained) for i in range(2, width)]
         return {**dict(zip(['append_ns', 'finalize_ns', 'checksum_ns', 'clock_pair_ns'], intervals)), 'rss_kib': rss, 'wall_ms': wall}
@@ -166,7 +170,10 @@ def main():
                     order.append(f'{name}/{language}')
             report['order'].append(order)
             with tempfile.TemporaryFile() as stdout:
-                _, rss, wall = harness.spawn([str(startup)], stdout.fileno())
+                code, rss, wall = harness.spawn([str(startup)], stdout.fileno())
+                stdout.seek(0)
+                if code != 0 or stdout.read() != b'':
+                    raise RuntimeError(f'invalid startup control: status {code}')
             report['startup_samples'].append({'round': round_index + 1, 'rss_kib': rss, 'wall_ms': wall})
             (out / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
             print(f'round {round_index + 1}: {repeat + 1}/15', flush=True)

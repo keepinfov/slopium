@@ -1,104 +1,33 @@
-; A string built once, out of a buffer that grows.
-;
-; This is `core` and not `std` (`D-083`): a buffer needs an allocator and not
-; an operating system, so a freestanding program gets it.
-;
-; `concat` allocates a fresh `String` and copies both sides, so accumulating a
-; document with `(set out (concat (& out) (& piece)))` copies everything written
-; so far on every piece and is quadratic in the length of the result. A builder
-; writes each piece into one buffer and allocates once, at the end (`D-145`).
-;
-; The buffer is a `(List u8)`. Every integer is one machine word wide whatever
-; its type says, so that is a word per byte — the same shape `core:string`'s
-; `from-bytes` already takes. Long pieces are copied in one runtime call
-; (`sl_rt_builder_write_bytes`); short pieces skip the extra pass over the
-; buffer. Growing the list still takes one `push` per byte (`D-124`).
-
+; A byte-packed owner over ordinary words (`D-167`). Each full word contains
+; eight low-byte-first bytes; a partial word stays in the scalar tail. List
+; growth and structural clone/drop keep their ordinary ownership contracts.
+; Public fields remain constructible, so every operation validates metadata.
+(take core:string concat substring (from-i64 :as reference-i64))
 (export Builder new write-str write-byte write-i64 write-u64 size build)
-
-(struct Builder ((bytes (List u8|)
-
-(extern "sl_rt_string_from_bytes" (bytes-raw (bytes &(Slice u8))) -> String)
-
 (extern "sl_rt_string_byte" (byte-raw (text &String) (length i64) (index i64)) -> i64)
+(extern "sl_rt_string_from_words"
+  (words-raw (words &(Slice u64)) (tail u64) (used i64))
+  -> String)
 
-; The words are already there — `write-str` grows the buffer first — and this
-; fills the last of them. The string's length is explicit because `&String`
-; crosses as a pointer alone and a piece may contain NUL (`D-079`).
-(extern "sl_rt_builder_write_bytes"
-  (write-bytes-raw (bytes &mut (List u8)) (text &String) (length i64))
-  -> unit)
+(extern "sl_rt_string_from_bytes" (reference-bytes (bytes &(Slice u8))) -> String)
+(fn core-byte-string ((byte u8)) -> String
+  (let bytes (list byte))
+  (let view (slice &bytes 0 1))
+  (reference-bytes &view))
 
-; The empty `(list)` takes its element type from the field being built, which
-; is the same reason `core:map` builds its bucket array in the struct literal.
-(fn new () -> Builder
-  (Builder :bytes (list)))
-
-(fn size ((builder &Builder)) -> i64
-  (match builder
-    ((Builder :bytes bytes) (len bytes|)
-
-(fn write-byte ((into &mut Builder) (byte u8)) -> unit
-  (match into
-    ((Builder :bytes bytes) (push bytes byte|)
-
-; C may not resize a list it was handed (`D-124`), so bulk copying needs a
-; zero-filled tail first. For pieces of at most one word, the second pass and
-; its extra call cost more than reading the source bytes directly.
-(fn write-str ((into &mut Builder) (text &String)) -> unit
-  (let width (len text))
-  (let mut index 0)
-  (if (<= width 8)
-    (while (< index width)
-      (write-byte into (as u8 (byte-raw text width index)))
-      (set index (+ index 1)))
-    (match into
-      ((Builder :bytes bytes)
-        (while (< index width)
-          (push bytes (as u8 0))
-          (set index (+ index 1)))
-        (write-bytes-raw bytes text width|)
-
-; Emit the higher digits first, so the call stack holds at most twenty
-; magnitudes instead of allocating a temporary list (`D-166`). Zero reaches
-; the final write directly and produces its one digit.
-(fn write-u64 ((into &mut Builder) (value u64)) -> unit
-  (when (>= value 10)
-    (write-u64 into (/ value 10)))
-  (write-byte into (as u8 (+ 48 (as i64 (% value 10|)
-
-; A sign and a magnitude. The magnitude of the smallest `i64` has no `i64` to
-; hold it, so it is taken one below and put back as a `u64`, exactly as
-; `core:string`'s `from-i64` does.
-(fn write-i64 ((into &mut Builder) (value i64)) -> unit
-  (if (< value 0)
-    (do
-      (write-byte into 45)
-      (write-u64 into (+ (as u64 (- (+ value 1))) 1)))
-    (write-u64 into (as u64 value|)
-
-; The one allocation. The builder is consumed, because the bytes leave with the
-; string and a buffer that has been handed over is not one to keep writing to.
-(fn build ((builder Builder)) -> String
-  (match builder
-    ((Builder :bytes bytes)
-      (let view (slice &bytes 0 (len &bytes)))
-      (bytes-raw &view|)
-
-; Private foundation for the D-167 builder; the public Builder switches later.
-(struct PackedStorage ((words (List u64)) (tail u64) (used i64)))
+(struct Builder ((words (List u64)) (tail u64) (used i64)))
 (extern "sl_rt_panic" (storage-panic (message &String)) -> unit)
-(fn storage-new () -> PackedStorage
-  (PackedStorage :words (list) :tail 0 :used 0))
+(fn new () -> Builder
+  (Builder :words (list) :tail 0 :used 0))
 (fn (inline) storage-valid-parts ((count i64) (tail u64) (used i64)) -> bool
   (and (>= used 0)
        (= count (shr used 3))
        (= (shr tail (as u64 (* (bit-and used 7) 8))) 0)))
-(fn storage-valid ((storage &PackedStorage)) -> bool
+(fn storage-valid ((storage &Builder)) -> bool
   (match storage
-    ((PackedStorage :words words :tail tail :used used)
+    ((Builder :words words :tail tail :used used)
       (storage-valid-parts (len words) (clone tail) (clone used|)
-(fn storage-check ((storage &PackedStorage)) -> unit
+(fn storage-check ((storage &Builder)) -> unit
   (when (not (storage-valid storage))
     (storage-panic &"builder storage: invalid state")))
 (fn storage-length ((used i64) (extra i64)) -> i64
@@ -109,10 +38,10 @@
   (+ used extra))
 ; Extend initialized bytes with zero, preserving a valid owner at both ends.
 ; A full tail becomes the first new word; capacity remains the List's concern.
-(fn storage-grow-zero ((storage &mut PackedStorage) (extra i64)) -> unit
+(fn storage-grow-zero ((storage &mut Builder) (extra i64)) -> unit
   (storage-check storage)
   (match storage
-    ((PackedStorage :words words :tail tail :used used)
+    ((Builder :words words :tail tail :used used)
       (let needed (storage-length (clone used) extra))
       (let complete (shr needed 3))
       (let mut count (len words))
@@ -125,23 +54,23 @@
         (set count (+ count 1)))
       (set used needed|)
 (test "packed storage starts empty and survives zero growth"
-  (let mut storage (storage-new))
+  (let mut storage (new))
   (storage-grow-zero &mut storage 0)
   (storage-valid &storage))
 (test "packed storage preserves a partial tail without completing a word"
-  (let mut storage (PackedStorage :words (list) :tail 0x4241 :used 2))
+  (let mut storage (Builder :words (list) :tail 0x4241 :used 2))
   (storage-grow-zero &mut storage 5)
   (match &storage
-    ((PackedStorage :words words :tail tail :used used)
+    ((Builder :words words :tail tail :used used)
       (and (= (len words) 0)
            (= (clone tail) 0x4241)
            (= (clone used) 7)
            (storage-valid &storage|)
 (test "packed storage completes a tail into initialized words"
-  (let mut storage (PackedStorage :words (list) :tail 0x4241 :used 2))
+  (let mut storage (Builder :words (list) :tail 0x4241 :used 2))
   (storage-grow-zero &mut storage 15)
   (match &storage
-    ((PackedStorage :words words :tail tail :used used)
+    ((Builder :words words :tail tail :used used)
       (and (= (len words) 2)
            (= (get words 0) (as u64 0x4241))
            (= (get words 1) (as u64 0))
@@ -149,7 +78,7 @@
            (= (clone used) 17)
            (storage-valid &storage|)
 (test "packed storage crosses repeated capacity boundaries"
-  (let mut storage (storage-new))
+  (let mut storage (new))
   (let mut length 0)
   (let mut valid true)
   (while (< length 1100)
@@ -159,17 +88,17 @@
   valid)
 (test "packed storage clone keeps an independent owner"
   (let mut original
-    (PackedStorage :words (list (as u64 0x4847464544434241)) :tail 0x4a49 :used 10))
+    (Builder :words (list (as u64 0x4847464544434241)) :tail 0x4a49 :used 10))
   (let mut copied (clone original))
   (storage-grow-zero &mut copied 70)
   (storage-grow-zero &mut original 1)
   (and (storage-valid &original)
     (storage-valid &copied)
     (match &original
-      ((PackedStorage :words words :tail tail :used used)
+      ((Builder :words words :tail tail :used used)
         (and (= (len words) 1) (= (clone tail) 0x4a49) (= (clone used) 11))))
     (match &copied
-      ((PackedStorage :words words :tail tail :used used)
+      ((Builder :words words :tail tail :used used)
         (and (= (len words) 10)
              (= (get words 1) (as u64 0x4a49))
              (= (clone used) 80|)
@@ -178,10 +107,10 @@
        (= (storage-length 9223372036854775800 7) 9223372036854775807)
        (= (shr (storage-length 9223372036854775807 0) 3) 1152921504606846975)))
 (test "packed storage rejects invalid metadata before growth"
-  (and (not (storage-valid &(PackedStorage :words (list) :tail 0 :used -1)))
-       (not (storage-valid &(PackedStorage :words (list) :tail 0 :used 8)))
-       (not (storage-valid &(PackedStorage :words (list) :tail 256 :used 1)))
-       (not (storage-valid &(PackedStorage :words (list) :tail 1 :used 0|)
+  (and (not (storage-valid &(Builder :words (list) :tail 0 :used -1)))
+       (not (storage-valid &(Builder :words (list) :tail 0 :used 8)))
+       (not (storage-valid &(Builder :words (list) :tail 256 :used 1)))
+       (not (storage-valid &(Builder :words (list) :tail 1 :used 0|)
 (test "packed growth preserves every starting tail offset"
   (let mut offset 0)
   (let mut valid true)
@@ -190,13 +119,13 @@
     (let mut extra 0)
     (while (< extra 20)
       (let mut storage
-        (PackedStorage :words (list (as u64 0x8877665544332211))
-                       :tail tail
-                       :used (+ 8 offset)))
+        (Builder :words (list (as u64 0x8877665544332211))
+                 :tail tail
+                 :used (+ 8 offset)))
       (storage-grow-zero &mut storage extra)
       (set valid (and valid (storage-valid &storage)))
       (match &storage
-        ((PackedStorage :words words :tail remaining :used used)
+        ((Builder :words words :tail remaining :used used)
           (set valid
             (and valid
                  (= (get words 0) (as u64 0x8877665544332211))
@@ -222,9 +151,9 @@
   -> u64)
 
 ; Only checked operations call this after reserving logical length.
-(fn storage-byte-unchecked ((storage &mut PackedStorage) (byte u8)) -> unit
+(fn storage-byte-unchecked ((storage &mut Builder) (byte u8)) -> unit
   (match storage
-    ((PackedStorage :words words :tail tail :used used)
+    ((Builder :words words :tail tail :used used)
       (let offset (bit-and (clone used) 7))
       (let combined (bit-or (clone tail) (shl (as u64 byte) (as u64 (* offset 8)))))
       (if (= offset 7)
@@ -233,16 +162,16 @@
           (set tail 0))
         (set tail combined))
       (set used (+ (clone used) 1|)
-(fn storage-write-byte ((storage &mut PackedStorage) (byte u8)) -> unit
+(fn write-byte ((storage &mut Builder) (byte u8)) -> unit
   (storage-check storage)
   (match storage
-    ((PackedStorage :words _ :tail _ :used used) (storage-length (clone used) 1)))
+    ((Builder :words _ :tail _ :used used) (storage-length (clone used) 1)))
   (storage-byte-unchecked storage byte))
 ; Keep checked scalar metadata live through growth, so even one-byte pieces
 ; avoid repeated owner traversals. C sees sized words only during its borrow.
-(fn storage-write-str ((storage &mut PackedStorage) (text &String)) -> unit
+(fn write-str ((storage &mut Builder) (text &String)) -> unit
   (match storage
-    ((PackedStorage :words words :tail tail :used used)
+    ((Builder :words words :tail tail :used used)
       (let old-used (clone used))
       (let old-tail (clone tail))
       (let mut count (len words))
@@ -263,7 +192,7 @@
         (set used needed|)
 
 ; The existing quotient-first algorithm emits at most twenty decimal digits.
-(fn storage-digits ((storage &mut PackedStorage) (value u64)) -> unit
+(fn storage-digits ((storage &mut Builder) (value u64)) -> unit
   (when (>= value 10)
     (storage-digits storage (/ value 10)))
   (storage-byte-unchecked storage (as u8 (+ 48 (as i64 (% value 10|)
@@ -275,26 +204,25 @@
       (set remaining (/ remaining 10))
       (set width (+ width 1)))
     (storage-length used width)))
-(fn storage-write-u64 ((storage &mut PackedStorage) (value u64)) -> unit
+(fn write-u64 ((storage &mut Builder) (value u64)) -> unit
   (storage-check storage)
   (match storage
-    ((PackedStorage :words _ :tail _ :used used)
-      (storage-integer-room (clone used) value 0)))
+    ((Builder :words _ :tail _ :used used) (storage-integer-room (clone used) value 0)))
   (storage-digits storage value))
-(fn storage-write-i64 ((storage &mut PackedStorage) (value i64)) -> unit
+(fn write-i64 ((storage &mut Builder) (value i64)) -> unit
   (storage-check storage)
   (let magnitude (if (< value 0) (+ (as u64 (- (+ value 1))) 1) (as u64 value)))
   (match storage
-    ((PackedStorage :words _ :tail _ :used used)
+    ((Builder :words _ :tail _ :used used)
       (storage-integer-room (clone used) magnitude (if (< value 0) 1 0))))
   (when (< value 0)
     (storage-byte-unchecked storage 45))
   (storage-digits storage magnitude))
 
-; Compare private storage without exporting a reader or finalization operation.
-(fn storage-test-equal ((storage &PackedStorage) (text &String)) -> bool
+; Compare packed storage without exporting a reader or test operation.
+(fn storage-test-equal ((storage &Builder) (text &String)) -> bool
   (match storage
-    ((PackedStorage :words words :tail tail :used used)
+    ((Builder :words words :tail tail :used used)
       (let mut valid (and (storage-valid storage) (= (clone used) (len text))))
       (let mut index 0)
       (while (< index (clone used))
@@ -313,61 +241,58 @@
   (while (< offset 8)
     (let mut width 0)
     (while (<= width (len &text))
-      (let mut storage (storage-new))
-      (let mut reference (new))
-      (let mut prefix 0)
-      (while (< prefix offset)
-        (storage-write-byte &mut storage 255)
-        (write-byte &mut reference 255)
-        (set prefix (+ prefix 1)))
-      (let mut source (new))
-      (let mut source-index 0)
-      (while (< source-index width)
-        (write-byte &mut source (as u8 (byte-raw &text (len &text) source-index)))
-        (set source-index (+ source-index 1)))
-      (let piece (build source))
-      (storage-write-str &mut storage &piece)
-      (write-str &mut reference &piece)
-      (storage-write-str &mut storage &"")
-      (set valid (and valid (storage-test-equal &storage &(build reference))))
+      (let mut storage (new))
+      (let mut prefix "")
+      (let mut index 0)
+      (while (< index offset)
+        (write-byte &mut storage 255)
+        (set prefix (concat &prefix &"\xff"))
+        (set index (+ index 1)))
+      (let piece (substring &text 0 width))
+      (write-str &mut storage &piece)
+      (write-str &mut storage &"")
+      (let expected (concat &prefix &piece))
+      (set valid (and valid (storage-test-equal &storage &expected)))
       (set width (+ width 1)))
     (set offset (+ offset 1)))
   valid)
 (test "packed append keeps integer extremes and zero"
-  (let mut storage (storage-new))
-  (storage-write-i64 &mut storage -9223372036854775808)
-  (storage-write-byte &mut storage 32)
-  (storage-write-u64 &mut storage 18446744073709551615)
-  (storage-write-byte &mut storage 32)
-  (storage-write-i64 &mut storage 9223372036854775807)
-  (storage-write-byte &mut storage 32)
-  (storage-write-u64 &mut storage 0)
+  (let mut storage (new))
+  (write-i64 &mut storage -9223372036854775808)
+  (write-byte &mut storage 32)
+  (write-u64 &mut storage 18446744073709551615)
+  (write-byte &mut storage 32)
+  (write-i64 &mut storage 9223372036854775807)
+  (write-byte &mut storage 32)
+  (write-u64 &mut storage 0)
   (storage-test-equal &storage
     &"-9223372036854775808 18446744073709551615 9223372036854775807 0"))
 
 (test "packed append preserves every byte and repeated mixed growth"
-  (let mut storage (storage-new))
-  (let mut reference (new))
+  (let mut storage (new))
+  (let mut expected "")
   (let piece "\0\x80\xffé0123456789")
   (let mut i 0)
   (while (< i 1024)
     (let byte (as u8 (bit-and i 255)))
-    (storage-write-byte &mut storage byte)
-    (write-byte &mut reference byte)
-    (storage-write-str &mut storage &piece)
-    (write-str &mut reference &piece)
-    (storage-write-i64 &mut storage (- i 512))
-    (write-i64 &mut reference (- i 512))
+    (write-byte &mut storage byte)
+    (let one (core-byte-string byte))
+    (set expected (concat &expected &one))
+    (write-str &mut storage &piece)
+    (set expected (concat &expected &piece))
+    (write-i64 &mut storage (- i 512))
+    (let number (reference-i64 (- i 512)))
+    (set expected (concat &expected &number))
     (set i (+ i 1)))
-  (and (storage-test-equal &storage &(build reference))
-       (storage-test-equal &(storage-new) &"")
+  (and (storage-test-equal &storage &expected)
+       (storage-test-equal &(new) &"")
        (= (len &piece) 15)))
 (test "packed append clones an independent tail and complete words"
-  (let mut original (storage-new))
-  (storage-write-str &mut original &"abcdefgh\0\xff")
+  (let mut original (new))
+  (write-str &mut original &"abcdefgh\0\xff")
   (let mut copied (clone original))
-  (storage-write-str &mut original &"é")
-  (storage-write-u64 &mut copied 18446744073709551615)
+  (write-str &mut original &"é")
+  (write-u64 &mut copied 18446744073709551615)
   (and (storage-test-equal &original &"abcdefgh\0\xffé")
        (storage-test-equal &copied &"abcdefgh\0\xff18446744073709551615")))
 (test "packed integer preflight accepts exact available room"
@@ -376,3 +301,26 @@
   (storage-integer-room 9223372036854775787 18446744073709551615 0)
   (storage-integer-room 9223372036854775787 9223372036854775808 1)
   true)
+
+(fn size ((builder &Builder)) -> i64
+  (storage-check builder)
+  (match builder
+    ((Builder :words _ :tail _ :used used) (clone used|)
+; A fresh String owns its bytes; the consumed word list drops after the copy.
+(fn build ((builder Builder)) -> String
+  (storage-check &builder)
+  (match builder
+    ((Builder :words words :tail tail :used used)
+      (let view (slice &words 0 (len &words)))
+      (words-raw &view tail used|)
+
+(test "packed metadata does not redirect structural clone or drop"
+  (let original (Builder :words (list (as u64 65)) :tail 0 :used 9223372036854775807))
+  (let copied (clone original))
+  (and (not (storage-valid &copied))
+    (match &copied
+      ((Builder :words words :tail tail :used used)
+        (and (= (len words) 1)
+             (= (get words 0) (as u64 65))
+             (= (clone tail) 0)
+             (= (clone used) 9223372036854775807|)

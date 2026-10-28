@@ -57,10 +57,10 @@ allowed_undefined="sl_rt_abort sl_rt_alloc sl_rt_free sl_rt_panic"
 cat > "$work/program.slp" <<'SLP'
 (take core:option Option)
 (take core:string from-i64 to-i64 from-u64 to-u64 hash equals
-  hex-from-u64 hex-prefixed-from-u64)
-(take core:float from-f64 to-f64)
+  hex-from-u64 hex-prefixed-from-u64 concat)
+(take core:float from-f64 to-f64 write-f64)
 (take core:map Map new insert lookup)
-(take core:builder (new :as builder-new) write-str write-i64 write-u64 build)
+(take core:builder (new :as builder-new) write-str write-byte write-i64 write-u64 size build)
 (take core:panic assert)
 
 ; Named `main` and exported, because the link below is asked to validate an
@@ -110,6 +110,22 @@ cat > "$work/program.slp" <<'SLP'
         (& "answer \0\xff42 -9223372036854775808 9223372036854775807 18446744073709551615 0"))
     42 0))
 
+; The public packed owner keeps its qualified float parameter and returns a
+; String independent of a consumed clone, even with no hosted runtime.
+(fn packed-builder-answer () -> i64
+  (let mut out (builder-new))
+  (write-str &mut out &"ABCDEFGH\0\xff")
+  (let snapshot (build (clone out)))
+  (write-byte &mut out 32)
+  (let third (/ (- 0.0 1.0) 3.0))
+  (write-f64 &mut out third)
+  (let number (from-f64 third))
+  (let expected (concat &"ABCDEFGH\0\xff " &number))
+  (let width (size &out))
+  (let text (build out))
+  (if (and (= width (len &expected)) (equals &text &expected)
+           (equals &snapshot &"ABCDEFGH\0\xff")) 42 0))
+
 ; A volatile access is instructions and never a call (`D-067`), which is what
 ; makes a raw pointer usable in a program with no operating system under it. A
 ; byte, a half and a signed narrow read, because those are the ones that need a
@@ -152,7 +168,7 @@ cat > "$work/program.slp" <<'SLP'
                 (match (lookup (& table) (& key))
                   ((Option:Some held)
                     (if (and (= held 2) (= (narrow-answer) 42) (= (pointer-answer) 42)
-                        (= (builder-answer) 42))
+                        (= (builder-answer) 42) (= (packed-builder-answer) 42))
                       (do
                         ; And unsigned text, which is the one thing `D-107`
                         ; added to the library.

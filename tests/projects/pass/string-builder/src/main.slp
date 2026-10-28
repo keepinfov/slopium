@@ -159,11 +159,40 @@
   (write-u64 &mut out 1)
   (equal-text &(build out) &"-9223372036854775808 9223372036854775807 -101"))
 
-(test "the storage foundation preserves public builder construction"
-  (let mut out (Builder :bytes (list (as u8 65) (as u8 0))))
+(test "public packed construction preserves the same bytes and clone"
+  (let mut out (Builder :words (list) :tail 65 :used 2))
   (let copied (clone out))
   (let fields-agree
     (match &out
-      ((Builder :bytes bytes) (= (len bytes) 2))))
+      ((Builder :words words :tail tail :used used)
+        (and (= (len words) 0) (= (clone tail) 65) (= (clone used) 2)))))
   (write-byte &mut out 255)
   (and fields-agree (equals &(build out) &"A\0\xff") (equals &(build copied) &"A\0")))
+
+(test "public packed words and a partial tail finalize independently"
+  (let out (Builder :words (list (as u64 0x4847464544434241)) :tail 0x4a49 :used 10))
+  (let copied (clone out))
+  (and (= (size &out) 10)
+       (equals &(build out) &"ABCDEFGHIJ")
+       (equals &(build copied) &"ABCDEFGHIJ")))
+
+(test "a built clone owns its bytes while the original keeps growing"
+  (let mut original (new))
+  (write-str &mut original &"ABCDEFGH\0\xff")
+  (let snapshot (build (clone original)))
+  (write-str &mut original &"é")
+  (and (= (size &original) 12)
+       (equals &snapshot &"ABCDEFGH\0\xff")
+       (equals &(build original) &"ABCDEFGH\0\xffé")
+       (equals &snapshot &"ABCDEFGH\0\xff")))
+
+(test "a word view ends before the owner grows again"
+  (let mut out (new))
+  (write-str &mut out &"abcdefgh")
+  (let first
+    (match &out
+      ((Builder :words words :tail _ :used _)
+        (let view (slice words 0 (len words)))
+        (get &view 0))))
+  (write-str &mut out &"ijklmnop")
+  (and (= first (as u64 0x6867666564636261)) (equals &(build out) &"abcdefghijklmnop")))

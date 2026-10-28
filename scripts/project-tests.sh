@@ -717,6 +717,7 @@ if [[ "$main_after_body" == "$main_after_interface" ]]; then
   exit 1
 fi
 echo "project-tests: module object cache ... ok"
+SLOPIC="$compiler" SLOPIUM="$manager" "$workspace_dir/scripts/builder-cache-check.sh" "$host_target"
 
 # A `const` is inlined wherever it is used, so its value is interface: a
 # dependent that is not rebuilt keeps the old number compiled into it. Until

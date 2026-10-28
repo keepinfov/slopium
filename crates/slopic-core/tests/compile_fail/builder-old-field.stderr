@@ -1,0 +1,19 @@
+builder-old-field.slp:5:12: error[SL0200]: `Builder` expects 3 named fields as `:field value` pairs
+  |
+ 5 |   (let out (Builder :bytes (list (as u8 65))))
+  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+builder-old-field.slp:5:12: error[SL0200]: missing field `words` in `Builder`
+  |
+ 5 |   (let out (Builder :bytes (list (as u8 65))))
+  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+builder-old-field.slp:5:12: error[SL0200]: missing field `tail` in `Builder`
+  |
+ 5 |   (let out (Builder :bytes (list (as u8 65))))
+  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+builder-old-field.slp:5:12: error[SL0200]: missing field `used` in `Builder`
+  |
+ 5 |   (let out (Builder :bytes (list (as u8 65))))
+  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
